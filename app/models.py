@@ -97,6 +97,13 @@ class WorkflowModifyRequest(BaseModel):
     expected_hash: str | None = None
 
 
+class WorkflowRunDraftRequest(BaseModel):
+    app_id: str = Field(min_length=1)
+    inputs: dict[str, Any]
+    files: list[dict[str, Any]] | None = None
+    timeout_seconds: float = Field(default=120, gt=0)
+
+
 class ValidationIssue(BaseModel):
     code: str
     message: str

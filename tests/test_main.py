@@ -5,7 +5,7 @@ from app.agent.editor import WorkflowEditResult
 from app.agent.planner import fallback_plan
 from app.compiler.dify import DifyDslCompiler
 from app.config import Settings
-from app.dify.client import DifyDraftSyncResult, DifyDraftWorkflow
+from app.dify.client import DifyDraftRunResult, DifyDraftSyncResult, DifyDraftWorkflow
 from app.dify.version import DifyVersionInfo
 from app.main import app
 
@@ -174,14 +174,112 @@ def test_workflow_modification_expected_hash_conflict(monkeypatch) -> None:
     assert response.json()["detail"]["code"] == "DRAFT_HASH_MISMATCH"
 
 
+def test_run_draft_workflow_api_returns_summary(monkeypatch) -> None:
+    settings = _test_settings()
+    seen = {}
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def run_draft_workflow(self, app_id, *, inputs, files=None, timeout_seconds=120):
+            seen["app_id"] = app_id
+            seen["inputs"] = inputs
+            seen["files"] = files
+            seen["timeout_seconds"] = timeout_seconds
+            return DifyDraftRunResult(
+                ok=True,
+                status="succeeded",
+                app_id=app_id,
+                workflow_url=settings.workflow_url(app_id),
+                workflow_run_id="run-1",
+                task_id="task-1",
+                outputs={"answer": "ok"},
+                elapsed_time=1.0,
+                total_tokens=2,
+                total_steps=3,
+                events_summary={"events": 2},
+                final_event={"event": "workflow_finished", "data": {"status": "succeeded"}},
+            )
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/run/draft",
+            json={"app_id": "app-1", "inputs": {"query": "hi"}, "files": [], "timeout_seconds": 5},
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert data["status"] == "succeeded"
+    assert data["outputs"] == {"answer": "ok"}
+    assert seen == {"app_id": "app-1", "inputs": {"query": "hi"}, "files": [], "timeout_seconds": 5.0}
+
+
+def test_run_draft_workflow_api_requires_inputs(monkeypatch) -> None:
+    monkeypatch.setattr("app.main.load_settings", _test_settings)
+
+    with TestClient(app) as client:
+        response = client.post("/api/workflows/run/draft", json={"app_id": "app-1"})
+
+    assert response.status_code == 422
+
+
+def test_run_draft_workflow_api_can_return_timeout(monkeypatch) -> None:
+    settings = _test_settings()
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def run_draft_workflow(self, app_id, *, inputs, files=None, timeout_seconds=120):
+            return DifyDraftRunResult(
+                ok=False,
+                status="timeout",
+                app_id=app_id,
+                workflow_url=settings.workflow_url(app_id),
+                error="timed out",
+                events_summary={"events": 1},
+            )
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/run/draft",
+            json={"app_id": "app-1", "inputs": {"query": "hi"}, "timeout_seconds": 1},
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is False
+    assert data["status"] == "timeout"
+
+
 def _test_settings() -> Settings:
     return Settings.from_env(
         {
             "DIFY_SOURCE_DIR": "../dify",
             "OPENAI_API_KEY": "token",
             "DIFY_CONSOLE_WEB_BASE": "http://dify.local",
-            "DIFY_DEFAULT_MODEL_PROVIDER": "openai",
-            "DIFY_DEFAULT_MODEL_NAME": "gpt-4o-mini",
+            "DIFY_DEFAULT_MODEL_PROVIDER": "langgenius/tongyi/tongyi",
+            "DIFY_DEFAULT_MODEL_NAME": "qwen3.5-plus",
         },
         validate_dify=False,
     )

@@ -51,6 +51,19 @@ accept `app_id`, `message`, and optional `expected_hash`; apply returns the new
 Dify draft `hash`. Third-stage edits still support only the seven stabilized
 node types and do not publish the workflow.
 
+The fourth-stage validation flow runs an existing Dify workflow draft with
+explicit test inputs and returns a blocking summary:
+
+```text
+app_id + inputs -> Dify draft run SSE -> terminal event -> run summary
+```
+
+Use `POST /api/workflows/run/draft` with `app_id` and `inputs`. The sidecar
+does not generate test inputs, does not publish the workflow, and does not
+assume an OpenAI provider; generated workflows use the configured
+`DIFY_DEFAULT_MODEL_PROVIDER` / `DIFY_DEFAULT_MODEL_NAME` values, such as
+Tongyi/Qwen.
+
 ## Setup
 
 ```bash
@@ -116,6 +129,14 @@ Apply the change to the Dify draft:
 curl -X POST http://127.0.0.1:8000/api/workflows/modify/apply \
   -H 'Content-Type: application/json' \
   -d '{"app_id":"YOUR_APP_ID","message":"Make the final answer warmer","expected_hash":"OPTIONAL_CURRENT_HASH"}'
+```
+
+Run a Dify workflow draft with explicit inputs:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/workflows/run/draft \
+  -H 'Content-Type: application/json' \
+  -d '{"app_id":"YOUR_APP_ID","inputs":{"query":"我要投诉订单配送太慢"},"timeout_seconds":120}'
 ```
 
 ## Supported Nodes

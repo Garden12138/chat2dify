@@ -19,7 +19,7 @@ from app.dify.graph import (
     decompile_dify_graph,
 )
 from app.dify.version import read_dify_version_info
-from app.models import WorkflowModifyRequest, WorkflowRequest
+from app.models import WorkflowModifyRequest, WorkflowRequest, WorkflowRunDraftRequest
 from app.validator import has_errors, validate_dsl, validate_plan
 
 
@@ -121,6 +121,22 @@ def draft_workflow_modification(request: WorkflowModifyRequest) -> dict:
 @app.post("/api/workflows/modify/apply")
 def apply_workflow_modification(request: WorkflowModifyRequest) -> dict:
     return _modify_workflow(request, apply=True)
+
+
+@app.post("/api/workflows/run/draft")
+def run_draft_workflow(request: WorkflowRunDraftRequest) -> dict:
+    settings = load_settings()
+    try:
+        with DifyClient(settings) as client:
+            result = client.run_draft_workflow(
+                request.app_id,
+                inputs=request.inputs,
+                files=request.files,
+                timeout_seconds=request.timeout_seconds,
+            )
+    except DifyClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return asdict(result)
 
 
 def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:

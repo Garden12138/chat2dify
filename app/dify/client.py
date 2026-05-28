@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
+import time
 from typing import Any
 
 import httpx
 
 from app.config import Settings
+from app.dify.sse import SseParseIssue, iter_sse_events, summarize_events, terminal_event
 
 
 CSRF_HEADER_NAME = "X-CSRF-Token"
@@ -88,6 +90,27 @@ class DifyDraftSyncResult:
             updated_at=str(payload.get("updated_at", "")),
             workflow_url=workflow_url,
         )
+
+
+@dataclass(frozen=True)
+class DifyDraftRunResult:
+    ok: bool
+    status: str
+    app_id: str
+    workflow_url: str
+    workflow_run_id: str | None = None
+    task_id: str | None = None
+    outputs: dict[str, Any] | None = None
+    error: str | None = None
+    elapsed_time: float | None = None
+    total_tokens: int | None = None
+    total_steps: int | None = None
+    events_summary: dict[str, Any] | None = None
+    final_event: dict[str, Any] | None = None
+
+
+class DifyRunTimeoutError(TimeoutError):
+    """Raised internally when a Dify draft run stream exceeds the caller timeout."""
 
 
 class DifyClient:
@@ -210,6 +233,31 @@ class DifyClient:
             raise DifyClientError("Dify draft sync response must be a JSON object.")
         return DifyDraftSyncResult.from_payload(body, workflow_url=self.settings.workflow_url(app_id))
 
+    def run_draft_workflow(
+        self,
+        app_id: str,
+        *,
+        inputs: dict[str, Any],
+        files: list[dict[str, Any]] | None = None,
+        timeout_seconds: float = 120,
+    ) -> DifyDraftRunResult:
+        self._ensure_logged_in()
+        payload: dict[str, Any] = {"inputs": inputs}
+        if files is not None:
+            payload["files"] = files
+        result = self._run_draft_workflow_once(app_id, payload=payload, timeout_seconds=timeout_seconds)
+        if result is not None:
+            return result
+        if self.refresh_token():
+            result = self._run_draft_workflow_once(app_id, payload=payload, timeout_seconds=timeout_seconds)
+            if result is not None:
+                return result
+        self.login()
+        result = self._run_draft_workflow_once(app_id, payload=payload, timeout_seconds=timeout_seconds)
+        if result is None:
+            raise DifyClientError("Dify draft run authorization failed after login.")
+        return result
+
     def _ensure_logged_in(self) -> None:
         if not self.csrf_token:
             self.login()
@@ -226,6 +274,83 @@ class DifyClient:
             return self._post(path, json=payload, headers=self._csrf_headers())
         self.login()
         return self._post(path, json=payload, headers=self._csrf_headers())
+
+    def _run_draft_workflow_once(
+        self,
+        app_id: str,
+        *,
+        payload: dict[str, Any],
+        timeout_seconds: float,
+    ) -> DifyDraftRunResult | None:
+        path = f"/apps/{app_id}/workflows/draft/run"
+        try:
+            with self._client.stream(
+                "POST",
+                path,
+                json=payload,
+                headers=self._csrf_headers(),
+                timeout=timeout_seconds,
+            ) as response:
+                if response.status_code == 401:
+                    response.read()
+                    return None
+                if response.status_code >= 400:
+                    self._raise_for_stream_response(response)
+                return self._draft_run_result_from_stream(
+                    app_id=app_id,
+                    lines=response.iter_lines(),
+                    timeout_seconds=timeout_seconds,
+                )
+        except DifyRunTimeoutError:
+            return _timeout_run_result(app_id=app_id, workflow_url=self.settings.workflow_url(app_id))
+        except httpx.TimeoutException:
+            return _timeout_run_result(app_id=app_id, workflow_url=self.settings.workflow_url(app_id))
+        except httpx.RequestError as exc:
+            raise DifyClientError(f"Dify request failed: {exc}") from exc
+
+    def _draft_run_result_from_stream(
+        self,
+        *,
+        app_id: str,
+        lines: Any,
+        timeout_seconds: float,
+    ) -> DifyDraftRunResult:
+        events: list[dict[str, Any]] = []
+        parse_errors: list[SseParseIssue] = []
+        final: dict[str, Any] | None = None
+        deadline = time.monotonic() + timeout_seconds
+        try:
+            for parsed in iter_sse_events(_lines_until_deadline(lines, deadline)):
+                if isinstance(parsed, SseParseIssue):
+                    parse_errors.append(parsed)
+                    continue
+                events.append(parsed)
+                final = terminal_event(events)
+                if final is not None:
+                    break
+        except (DifyRunTimeoutError, httpx.TimeoutException):
+            return _timeout_run_result(
+                app_id=app_id,
+                workflow_url=self.settings.workflow_url(app_id),
+                events=events,
+                parse_errors=parse_errors,
+            )
+        if final is None:
+            return DifyDraftRunResult(
+                ok=False,
+                status="error",
+                app_id=app_id,
+                workflow_url=self.settings.workflow_url(app_id),
+                error="Dify draft run stream ended before a terminal event.",
+                events_summary=summarize_events(events, parse_errors),
+            )
+        return _run_result_from_terminal_event(
+            app_id=app_id,
+            workflow_url=self.settings.workflow_url(app_id),
+            events=events,
+            parse_errors=parse_errors,
+            final_event=final,
+        )
 
     def _get_with_auth_retry(self, path: str) -> httpx.Response:
         response = self._get(path, headers=self._csrf_headers())
@@ -273,3 +398,103 @@ class DifyClient:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise DifyClientError(f"Dify request failed: {response.status_code} {response.text}") from exc
+
+    @staticmethod
+    def _raise_for_stream_response(response: httpx.Response) -> None:
+        body = response.read().decode("utf-8", errors="replace")
+        if response.status_code == 409:
+            raise DifyConflictError(f"Dify request failed: {response.status_code} {body}")
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise DifyClientError(f"Dify request failed: {response.status_code} {body}") from exc
+
+
+def _lines_until_deadline(lines: Any, deadline: float) -> Any:
+    for line in lines:
+        if time.monotonic() > deadline:
+            raise DifyRunTimeoutError()
+        yield line
+
+
+def _run_result_from_terminal_event(
+    *,
+    app_id: str,
+    workflow_url: str,
+    events: list[dict[str, Any]],
+    parse_errors: list[SseParseIssue],
+    final_event: dict[str, Any],
+) -> DifyDraftRunResult:
+    event_type = str(final_event.get("event", "error"))
+    data = final_event.get("data") if isinstance(final_event.get("data"), dict) else {}
+    status = _status_from_final_event(event_type, data)
+    error = _error_from_final_event(final_event, data)
+    return DifyDraftRunResult(
+        ok=event_type == "workflow_finished" and status == "succeeded",
+        status=status,
+        app_id=app_id,
+        workflow_url=workflow_url,
+        workflow_run_id=_string_or_none(final_event.get("workflow_run_id") or data.get("workflow_run_id")),
+        task_id=_string_or_none(final_event.get("task_id") or data.get("task_id")),
+        outputs=data.get("outputs") if isinstance(data.get("outputs"), dict) else None,
+        error=error,
+        elapsed_time=_float_or_none(data.get("elapsed_time")),
+        total_tokens=_int_or_none(data.get("total_tokens")),
+        total_steps=_int_or_none(data.get("total_steps")),
+        events_summary=summarize_events(events, parse_errors),
+        final_event=final_event,
+    )
+
+def _timeout_run_result(
+    *,
+    app_id: str,
+    workflow_url: str,
+    events: list[dict[str, Any]] | None = None,
+    parse_errors: list[SseParseIssue] | None = None,
+) -> DifyDraftRunResult:
+    return DifyDraftRunResult(
+        ok=False,
+        status="timeout",
+        app_id=app_id,
+        workflow_url=workflow_url,
+        error="Dify draft run timed out before a terminal event.",
+        events_summary=summarize_events(events or [], parse_errors or []),
+    )
+
+
+def _status_from_final_event(event_type: str, data: dict[str, Any]) -> str:
+    if event_type == "workflow_paused":
+        return "paused"
+    if event_type == "error":
+        return "error"
+    status = data.get("status")
+    return str(status) if status else event_type
+
+
+def _error_from_final_event(final_event: dict[str, Any], data: dict[str, Any]) -> str | None:
+    error = data.get("error") or final_event.get("message") or final_event.get("error")
+    return str(error) if error else None
+
+
+def _string_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _int_or_none(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

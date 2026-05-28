@@ -186,6 +186,120 @@ def test_sync_draft_workflow_conflict_is_typed() -> None:
         client.sync_draft_workflow("app-1", graph={"nodes": [], "edges": []}, features={}, hash="old")
 
 
+def test_run_draft_workflow_consumes_sse_and_sends_csrf_cookie() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/console/api/login":
+            return httpx.Response(200, json={"result": "success"}, headers=[("set-cookie", "csrf_token=csrf123; Path=/")])
+        if request.url.path == "/console/api/apps/app-1/workflows/draft/run":
+            body = json.loads(request.content)
+            seen["inputs"] = body["inputs"]
+            seen["files"] = body["files"]
+            seen["csrf"] = request.headers.get(CSRF_HEADER_NAME, "")
+            seen["cookie"] = request.headers.get("cookie", "")
+            return httpx.Response(
+                200,
+                content=(
+                    'data: {"event":"workflow_started","task_id":"task-1","workflow_run_id":"run-1"}\n\n'
+                    'data: {"event":"node_started","workflow_run_id":"run-1"}\n\n'
+                    'data: {"event":"node_finished","workflow_run_id":"run-1"}\n\n'
+                    'data: {"event":"workflow_finished","task_id":"task-1","workflow_run_id":"run-1",'
+                    '"data":{"status":"succeeded","outputs":{"answer":"ok"},"elapsed_time":1.2,'
+                    '"total_tokens":12,"total_steps":3}}\n\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+    result = client.run_draft_workflow(
+        "app-1",
+        inputs={"query": "hi"},
+        files=[{"type": "image"}],
+    )
+
+    assert result.ok is True
+    assert result.status == "succeeded"
+    assert result.outputs == {"answer": "ok"}
+    assert result.workflow_run_id == "run-1"
+    assert result.task_id == "task-1"
+    assert result.total_tokens == 12
+    assert result.total_steps == 3
+    assert result.events_summary["node_started"] == 1
+    assert seen["inputs"] == {"query": "hi"}
+    assert seen["files"] == [{"type": "image"}]
+    assert seen["csrf"] == "csrf123"
+    assert "csrf_token=csrf123" in seen["cookie"]
+
+
+def test_run_draft_workflow_failed_status_is_not_ok() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/console/api/login":
+            return httpx.Response(200, json={"result": "success"}, headers=[("set-cookie", "csrf_token=csrf123; Path=/")])
+        if request.url.path == "/console/api/apps/app-1/workflows/draft/run":
+            return httpx.Response(
+                200,
+                content=(
+                    'data: {"event":"workflow_finished","workflow_run_id":"run-1",'
+                    '"data":{"status":"failed","error":"bad input","outputs":{}}}\n\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+    result = client.run_draft_workflow("app-1", inputs={"query": "hi"})
+
+    assert result.ok is False
+    assert result.status == "failed"
+    assert result.error == "bad input"
+
+
+def test_run_draft_workflow_refreshes_after_401() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(f"{request.method} {request.url.path}")
+        if request.url.path == "/console/api/login":
+            return httpx.Response(200, json={"result": "success"}, headers=[("set-cookie", "csrf_token=csrf123; Path=/")])
+        if request.url.path == "/console/api/refresh-token":
+            return httpx.Response(200, json={"result": "success"})
+        if request.url.path == "/console/api/apps/app-1/workflows/draft/run":
+            if calls.count("POST /console/api/apps/app-1/workflows/draft/run") == 1:
+                return httpx.Response(401, json={"message": "expired"})
+            return httpx.Response(
+                200,
+                content='data: {"event":"workflow_finished","workflow_run_id":"run-1","data":{"status":"succeeded"}}\n\n',
+                headers={"content-type": "text/event-stream"},
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+    result = client.run_draft_workflow("app-1", inputs={})
+
+    assert result.ok is True
+    assert calls.count("POST /console/api/apps/app-1/workflows/draft/run") == 2
+    assert "POST /console/api/refresh-token" in calls
+
+
+def test_run_draft_workflow_dify_error_is_wrapped() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/console/api/login":
+            return httpx.Response(200, json={"result": "success"}, headers=[("set-cookie", "csrf_token=csrf123; Path=/")])
+        if request.url.path == "/console/api/apps/app-1/workflows/draft/run":
+            return httpx.Response(500, text="boom")
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+
+    with pytest.raises(Exception) as exc:
+        client.run_draft_workflow("app-1", inputs={})
+
+    assert exc.value.__class__.__name__ == "DifyClientError"
+    assert "boom" in str(exc.value)
+
+
 def test_connection_error_is_wrapped() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("connection refused", request=request)
