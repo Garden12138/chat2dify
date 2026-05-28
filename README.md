@@ -1,2 +1,104 @@
 # chat2dify
-Generate Dify Workflows via Natural Language Conversation
+
+Generate Dify Workflows via Natural Language Conversation.
+
+## Phase 1 MVP
+
+This repository runs as an independent FastAPI sidecar. It does not modify Dify
+source code and targets the sibling latest Dify checkout:
+
+```env
+DIFY_SOURCE_DIR=../dify
+DIFY_CONSOLE_API_BASE=http://localhost:5001/console/api
+DIFY_CONSOLE_WEB_BASE=http://localhost:3000
+```
+
+`DIFY_SOURCE_DIR` is resolved relative to the `chat2dify` repository root. On
+startup the sidecar verifies that the directory exists and that
+`api/constants/dsl_version.py` can be read. The app DSL version is read from
+that file at runtime instead of being hardcoded.
+
+When running Dify through `../dify/docker/docker-compose.yaml`, the API service
+listens on `5001` inside the Docker network but is not published directly to the
+host. Use the nginx route instead:
+
+```env
+DIFY_CONSOLE_API_BASE=http://127.0.0.1/console/api
+DIFY_CONSOLE_WEB_BASE=http://127.0.0.1
+```
+
+The first-stage flow is:
+
+```text
+user request -> WorkflowPlan IR -> Dify DSL YAML -> validation -> /console/api/apps/imports
+```
+
+The create API returns the imported Dify `app_id` and a console workflow URL in
+the form `/app/{app_id}/workflow`.
+
+## Setup
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+The sidecar reads `.env` from the repository root and lets real environment
+variables override file values. Fill these values before using
+`/api/workflows/create`:
+
+```env
+DIFY_EMAIL=you@example.com
+DIFY_PASSWORD=your-password
+```
+
+If `OPENAI_API_KEY` is not set, the draft endpoint uses a deterministic fallback
+plan (`start -> llm -> end`) so the MVP can still produce a valid DSL.
+
+## Run
+
+```bash
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Health check:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+Draft a workflow without importing it:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/workflows/draft \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"Summarize the user input","app_name":"Summary MVP"}'
+```
+
+Create a workflow in Dify:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/workflows/create \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"Summarize the user input","app_name":"Summary MVP"}'
+```
+
+## Supported Nodes
+
+Phase 1 supports these Plan IR node types:
+
+```text
+start, llm, code, if-else, end, http-request, template-transform
+```
+
+Current non-goals: patching an existing canvas, multi-turn incremental edits,
+plugin registry sync, model capability registry, and a custom Dify frontend
+panel.
+
+## Test
+
+```bash
+python3 -m pytest
+```
