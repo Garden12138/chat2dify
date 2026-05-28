@@ -26,9 +26,20 @@ def test_diff_plans_reports_node_parameter_and_edge_changes() -> None:
     change_types = {change["type"] for change in changes}
 
     assert "node_added" in change_types
-    assert "node_updated" in change_types
+    assert "prompt_changed" in change_types
     assert "edge_added" in change_types
     assert "edge_removed" in change_types
+
+
+def test_diff_plans_reports_specific_node_param_changes() -> None:
+    before = fallback_plan("hello", app_name="Diff")
+    after = before.model_copy(deep=True)
+    after.nodes[1].params["model_name"] = "qwen3.5-plus"
+
+    changes = diff_plans(before, after)
+
+    assert changes[0]["type"] == "model_changed"
+    assert changes[0]["field"] == "params.model_name"
 
 
 def test_diff_plans_noop_returns_empty_list() -> None:

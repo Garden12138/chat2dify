@@ -121,9 +121,221 @@ def test_apply_workflow_modification_syncs_dify_draft(monkeypatch) -> None:
     assert data["base_hash"] == "hash-1"
     assert data["new_hash"] == "hash-2"
     assert data["validation"]["ok"] is True
+    assert data["guard"]["ok"] is True
     assert data["sync"]["result"] == "success"
     assert seen["sync_hash"] == "hash-1"
     assert seen["sync_graph"]["nodes"]
+
+
+def test_apply_workflow_modification_blocks_destructive_change(monkeypatch) -> None:
+    settings = _test_settings()
+    compiler = DifyDslCompiler(
+        dsl_version="9.9.9",
+        default_model_provider="openai",
+        default_model_name="gpt-4o-mini",
+    )
+    graph = yaml.safe_load(compiler.compile(fallback_plan("hello", app_name="Loaded")))["workflow"]["graph"]
+    seen = {"synced": False}
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get_draft_workflow(self, _app_id):
+            return DifyDraftWorkflow(
+                id="workflow-1",
+                graph=graph,
+                features={},
+                hash="hash-1",
+                version="draft",
+                environment_variables=[],
+                conversation_variables=[],
+                raw={},
+            )
+
+        def sync_draft_workflow(self, _app_id, **_kwargs):
+            seen["synced"] = True
+            raise AssertionError("destructive changes should be blocked before sync")
+
+    class FakeEditPlanner:
+        def __init__(self, _settings):
+            pass
+
+        def generate(self, _message, *, current_plan, dsl_version):
+            revised = current_plan.model_copy(deep=True)
+            revised.nodes = [revised.nodes[0], revised.nodes[2]]
+            revised.edges = [type(revised.edges[0])(source=revised.nodes[0].id, target=revised.nodes[1].id)]
+            revised.nodes[1].params["outputs"] = [{"variable": "answer", "value_selector": ["start", "query"]}]
+            return WorkflowEditResult(plan=revised, raw_plan=revised.model_dump(), attempts=1, repaired=False)
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+    monkeypatch.setattr("app.main.WorkflowEditPlanner", FakeEditPlanner)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/modify/apply",
+            json={"app_id": "app-1", "message": "make it shorter"},
+        )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["code"] == "PLAN_CHANGE_GUARD_BLOCKED"
+    assert detail["guard"]["risk"] == "high"
+    assert seen["synced"] is False
+
+
+def test_apply_workflow_modification_allows_destructive_change_when_confirmed(monkeypatch) -> None:
+    settings = _test_settings()
+    compiler = DifyDslCompiler(
+        dsl_version="9.9.9",
+        default_model_provider="openai",
+        default_model_name="gpt-4o-mini",
+    )
+    graph = yaml.safe_load(compiler.compile(fallback_plan("hello", app_name="Loaded")))["workflow"]["graph"]
+    seen = {"synced": False}
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get_draft_workflow(self, _app_id):
+            return DifyDraftWorkflow(
+                id="workflow-1",
+                graph=graph,
+                features={},
+                hash="hash-1",
+                version="draft",
+                environment_variables=[],
+                conversation_variables=[],
+                raw={},
+            )
+
+        def sync_draft_workflow(self, app_id, **kwargs):
+            seen["synced"] = True
+            return DifyDraftSyncResult(
+                result="success",
+                hash="hash-2",
+                updated_at="123",
+                workflow_url=settings.workflow_url(app_id),
+            )
+
+    class FakeEditPlanner:
+        def __init__(self, _settings):
+            pass
+
+        def generate(self, _message, *, current_plan, dsl_version):
+            revised = current_plan.model_copy(deep=True)
+            revised.nodes = [revised.nodes[0], revised.nodes[2]]
+            revised.edges = [type(revised.edges[0])(source=revised.nodes[0].id, target=revised.nodes[1].id)]
+            revised.nodes[1].params["outputs"] = [{"variable": "answer", "value_selector": ["start", "query"]}]
+            return WorkflowEditResult(plan=revised, raw_plan=revised.model_dump(), attempts=1, repaired=False)
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+    monkeypatch.setattr("app.main.WorkflowEditPlanner", FakeEditPlanner)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/modify/apply",
+            json={"app_id": "app-1", "message": "rebuild it", "allow_destructive": True},
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["guard"]["risk"] == "high"
+    assert data["new_hash"] == "hash-2"
+    assert seen["synced"] is True
+
+
+def test_apply_workflow_modification_noop_does_not_sync(monkeypatch) -> None:
+    settings = _test_settings()
+    compiler = DifyDslCompiler(
+        dsl_version="9.9.9",
+        default_model_provider="openai",
+        default_model_name="gpt-4o-mini",
+    )
+    graph = yaml.safe_load(compiler.compile(fallback_plan("hello", app_name="Loaded")))["workflow"]["graph"]
+    seen = {"synced": False}
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get_draft_workflow(self, _app_id):
+            return DifyDraftWorkflow(
+                id="workflow-1",
+                graph=graph,
+                features={},
+                hash="hash-1",
+                version="draft",
+                environment_variables=[],
+                conversation_variables=[],
+                raw={},
+            )
+
+        def sync_draft_workflow(self, _app_id, **_kwargs):
+            seen["synced"] = True
+            raise AssertionError("no-op changes should not be synced")
+
+    class FakeEditPlanner:
+        def __init__(self, _settings):
+            pass
+
+        def generate(self, _message, *, current_plan, dsl_version):
+            return WorkflowEditResult(
+                plan=current_plan,
+                raw_plan=current_plan.model_dump(),
+                attempts=1,
+                repaired=False,
+            )
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+    monkeypatch.setattr("app.main.WorkflowEditPlanner", FakeEditPlanner)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/modify/apply",
+            json={"app_id": "app-1", "message": "do nothing"},
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["guard"]["no_op"] is True
+    assert data["new_hash"] == "hash-1"
+    assert data["sync"]["result"] == "noop"
+    assert seen["synced"] is False
 
 
 def test_workflow_modification_expected_hash_conflict(monkeypatch) -> None:

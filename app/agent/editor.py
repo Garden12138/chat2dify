@@ -24,8 +24,13 @@ EDIT_SYSTEM_PROMPT = """You revise an existing Dify WorkflowPlan.
 Return only JSON. Return the full revised WorkflowPlan, not a patch.
 Supported node types are only:
 start, llm, code, if-else, end, http-request, template-transform.
+Prefer the smallest safe change that satisfies the request.
 Preserve existing node ids when a node keeps the same purpose.
 Preserve existing start inputs unless the user explicitly asks to change them.
+Preserve existing end outputs unless the user explicitly asks to change them.
+Preserve all unrelated node params and edges exactly.
+Do not delete, rename, or rebuild nodes unless the user explicitly asks for removal or restructuring.
+When adding a node, connect it at the nearest relevant upstream/downstream position and keep the rest of the graph unchanged.
 Use exactly one start node and at least one end node. Keep all nodes connected.
 Use Dify variable syntax like {{#start_1.query#}} inside prompts/templates/URLs.
 If an if-else node has cases, every case needs an outgoing edge whose source_handle equals case_id,
@@ -94,6 +99,21 @@ class WorkflowEditPlanner:
         user_content = {
             "request": message,
             "current_plan": current_plan.model_dump(),
+            "edit_policy": {
+                "output": "Return the complete revised WorkflowPlan JSON.",
+                "default": "Make a minimal targeted edit.",
+                "must_preserve": [
+                    "Existing node ids for unchanged purposes.",
+                    "Existing start inputs unless explicitly requested.",
+                    "Existing end outputs unless explicitly requested.",
+                    "Unrelated node params and edges.",
+                ],
+                "avoid": [
+                    "Rebuilding the whole graph.",
+                    "Deleting nodes unrelated to the request.",
+                    "Renaming nodes without a functional reason.",
+                ],
+            },
         }
         messages: list[dict[str, str]] = [
             {"role": "system", "content": EDIT_SYSTEM_PROMPT},

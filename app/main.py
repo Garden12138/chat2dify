@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException
 from app.agent.diff import diff_plans
 from app.agent.editor import WorkflowEditPlanner
 from app.agent.explainer import explain_plan
+from app.agent.guard import guard_plan_change
 from app.agent.planner import PlannerError, WorkflowPlanner
 from app.compiler.dify import DifyDslCompiler
 from app.config import ConfigurationError, load_settings
@@ -19,7 +20,7 @@ from app.dify.graph import (
     decompile_dify_graph,
 )
 from app.dify.version import read_dify_version_info
-from app.models import WorkflowModifyRequest, WorkflowRequest, WorkflowRunDraftRequest
+from app.models import WorkflowModifyRequest, WorkflowPlan, WorkflowRequest, WorkflowRunDraftRequest
 from app.validator import has_errors, validate_dsl, validate_plan
 
 
@@ -173,8 +174,10 @@ def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:
             graph = compile_plan_to_dify_graph(plan, compiler=compiler, base_graph=draft.graph)
             issues = [*validate_plan(plan), *validate_dsl(dsl, expected_dsl_version=version_info.app_dsl_version)]
             changes = diff_plans(before_plan, plan)
+            guard = guard_plan_change(before_plan, plan, changes)
             explanation = explain_plan(plan)
             explanation["changes"] = [change["message"] for change in changes]
+            explanation["preserved"] = _preserved_node_summary(before_plan, plan, changes)
 
             response = {
                 "app_id": request.app_id,
@@ -186,6 +189,7 @@ def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:
                 "changes": changes,
                 "explanation": explanation,
                 "planner": edit_result.metadata(),
+                "guard": guard.to_dict(),
                 "validation": {
                     "ok": not has_errors(issues),
                     "issues": [issue.model_dump() for issue in issues],
@@ -197,6 +201,23 @@ def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:
                 return response
             if not response["validation"]["ok"]:
                 raise HTTPException(status_code=422, detail=response["validation"]["issues"])
+            if guard.no_op:
+                response["new_hash"] = draft.hash
+                response["sync"] = {
+                    "result": "noop",
+                    "hash": draft.hash,
+                    "workflow_url": settings.workflow_url(request.app_id),
+                }
+                return response
+            if not guard.ok and not request.allow_destructive:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "PLAN_CHANGE_GUARD_BLOCKED",
+                        "message": "修改风险较高，默认安全模式已阻断写回。",
+                        "guard": guard.to_dict(),
+                    },
+                )
 
             sync = client.sync_draft_workflow(
                 request.app_id,
@@ -229,3 +250,24 @@ def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except DifyClientError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+def _preserved_node_summary(
+    before_plan: WorkflowPlan,
+    after_plan: WorkflowPlan,
+    changes: list[dict],
+) -> list[str]:
+    changed_ids = {
+        str(change.get("target"))
+        for change in changes
+        if change.get("type") not in {"edge_added", "edge_removed"}
+    }
+    before_ids = {node.id for node in before_plan.nodes}
+    preserved = [
+        node
+        for node in after_plan.nodes
+        if node.id in before_ids and node.id not in changed_ids
+    ]
+    if not preserved:
+        return []
+    return [f"保留 {len(preserved)} 个未改动节点：" + "、".join(node.title or node.id for node in preserved[:6])]

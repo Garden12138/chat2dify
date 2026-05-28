@@ -49,7 +49,10 @@ Use `POST /api/workflows/modify/draft` to preview a modification and
 `POST /api/workflows/modify/apply` to write it back to the Dify draft. Both
 accept `app_id`, `message`, and optional `expected_hash`; apply returns the new
 Dify draft `hash`. Third-stage edits still support only the seven stabilized
-node types and do not publish the workflow.
+node types and do not publish the workflow. Edits run in safe mode by default:
+large node deletions, start/end rewrites, or broad edge rewiring are reported in
+`guard` and blocked on apply unless `allow_destructive=true` is sent. No-op
+edits return `sync.result="noop"` and are not written back to Dify.
 
 The fourth-stage validation flow runs an existing Dify workflow draft with
 explicit test inputs and returns a blocking summary:
@@ -129,6 +132,14 @@ Apply the change to the Dify draft:
 curl -X POST http://127.0.0.1:8000/api/workflows/modify/apply \
   -H 'Content-Type: application/json' \
   -d '{"app_id":"YOUR_APP_ID","message":"Make the final answer warmer","expected_hash":"OPTIONAL_CURRENT_HASH"}'
+```
+
+Allow a confirmed destructive rewrite:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/workflows/modify/apply \
+  -H 'Content-Type: application/json' \
+  -d '{"app_id":"YOUR_APP_ID","message":"Rebuild this draft into a simpler workflow","allow_destructive":true}'
 ```
 
 Run a Dify workflow draft with explicit inputs:

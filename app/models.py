@@ -95,6 +95,7 @@ class WorkflowModifyRequest(BaseModel):
     app_id: str = Field(min_length=1)
     message: str = Field(min_length=1)
     expected_hash: str | None = None
+    allow_destructive: bool = False
 
 
 class WorkflowRunDraftRequest(BaseModel):
