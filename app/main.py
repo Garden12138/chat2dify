@@ -5,13 +5,21 @@ from dataclasses import asdict
 
 from fastapi import FastAPI, HTTPException
 
+from app.agent.diff import diff_plans
+from app.agent.editor import WorkflowEditPlanner
 from app.agent.explainer import explain_plan
 from app.agent.planner import PlannerError, WorkflowPlanner
 from app.compiler.dify import DifyDslCompiler
 from app.config import ConfigurationError, load_settings
-from app.dify.client import DifyClient, DifyClientError
+from app.dify.client import DifyClient, DifyClientError, DifyConflictError
+from app.dify.graph import (
+    DifyGraphAdapterError,
+    UnsupportedExistingNodeType,
+    compile_plan_to_dify_graph,
+    decompile_dify_graph,
+)
 from app.dify.version import read_dify_version_info
-from app.models import WorkflowRequest
+from app.models import WorkflowModifyRequest, WorkflowRequest
 from app.validator import has_errors, validate_dsl, validate_plan
 
 
@@ -103,3 +111,105 @@ def create_workflow(request: WorkflowRequest) -> dict:
         "validation": draft["validation"],
         "dsl": draft["dsl"],
     }
+
+
+@app.post("/api/workflows/modify/draft")
+def draft_workflow_modification(request: WorkflowModifyRequest) -> dict:
+    return _modify_workflow(request, apply=False)
+
+
+@app.post("/api/workflows/modify/apply")
+def apply_workflow_modification(request: WorkflowModifyRequest) -> dict:
+    return _modify_workflow(request, apply=True)
+
+
+def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:
+    settings = load_settings()
+    version_info = read_dify_version_info(settings.dify_source_path)
+    compiler = DifyDslCompiler(
+        dsl_version=version_info.app_dsl_version,
+        default_model_provider=settings.dify_default_model_provider,
+        default_model_name=settings.dify_default_model_name,
+    )
+
+    try:
+        with DifyClient(settings) as client:
+            draft = client.get_draft_workflow(request.app_id)
+            if request.expected_hash and request.expected_hash != draft.hash:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "DRAFT_HASH_MISMATCH",
+                        "message": "Expected hash does not match the current Dify draft hash.",
+                        "expected_hash": request.expected_hash,
+                        "current_hash": draft.hash,
+                    },
+                )
+
+            before_plan = decompile_dify_graph(draft.graph, name=f"Dify Workflow {request.app_id}")
+            edit_result = WorkflowEditPlanner(settings).generate(
+                request.message,
+                current_plan=before_plan,
+                dsl_version=version_info.app_dsl_version,
+            )
+            plan = edit_result.plan
+            dsl = compiler.compile(plan)
+            graph = compile_plan_to_dify_graph(plan, compiler=compiler, base_graph=draft.graph)
+            issues = [*validate_plan(plan), *validate_dsl(dsl, expected_dsl_version=version_info.app_dsl_version)]
+            changes = diff_plans(before_plan, plan)
+            explanation = explain_plan(plan)
+            explanation["changes"] = [change["message"] for change in changes]
+
+            response = {
+                "app_id": request.app_id,
+                "workflow_url": settings.workflow_url(request.app_id),
+                "base_hash": draft.hash,
+                "raw_plan": edit_result.raw_plan,
+                "before_plan": before_plan.model_dump(),
+                "plan": plan.model_dump(),
+                "changes": changes,
+                "explanation": explanation,
+                "planner": edit_result.metadata(),
+                "validation": {
+                    "ok": not has_errors(issues),
+                    "issues": [issue.model_dump() for issue in issues],
+                },
+                "dsl": dsl,
+            }
+
+            if not apply:
+                return response
+            if not response["validation"]["ok"]:
+                raise HTTPException(status_code=422, detail=response["validation"]["issues"])
+
+            sync = client.sync_draft_workflow(
+                request.app_id,
+                graph=graph,
+                features=draft.features,
+                hash=draft.hash,
+                environment_variables=draft.environment_variables,
+                conversation_variables=draft.conversation_variables,
+            )
+            response["new_hash"] = sync.hash
+            response["sync"] = asdict(sync)
+            return response
+    except HTTPException:
+        raise
+    except UnsupportedExistingNodeType as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "UNSUPPORTED_EXISTING_NODE_TYPE",
+                "message": str(exc),
+                "node_id": exc.node_id,
+                "node_type": exc.node_type,
+            },
+        ) from exc
+    except DifyGraphAdapterError as exc:
+        raise HTTPException(status_code=422, detail={"code": "DIFY_GRAPH_UNSUPPORTED", "message": str(exc)}) from exc
+    except DifyConflictError as exc:
+        raise HTTPException(status_code=409, detail={"code": "DRAFT_HASH_MISMATCH", "message": str(exc)}) from exc
+    except PlannerError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except DifyClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc

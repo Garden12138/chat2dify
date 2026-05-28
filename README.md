@@ -39,6 +39,18 @@ the form `/app/{app_id}/workflow`.
 Draft/create responses include `raw_plan`, normalized `plan`, rule-based
 `explanation`, `planner` metadata, `dsl`, and structured validation issues.
 
+The third-stage edit flow modifies an existing Dify draft in place:
+
+```text
+app_id + edit request -> Dify draft graph -> WorkflowPlan IR -> revised WorkflowPlan IR -> validation -> /console/api/apps/{app_id}/workflows/draft
+```
+
+Use `POST /api/workflows/modify/draft` to preview a modification and
+`POST /api/workflows/modify/apply` to write it back to the Dify draft. Both
+accept `app_id`, `message`, and optional `expected_hash`; apply returns the new
+Dify draft `hash`. Third-stage edits still support only the seven stabilized
+node types and do not publish the workflow.
+
 ## Setup
 
 ```bash
@@ -88,6 +100,22 @@ Create a workflow in Dify:
 curl -X POST http://127.0.0.1:8000/api/workflows/create \
   -H 'Content-Type: application/json' \
   -d '{"message":"Summarize the user input","app_name":"Summary MVP"}'
+```
+
+Preview a change to an existing Dify workflow draft:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/workflows/modify/draft \
+  -H 'Content-Type: application/json' \
+  -d '{"app_id":"YOUR_APP_ID","message":"Make the final answer warmer"}'
+```
+
+Apply the change to the Dify draft:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/workflows/modify/apply \
+  -H 'Content-Type: application/json' \
+  -d '{"app_id":"YOUR_APP_ID","message":"Make the final answer warmer","expected_hash":"OPTIONAL_CURRENT_HASH"}'
 ```
 
 ## Supported Nodes

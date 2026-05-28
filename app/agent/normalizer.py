@@ -206,6 +206,10 @@ def _normalize_http_params(params: dict[str, Any]) -> dict[str, Any]:
     if isinstance(body, dict) and isinstance(body.get("data"), str):
         body = {**body, "data": normalize_template_refs(body["data"])}
     result["body"] = body
+    if result.get("timeout") is None:
+        result.pop("timeout", None)
+    if result.get("retry_config") is None:
+        result.pop("retry_config", None)
     return result
 
 

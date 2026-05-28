@@ -1,9 +1,10 @@
 import json
 
+import pytest
 import httpx
 
 from app.config import Settings
-from app.dify.client import CSRF_HEADER_NAME, DifyClient
+from app.dify.client import CSRF_HEADER_NAME, DifyClient, DifyConflictError
 
 
 def _settings() -> Settings:
@@ -119,6 +120,70 @@ def test_failed_import_payload_is_returned() -> None:
 
     assert result.status == "failed"
     assert result.error == "bad yaml"
+
+
+def test_get_and_sync_draft_workflow_send_csrf_and_hash() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/console/api/login":
+            return httpx.Response(200, json={"result": "success"}, headers=[("set-cookie", "csrf_token=csrf123; Path=/")])
+        if request.url.path == "/console/api/apps/app-1/workflows/draft" and request.method == "GET":
+            seen["get_csrf"] = request.headers.get(CSRF_HEADER_NAME, "")
+            return httpx.Response(
+                200,
+                json={
+                    "id": "workflow-1",
+                    "graph": {"nodes": [], "edges": []},
+                    "features": {"file_upload": {"enabled": False}},
+                    "hash": "hash-1",
+                    "version": "draft",
+                    "environment_variables": [{"name": "ENV"}],
+                    "conversation_variables": [{"name": "topic"}],
+                },
+            )
+        if request.url.path == "/console/api/apps/app-1/workflows/draft" and request.method == "POST":
+            body = json.loads(request.content)
+            seen["post_csrf"] = request.headers.get(CSRF_HEADER_NAME, "")
+            seen["post_hash"] = body["hash"]
+            seen["environment_variables"] = body["environment_variables"]
+            seen["conversation_variables"] = body["conversation_variables"]
+            return httpx.Response(200, json={"result": "success", "hash": "hash-2", "updated_at": "123"})
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+    draft = client.get_draft_workflow("app-1")
+    result = client.sync_draft_workflow(
+        "app-1",
+        graph=draft.graph,
+        features=draft.features,
+        hash=draft.hash,
+        environment_variables=draft.environment_variables,
+        conversation_variables=draft.conversation_variables,
+    )
+
+    assert draft.hash == "hash-1"
+    assert seen["get_csrf"] == "csrf123"
+    assert seen["post_csrf"] == "csrf123"
+    assert seen["post_hash"] == "hash-1"
+    assert seen["environment_variables"] == [{"name": "ENV"}]
+    assert seen["conversation_variables"] == [{"name": "topic"}]
+    assert result.hash == "hash-2"
+    assert result.workflow_url == "http://dify.local/app/app-1/workflow"
+
+
+def test_sync_draft_workflow_conflict_is_typed() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/console/api/login":
+            return httpx.Response(200, json={"result": "success"}, headers=[("set-cookie", "csrf_token=csrf123; Path=/")])
+        if request.url.path == "/console/api/apps/app-1/workflows/draft":
+            return httpx.Response(409, json={"code": "draft_workflow_not_sync"})
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+
+    with pytest.raises(DifyConflictError):
+        client.sync_draft_workflow("app-1", graph={"nodes": [], "edges": []}, features={}, hash="old")
 
 
 def test_connection_error_is_wrapped() -> None:
