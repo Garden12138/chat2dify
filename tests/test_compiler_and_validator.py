@@ -181,6 +181,124 @@ def test_normalizer_infers_code_outputs_from_return_dict() -> None:
     assert end_node["params"]["outputs"][0]["value_selector"] == ["code", "total_amount"]
 
 
+def test_template_transform_refs_become_jinja_variables() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "template",
+                    "type": "template-transform",
+                    "params": {"template": "Input: {{#start.query#}}"},
+                },
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["template", "output"]}]}},
+            ],
+            "edges": [
+                {"source": "start", "target": "template"},
+                {"source": "template", "target": "end"},
+            ],
+        }
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+
+    data = yaml.safe_load(_compiler().compile(plan))
+    template = next(node for node in data["workflow"]["graph"]["nodes"] if node["id"] == "template")
+
+    assert template["data"]["template"] == "Input: {{ query }}"
+    assert template["data"]["variables"] == [
+        {"variable": "query", "value_selector": ["start", "query"], "value_type": "string"}
+    ]
+    assert validate_plan(plan) == []
+    assert validate_dsl(_compiler().compile(plan), expected_dsl_version="9.9.9") == []
+
+
+def test_template_transform_reuses_declared_variable_alias() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "template",
+                    "type": "template-transform",
+                    "params": {
+                        "template": "Input: {{#start.query#}}",
+                        "variables": [{"variable": "input", "value_selector": ["start", "query"]}],
+                    },
+                },
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["template", "output"]}]}},
+            ],
+            "edges": [
+                {"source": "start", "target": "template"},
+                {"source": "template", "target": "end"},
+            ],
+        }
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+
+    data = yaml.safe_load(_compiler().compile(plan))
+    template = next(node for node in data["workflow"]["graph"]["nodes"] if node["id"] == "template")
+
+    assert template["data"]["template"] == "Input: {{ input }}"
+    assert template["data"]["variables"] == [
+        {"variable": "input", "value_selector": ["start", "query"], "value_type": "string"}
+    ]
+
+
+def test_http_request_normalizes_empty_headers_params_and_body() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {"id": "http", "type": "http-request", "params": {"url": "https://example.com", "headers": [], "params": {}}},
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "status", "value_selector": ["http", "status_code"]}]}},
+            ],
+            "edges": [
+                {"source": "start", "target": "http"},
+                {"source": "http", "target": "end"},
+            ],
+        }
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+
+    data = yaml.safe_load(_compiler().compile(plan))
+    http = next(node for node in data["workflow"]["graph"]["nodes"] if node["id"] == "http")
+
+    assert http["data"]["headers"] == ""
+    assert http["data"]["params"] == ""
+    assert http["data"]["body"] == {"type": "none", "data": []}
+
+
+def test_http_request_normalizes_key_value_shorthand() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "http",
+                    "type": "http-request",
+                    "params": {
+                        "url": "https://example.com/search",
+                        "headers": {"Accept": "application/json"},
+                        "params": [{"key": "q", "value": "{{start.query}}"}],
+                    },
+                },
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "status", "value_selector": ["http", "status_code"]}]}},
+            ],
+            "edges": [
+                {"source": "start", "target": "http"},
+                {"source": "http", "target": "end"},
+            ],
+        }
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+
+    data = yaml.safe_load(_compiler().compile(plan))
+    http = next(node for node in data["workflow"]["graph"]["nodes"] if node["id"] == "http")
+
+    assert http["data"]["headers"] == "Accept:application/json"
+    assert http["data"]["params"] == "q:{{#start.query#}}"
+
+
 def test_compiler_covers_supported_node_minimum_structure() -> None:
     plan = WorkflowPlan.model_validate(
         {

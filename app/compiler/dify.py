@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from uuid import uuid4
 from typing import Any
@@ -16,6 +17,7 @@ TARGET_HANDLE = "target"
 NODE_WIDTH_X_OFFSET = 300
 START_X = 80
 START_Y = 282
+DIFY_REF_PATTERN = re.compile(r"\{\{\s*#([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)#\s*\}\}")
 
 
 class DifyDslCompiler:
@@ -226,9 +228,9 @@ class DifyDslCompiler:
             "method": str(node.params.get("method", "GET")).upper(),
             "url": normalize_template_refs(node.params.get("url", "https://example.com")),
             "authorization": {"type": "no-auth"},
-            "headers": node.params.get("headers", ""),
-            "params": node.params.get("params", ""),
-            "body": node.params.get("body", {"type": "none", "data": ""}),
+            "headers": _key_value_text(node.params.get("headers", "")),
+            "params": _key_value_text(node.params.get("params", "")),
+            "body": _http_body(node.params.get("body")),
             "ssl_verify": node.params.get("ssl_verify", True),
             "timeout": node.params.get(
                 "timeout",
@@ -246,9 +248,10 @@ class DifyDslCompiler:
         }
 
     def _template_transform_data(self, node: PlanNode) -> dict[str, Any]:
+        variables = _variables(node.params.get("variables", []))
         return {
-            "template": normalize_template_refs(node.params.get("template", "{{ query }}")),
-            "variables": _variables(node.params.get("variables", [])),
+            "template": _jinja_template(node.params.get("template", "{{ query }}"), variables),
+            "variables": variables,
         }
 
 
@@ -266,6 +269,81 @@ def _normalize_output(item: dict[str, Any]) -> dict[str, Any]:
     output = dict(item)
     output.setdefault("value_type", "string")
     return output
+
+
+def _key_value_text(value: Any) -> str:
+    if value in (None, "", [], {}):
+        return ""
+    if isinstance(value, dict):
+        return "\n".join(
+            f"{str(key).strip()}:{normalize_template_refs(str(item)).strip()}"
+            for key, item in value.items()
+            if str(key).strip() and str(item).strip()
+        )
+    if isinstance(value, list):
+        lines = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key", "")).strip()
+            item_value = normalize_template_refs(str(item.get("value", ""))).strip()
+            if key and item_value:
+                lines.append(f"{key}:{item_value}")
+        return "\n".join(lines)
+
+    text = normalize_template_refs(str(value)).strip()
+    if text in {"[]", "{}", "null", "None"}:
+        return ""
+    lines = []
+    for line in text.splitlines():
+        key, separator, raw_value = line.partition(":")
+        key = key.strip()
+        item_value = raw_value.strip()
+        if separator and key and item_value:
+            lines.append(f"{key}:{item_value}")
+    return "\n".join(lines)
+
+
+def _http_body(value: Any) -> dict[str, Any]:
+    if value in (None, "", [], {}):
+        return {"type": "none", "data": []}
+    if not isinstance(value, dict):
+        return {"type": "raw-text", "data": normalize_template_refs(str(value))}
+    body = deepcopy(value)
+    body_type = body.get("type") or "none"
+    body["type"] = body_type
+    if body_type == "none":
+        body["data"] = []
+    elif isinstance(body.get("data"), str):
+        body["data"] = normalize_template_refs(body["data"])
+    elif "data" not in body:
+        body["data"] = []
+    return body
+
+
+def _jinja_template(template: Any, variables: list[dict[str, Any]]) -> str:
+    normalized = normalize_template_refs(str(template))
+    variable_by_selector = {
+        tuple(item.get("value_selector", [])): str(item.get("variable"))
+        for item in variables
+        if item.get("variable") and isinstance(item.get("value_selector"), list)
+    }
+
+    def replace(match: re.Match[str]) -> str:
+        selector = (match.group(1), match.group(2))
+        variable = variable_by_selector.get(selector) or _safe_variable_name(selector[-1])
+        return "{{ " + variable + " }}"
+
+    return DIFY_REF_PATTERN.sub(replace, normalized)
+
+
+def _safe_variable_name(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_]", "_", value).strip("_")
+    if not safe:
+        return "value"
+    if safe[0].isdigit():
+        safe = f"var_{safe}"
+    return safe
 
 
 def _input_type(value: str) -> str:

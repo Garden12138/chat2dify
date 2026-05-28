@@ -8,6 +8,7 @@ from typing import Any
 
 SOURCE_HANDLE = "source"
 FALSE_HANDLE = "false"
+DIFY_REF_PATTERN = re.compile(r"\{\{\s*#([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)#\s*\}\}")
 
 
 @dataclass(frozen=True)
@@ -200,11 +201,13 @@ def _normalize_http_params(params: dict[str, Any]) -> dict[str, Any]:
     result["variables"] = _normalize_variables(result.get("variables", []))
     result["method"] = str(result.get("method", "GET")).upper()
     result["url"] = normalize_template_refs(str(result.get("url", "https://example.com")))
-    result["headers"] = normalize_template_refs(str(result.get("headers", "")))
-    result["params"] = normalize_template_refs(str(result.get("params", "")))
-    body = result.get("body", {"type": "none", "data": ""})
+    result["headers"] = _normalize_key_value_text(result.get("headers", ""))
+    result["params"] = _normalize_key_value_text(result.get("params", ""))
+    body = result.get("body", {"type": "none", "data": []})
     if isinstance(body, dict) and isinstance(body.get("data"), str):
         body = {**body, "data": normalize_template_refs(body["data"])}
+    elif body in (None, "", [], {}):
+        body = {"type": "none", "data": []}
     result["body"] = body
     if result.get("timeout") is None:
         result.pop("timeout", None)
@@ -214,10 +217,12 @@ def _normalize_http_params(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_template_params(params: dict[str, Any]) -> dict[str, Any]:
+    template = normalize_template_refs(str(params.get("template", "{{ query }}")))
+    variables = _normalize_variables(params.get("variables", []))
     return {
         **params,
-        "template": normalize_template_refs(str(params.get("template", "{{ query }}"))),
-        "variables": _normalize_variables(params.get("variables", [])),
+        "template": template,
+        "variables": _add_template_ref_variables(template, variables),
     }
 
 
@@ -234,6 +239,93 @@ def _normalize_variables(items: Any, inputs: Any = None) -> list[dict[str, Any]]
         for variable, ref in inputs.items():
             variables.append(_normalize_output({"variable": str(variable), "value_selector": _selector_from_ref(str(ref))}))
     return variables
+
+
+def _normalize_key_value_text(value: Any) -> str:
+    if value in (None, "", [], {}):
+        return ""
+    if isinstance(value, dict):
+        lines = [
+            f"{str(key).strip()}:{normalize_template_refs(str(item)).strip()}"
+            for key, item in value.items()
+            if str(key).strip() and str(item).strip()
+        ]
+        return "\n".join(lines)
+    if isinstance(value, list):
+        lines = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key", "")).strip()
+            raw_value = item.get("value", "")
+            item_value = normalize_template_refs(str(raw_value)).strip()
+            if key and item_value:
+                lines.append(f"{key}:{item_value}")
+        return "\n".join(lines)
+
+    text = str(value).strip()
+    if text in {"[]", "{}", "null", "None"}:
+        return ""
+    lines = []
+    for line in normalize_template_refs(text).splitlines():
+        key, separator, raw_value = line.partition(":")
+        key = key.strip()
+        item_value = raw_value.strip()
+        if separator and key and item_value:
+            lines.append(f"{key}:{item_value}")
+    return "\n".join(lines)
+
+
+def _add_template_ref_variables(template: str, variables: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result = [dict(variable) for variable in variables]
+    used_names = {str(item.get("variable")) for item in result if item.get("variable")}
+    known_selectors = {
+        tuple(item.get("value_selector", []))
+        for item in result
+        if isinstance(item.get("value_selector"), list) and item.get("value_selector")
+    }
+    for selector in _template_ref_selectors(template):
+        selector_key = tuple(selector)
+        if selector_key in known_selectors:
+            continue
+        variable = _unique_template_variable_name(selector, used_names)
+        used_names.add(variable)
+        known_selectors.add(selector_key)
+        result.append({"variable": variable, "value_selector": selector, "value_type": "string"})
+    return result
+
+
+def _template_ref_selectors(template: str) -> list[list[str]]:
+    selectors: list[list[str]] = []
+    seen: set[tuple[str, str]] = set()
+    for match in DIFY_REF_PATTERN.finditer(template):
+        selector = (match.group(1), match.group(2))
+        if selector in seen:
+            continue
+        seen.add(selector)
+        selectors.append([selector[0], selector[1]])
+    return selectors
+
+
+def _unique_template_variable_name(selector: list[str], used_names: set[str]) -> str:
+    preferred = _safe_variable_name(selector[-1] if selector else "value")
+    candidates = [preferred, _safe_variable_name("_".join(selector))]
+    for candidate in candidates:
+        if candidate and candidate not in used_names:
+            return candidate
+    index = 2
+    while f"{preferred}_{index}" in used_names:
+        index += 1
+    return f"{preferred}_{index}"
+
+
+def _safe_variable_name(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_]", "_", value).strip("_")
+    if not safe:
+        return "value"
+    if safe[0].isdigit():
+        safe = f"var_{safe}"
+    return safe
 
 
 def _normalize_output(item: dict[str, Any]) -> dict[str, Any]:
