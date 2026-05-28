@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from copy import deepcopy
 from uuid import uuid4
 from typing import Any
@@ -8,6 +7,7 @@ from typing import Any
 import yaml
 
 from app.models import PlanNode, WorkflowPlan
+from app.agent.normalizer import normalize_template_refs
 
 
 CUSTOM_NODE_TYPE = "custom"
@@ -32,16 +32,14 @@ class DifyDslCompiler:
 
     def compile(self, plan: WorkflowPlan) -> str:
         nodes = [self._compile_node(node, index) for index, node in enumerate(plan.nodes)]
-        plan_nodes = {node.id: node for node in plan.nodes}
         type_by_id = {node["id"]: node["data"]["type"] for node in nodes}
-        if_else_edge_positions = _if_else_edge_positions(plan)
         edges = [
             {
-                "id": f"{edge.source}-{_source_handle(plan_nodes, if_else_edge_positions, edge)}-{edge.target}-{edge.target_handle}",
+                "id": f"{edge.source}-{edge.source_handle}-{edge.target}-{edge.target_handle}",
                 "type": "custom",
                 "source": edge.source,
                 "target": edge.target,
-                "sourceHandle": _source_handle(plan_nodes, if_else_edge_positions, edge),
+                "sourceHandle": edge.source_handle,
                 "targetHandle": edge.target_handle,
                 "data": {
                     "isInIteration": False,
@@ -119,7 +117,7 @@ class DifyDslCompiler:
 
     def _start_data(self, node: PlanNode) -> dict[str, Any]:
         variables = []
-        for item in node.params.get("variables") or node.params.get("inputs", []):
+        for item in node.params.get("variables", []):
             name = item.get("name") or item.get("variable")
             if not name:
                 continue
@@ -150,7 +148,7 @@ class DifyDslCompiler:
         provider = node.params.get("model_provider") or self.default_model_provider
         name = node.params.get("model_name") or self.default_model_name
         system_prompt = node.params.get("system_prompt", "")
-        user_prompt = node.params.get("user_prompt") or node.params.get("prompt") or "{{#start.query#}}"
+        user_prompt = node.params.get("user_prompt") or "{{#start.query#}}"
         return {
             "model": {
                 "provider": provider,
@@ -159,8 +157,8 @@ class DifyDslCompiler:
                 "completion_params": node.params.get("completion_params", {"temperature": 0.7}),
             },
             "prompt_template": [
-                {"role": "system", "text": _normalize_template_refs(system_prompt)},
-                {"role": "user", "text": _normalize_template_refs(user_prompt)},
+                {"role": "system", "text": normalize_template_refs(system_prompt)},
+                {"role": "user", "text": normalize_template_refs(user_prompt)},
             ],
             "variables": [],
             "context": {"enabled": False, "variable_selector": []},
@@ -204,14 +202,10 @@ class DifyDslCompiler:
         normalized_cases = []
         for idx, case in enumerate(cases):
             case_copy = dict(case)
-            case_copy.setdefault("case_id", case_copy.get("id") or ("true" if idx == 0 else str(uuid4())))
-            case_copy.setdefault("id", case_copy["case_id"])
+            case_copy.setdefault("case_id", "true" if idx == 0 else str(uuid4()))
             case_copy.setdefault("logical_operator", "and")
             normalized_conditions = []
-            raw_conditions = case_copy.get("conditions")
-            if not raw_conditions and case_copy.get("condition"):
-                raw_conditions = [_condition_from_text(str(case_copy["condition"]))]
-            for condition in raw_conditions or []:
+            for condition in case_copy.get("conditions", []):
                 condition_copy = dict(condition)
                 condition_copy.setdefault("id", str(uuid4()))
                 condition_copy.setdefault("varType", "string")
@@ -230,7 +224,7 @@ class DifyDslCompiler:
         return {
             "variables": _variables(node.params.get("variables", [])),
             "method": str(node.params.get("method", "GET")).upper(),
-            "url": _normalize_template_refs(node.params.get("url", "https://example.com")),
+            "url": normalize_template_refs(node.params.get("url", "https://example.com")),
             "authorization": {"type": "no-auth"},
             "headers": node.params.get("headers", ""),
             "params": node.params.get("params", ""),
@@ -253,7 +247,7 @@ class DifyDslCompiler:
 
     def _template_transform_data(self, node: PlanNode) -> dict[str, Any]:
         return {
-            "template": _normalize_template_refs(node.params.get("template", "{{ query }}")),
+            "template": normalize_template_refs(node.params.get("template", "{{ query }}")),
             "variables": _variables(node.params.get("variables", [])),
         }
 
@@ -293,85 +287,7 @@ def _input_type(value: str) -> str:
 
 
 def _default_title(node_type: str) -> str:
-    return re.sub(r"(^|-)([a-z])", lambda m: (" " if m.group(1) else "") + m.group(2).upper(), node_type)
-
-
-def _normalize_template_refs(text: str) -> str:
-    return re.sub(
-        r"\{\{\s*(?!#)([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)\s*\}\}",
-        r"{{#\1.\2#}}",
-        text,
-    )
-
-
-def _condition_from_text(text: str) -> dict[str, Any]:
-    normalized = _normalize_template_refs(text)
-    selector_match = re.search(r"\{\{#([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)#\}\}", normalized)
-    selector = [selector_match.group(1), selector_match.group(2)] if selector_match else ["start", "query"]
-    lowered = normalized.lower()
-    if "not contains" in lowered or "不包含" in normalized:
-        operator = "not contains"
-    elif "contains" in lowered or "包含" in normalized:
-        operator = "contains"
-    elif "!=" in normalized or "not equal" in lowered:
-        operator = "not equal"
-    elif "==" in normalized or "=" in normalized or "equal" in lowered:
-        operator = "is"
-    else:
-        operator = "not empty"
-
-    value = ""
-    quoted = re.search(r'["\']([^"\']+)["\']', normalized)
-    if quoted:
-        value = quoted.group(1)
-    elif "包含" in normalized:
-        value = normalized.rsplit("包含", 1)[-1].strip()
-
-    return {
-        "variable_selector": selector,
-        "comparison_operator": operator,
-        "value": value,
-        "varType": "string",
-    }
-
-
-def _if_else_edge_positions(plan: WorkflowPlan) -> dict[tuple[str, str], int]:
-    positions: dict[tuple[str, str], int] = {}
-    counters: dict[str, int] = {}
-    node_types = {node.id: node.type for node in plan.nodes}
-    for edge in plan.edges:
-        if node_types.get(edge.source) != "if-else":
-            continue
-        key = (edge.source, edge.target)
-        positions[key] = counters.get(edge.source, 0)
-        counters[edge.source] = positions[key] + 1
-    return positions
-
-
-def _source_handle(
-    plan_nodes: dict[str, PlanNode],
-    if_else_edge_positions: dict[tuple[str, str], int],
-    edge: Any,
-) -> str:
-    source = plan_nodes.get(edge.source)
-    if not source or source.type != "if-else" or edge.source_handle != SOURCE_HANDLE:
-        return edge.source_handle
-
-    target = plan_nodes.get(edge.target)
-    target_text = f"{edge.target} {(target.title or '') if target else ''}".lower()
-    case_ids = [str(case.get("case_id") or case.get("id")) for case in source.params.get("cases", [])]
-    else_case = str(source.params.get("else_case", "false")).lower()
-    for case_id in case_ids:
-        if case_id and case_id.lower() in target_text:
-            return case_id
-    if else_case and else_case in target_text:
-        return "false"
-    if any(marker in target_text for marker in ("general", "default", "else", "other", "fallback")):
-        return "false"
-
-    branch_ids = [*case_ids, "false"]
-    position = if_else_edge_positions.get((edge.source, edge.target), 0)
-    return branch_ids[position] if position < len(branch_ids) else "false"
+    return node_type.replace("-", " ").title()
 
 
 def _node_height(node_type: str, data: dict[str, Any]) -> int:

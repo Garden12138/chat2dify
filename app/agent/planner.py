@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 
+from app.agent.normalizer import normalize_plan_payload
+from app.compiler.dify import DifyDslCompiler
 from app.config import Settings
-from app.models import WorkflowPlan
+from app.models import ValidationIssue, WorkflowPlan
+from app.validator import has_errors, validate_dsl, validate_plan
 
 
 SYSTEM_PROMPT = """You turn a user's workflow request into a compact JSON WorkflowPlan.
@@ -31,23 +35,76 @@ class PlannerError(RuntimeError):
     """Raised when the planner cannot produce a valid plan."""
 
 
+@dataclass(frozen=True)
+class PlannerResult:
+    plan: WorkflowPlan
+    raw_plan: dict[str, Any]
+    mode: str
+    attempts: int
+    used_fallback: bool
+    repaired: bool
+    normalizations: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+    def metadata(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "attempts": self.attempts,
+            "used_fallback": self.used_fallback,
+            "repaired": self.repaired,
+            "normalizations": self.normalizations,
+            "errors": self.errors,
+        }
+
+
 class WorkflowPlanner:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
     def generate_plan(self, message: str, *, app_name: str | None = None) -> WorkflowPlan:
+        return self.generate(message, app_name=app_name, dsl_version="0.0.0").plan
+
+    def generate(self, message: str, *, app_name: str | None = None, dsl_version: str) -> PlannerResult:
         if not self.settings.openai_api_key:
-            return fallback_plan(message, app_name=app_name)
+            plan = fallback_plan(message, app_name=app_name)
+            return PlannerResult(
+                plan=plan,
+                raw_plan=plan.model_dump(),
+                mode="fallback",
+                attempts=0,
+                used_fallback=True,
+                repaired=False,
+            )
 
         last_error = ""
-        for attempt in range(2):
+        errors: list[str] = []
+        final_raw_plan: dict[str, Any] | None = None
+        for attempt in range(1, 4):
             content = self._call_llm(message, app_name=app_name, last_error=last_error if attempt else "")
             try:
                 payload = json.loads(_strip_json_fences(content))
-                return WorkflowPlan.model_validate(payload)
+                raw_plan = _extract_plan_payload(payload)
+                final_raw_plan = raw_plan
+                normalized = normalize_plan_payload(raw_plan, app_name=app_name)
+                plan = WorkflowPlan.model_validate(normalized.payload)
+                issues = _validate_compiled_plan(plan, settings=self.settings, dsl_version=dsl_version)
+                if has_errors(issues):
+                    raise ValueError(_issues_to_feedback(issues))
+                return PlannerResult(
+                    plan=plan,
+                    raw_plan=raw_plan,
+                    mode="llm",
+                    attempts=attempt,
+                    used_fallback=False,
+                    repaired=attempt > 1 or normalized.changed,
+                    normalizations=normalized.changes,
+                    errors=errors,
+                )
             except Exception as exc:  # noqa: BLE001 - error text is fed back to the LLM once.
                 last_error = str(exc)
-        raise PlannerError(f"Could not generate a valid WorkflowPlan: {last_error}")
+                errors.append(last_error)
+        raw_hint = f" Last raw plan: {json.dumps(final_raw_plan, ensure_ascii=False)[:1000]}" if final_raw_plan else ""
+        raise PlannerError(f"Could not generate a valid WorkflowPlan after 3 attempts: {last_error}.{raw_hint}")
 
     def _call_llm(self, message: str, *, app_name: str | None, last_error: str = "") -> str:
         url = _chat_completions_url(self.settings.openai_base_url)
@@ -126,6 +183,33 @@ def fallback_plan(message: str, *, app_name: str | None = None) -> WorkflowPlan:
             ],
         }
     )
+
+
+def _validate_compiled_plan(plan: WorkflowPlan, *, settings: Settings, dsl_version: str) -> list[ValidationIssue]:
+    compiler = DifyDslCompiler(
+        dsl_version=dsl_version,
+        default_model_provider=settings.dify_default_model_provider,
+        default_model_name=settings.dify_default_model_name,
+    )
+    dsl = compiler.compile(plan)
+    return [
+        *validate_plan(plan),
+        *validate_dsl(dsl, expected_dsl_version=dsl_version),
+    ]
+
+
+def _issues_to_feedback(issues: list[ValidationIssue]) -> str:
+    return json.dumps([issue.model_dump() for issue in issues], ensure_ascii=False)
+
+
+def _extract_plan_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    if "nodes" in payload and "edges" in payload:
+        return payload
+    for key in ("plan", "workflow", "workflow_plan"):
+        nested = payload.get(key)
+        if isinstance(nested, dict) and "nodes" in nested and "edges" in nested:
+            return nested
+    raise ValueError("LLM response must contain a WorkflowPlan object with nodes and edges")
 
 
 def _title_from_message(message: str) -> str:

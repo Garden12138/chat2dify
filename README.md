@@ -9,8 +9,8 @@ source code and targets the sibling latest Dify checkout:
 
 ```env
 DIFY_SOURCE_DIR=../dify
-DIFY_CONSOLE_API_BASE=http://localhost:5001/console/api
-DIFY_CONSOLE_WEB_BASE=http://localhost:3000
+DIFY_CONSOLE_API_BASE=http://127.0.0.1/console/api
+DIFY_CONSOLE_WEB_BASE=http://127.0.0.1
 ```
 
 `DIFY_SOURCE_DIR` is resolved relative to the `chat2dify` repository root. On
@@ -27,14 +27,17 @@ DIFY_CONSOLE_API_BASE=http://127.0.0.1/console/api
 DIFY_CONSOLE_WEB_BASE=http://127.0.0.1
 ```
 
-The first-stage flow is:
+The second-stage flow is:
 
 ```text
-user request -> WorkflowPlan IR -> Dify DSL YAML -> validation -> /console/api/apps/imports
+user request -> raw LLM plan -> normalized WorkflowPlan IR -> Dify DSL YAML -> validation -> /console/api/apps/imports
 ```
 
 The create API returns the imported Dify `app_id` and a console workflow URL in
 the form `/app/{app_id}/workflow`.
+
+Draft/create responses include `raw_plan`, normalized `plan`, rule-based
+`explanation`, `planner` metadata, `dsl`, and structured validation issues.
 
 ## Setup
 
@@ -55,7 +58,9 @@ DIFY_PASSWORD=your-password
 ```
 
 If `OPENAI_API_KEY` is not set, the draft endpoint uses a deterministic fallback
-plan (`start -> llm -> end`) so the MVP can still produce a valid DSL.
+plan (`start -> llm -> end`) so the MVP can still produce a valid DSL. When it
+is set, the planner tries up to three LLM attempts and feeds validation errors
+back into the model for self-repair.
 
 ## Run
 
@@ -87,7 +92,7 @@ curl -X POST http://127.0.0.1:8000/api/workflows/create \
 
 ## Supported Nodes
 
-Phase 1 supports these Plan IR node types:
+Phase 2 stabilizes these Plan IR node types:
 
 ```text
 start, llm, code, if-else, end, http-request, template-transform

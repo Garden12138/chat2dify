@@ -95,4 +95,6 @@ class ValidationIssue(BaseModel):
     code: str
     message: str
     node_id: str | None = None
-
+    severity: Literal["error", "warning"] = "error"
+    path: str | None = None
+    suggestion: str | None = None
