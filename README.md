@@ -43,11 +43,11 @@ Draft/create responses include `raw_plan`, normalized `plan`, rule-based
 
 Web UI workbench for create, modify, and draft run:
 
-![chat2dify Web UI workbench](docs/images/webui-workbench-run.svg)
+![chat2dify Web UI workbench](docs/images/webui-workbench-run.png)
 
 Dify draft workflow generated from the repair after-sales example:
 
-![Dify workflow canvas](docs/images/dify-workflow-canvas.svg)
+![Dify workflow canvas](docs/images/dify-workflow-canvas.png)
 
 The third-stage edit flow modifies an existing Dify draft in place:
 
