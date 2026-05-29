@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>chat2dify</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <h1>chat2dify</h1>
+        <p class="subtitle">Workflow console for the local Dify sidecar</p>
+      </div>
+      <div class="header-actions">
+        <span id="health-status" class="status-pill status-muted">Checking</span>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="tool-panel" aria-labelledby="create-title">
+        <div class="panel-heading">
+          <h2 id="create-title">Create</h2>
+          <span id="create-status" class="panel-status"></span>
+        </div>
+        <form id="create-form" class="form-stack">
+          <label>
+            App name
+            <input id="create-app-name" name="app_name" autocomplete="off" placeholder="Customer Support Flow">
+          </label>
+          <label>
+            Request
+            <textarea id="create-message" name="message" rows="7" required>Build a workflow that responds politely to customer complaints and summarizes the issue.</textarea>
+          </label>
+          <button type="submit">Create workflow</button>
+        </form>
+      </section>
+
+      <section class="tool-panel" aria-labelledby="modify-title">
+        <div class="panel-heading">
+          <h2 id="modify-title">Modify Draft</h2>
+          <span id="modify-status" class="panel-status"></span>
+        </div>
+        <form id="modify-form" class="form-stack">
+          <label>
+            App ID
+            <input id="modify-app-id" name="app_id" autocomplete="off" required placeholder="Dify app id">
+          </label>
+          <label>
+            Expected hash
+            <input id="modify-expected-hash" name="expected_hash" autocomplete="off" placeholder="Optional">
+          </label>
+          <label>
+            Change request
+            <textarea id="modify-message" name="message" rows="5" required>Make the final answer warmer and more concise.</textarea>
+          </label>
+          <label class="checkbox-line">
+            <input id="modify-allow-destructive" type="checkbox">
+            Allow destructive apply
+          </label>
+          <div class="button-row">
+            <button id="preview-modify" type="button">Preview</button>
+            <button id="apply-modify" type="button">Apply</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="tool-panel" aria-labelledby="run-title">
+        <div class="panel-heading">
+          <h2 id="run-title">Run Draft</h2>
+          <span id="run-status" class="panel-status"></span>
+        </div>
+        <form id="run-form" class="form-stack">
+          <label>
+            App ID
+            <input id="run-app-id" name="app_id" autocomplete="off" required placeholder="Dify app id">
+          </label>
+          <label>
+            Inputs JSON
+            <textarea id="run-inputs" name="inputs" rows="6" spellcheck="false" required>{"query":"我要投诉订单配送太慢"}</textarea>
+          </label>
+          <label>
+            Timeout seconds
+            <input id="run-timeout" name="timeout_seconds" type="number" min="1" step="1" value="120">
+          </label>
+          <button type="submit">Run draft</button>
+        </form>
+      </section>
+
+      <section class="result-panel" aria-labelledby="result-title">
+        <div class="panel-heading">
+          <h2 id="result-title">Result</h2>
+          <button id="clear-result" type="button" class="secondary">Clear</button>
+        </div>
+        <div id="summary-grid" class="summary-grid"></div>
+        <div id="changes-list" class="changes-list"></div>
+        <details open>
+          <summary>Response JSON</summary>
+          <pre id="result-json" class="json-output">{}</pre>
+        </details>
+      </section>
+    </main>
+
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

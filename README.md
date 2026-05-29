@@ -96,6 +96,12 @@ back into the model for self-repair.
 uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
+Open the local Web UI:
+
+```text
+http://127.0.0.1:8000/
+```
+
 Health check:
 
 ```bash

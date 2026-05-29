@@ -10,6 +10,27 @@ from app.dify.version import DifyVersionInfo
 from app.main import app
 
 
+def test_web_ui_index_and_static_assets(monkeypatch) -> None:
+    monkeypatch.setattr("app.main.load_settings", _test_settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+
+    with TestClient(app) as client:
+        index = client.get("/")
+        script = client.get("/static/app.js")
+        styles = client.get("/static/styles.css")
+
+    assert index.status_code == 200
+    assert "chat2dify" in index.text
+    assert 'id="create-form"' in index.text
+    assert script.status_code == 200
+    assert "handleCreate" in script.text
+    assert styles.status_code == 200
+    assert ".workspace" in styles.text
+
+
 def test_draft_response_includes_phase2_fields(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.main.load_settings",

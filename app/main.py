@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.agent.diff import diff_plans
 from app.agent.editor import WorkflowEditPlanner
@@ -24,6 +27,9 @@ from app.models import WorkflowModifyRequest, WorkflowPlan, WorkflowRequest, Wor
 from app.validator import has_errors, validate_dsl, validate_plan
 
 
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     settings = load_settings()
@@ -32,6 +38,12 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="chat2dify", version="0.1.0", lifespan=lifespan)
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.get("/", include_in_schema=False)
+def index() -> FileResponse:
+    return FileResponse(STATIC_DIR / "index.html")
 
 
 @app.get("/health")
