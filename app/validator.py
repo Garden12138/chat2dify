@@ -12,6 +12,41 @@ from app.models import ValidationIssue, WorkflowPlan
 SUPPORTED_NODE_TYPES = {"start", "llm", "code", "if-else", "end", "http-request", "template-transform"}
 TEMPLATE_REF_RE = re.compile(r"\{\{#([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)#\}\}")
 BARE_TEMPLATE_REF_RE = re.compile(r"\{\{\s*(?!#)([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)\s*\}\}")
+GENERIC_TITLE_RE = re.compile(r"[\s_\-]+")
+GENERIC_TITLES = {
+    "",
+    "node",
+    "start",
+    "begin",
+    "input",
+    "llm",
+    "model",
+    "code",
+    "end",
+    "output",
+    "ifelse",
+    "if",
+    "condition",
+    "branch",
+    "httprequest",
+    "http",
+    "template",
+    "templatetransform",
+    "开始",
+    "开始节点",
+    "输入",
+    "大模型",
+    "模型",
+    "代码",
+    "结束",
+    "结束节点",
+    "输出",
+    "判断",
+    "条件",
+    "分支",
+    "接口",
+    "模板",
+}
 
 
 def validate_plan(plan: WorkflowPlan) -> list[ValidationIssue]:
@@ -42,6 +77,7 @@ def validate_plan(plan: WorkflowPlan) -> list[ValidationIssue]:
             )
     issues.extend(_validate_graph_semantics(plan))
     issues.extend(_validate_node_params(plan))
+    issues.extend(_validate_node_quality(plan))
     issues.extend(_validate_plan_variable_references(plan))
     return issues
 
@@ -264,6 +300,40 @@ def _node_issue(code: str, message: str, node_id: str, path: str) -> ValidationI
         path=f"nodes.{node_id}.{path}",
         suggestion="让 normalizer 补齐字段，或让 planner 重新生成该节点参数。",
     )
+
+
+def _validate_node_quality(plan: WorkflowPlan) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    for node in plan.nodes:
+        if node.title is not None and _is_generic_title(node.title, node.type):
+            issues.append(
+                ValidationIssue(
+                    code="PLAN_NODE_TITLE_GENERIC",
+                    message=f"node title is too generic: {node.title}",
+                    node_id=node.id,
+                    severity="warning",
+                    path=f"nodes.{node.id}.title",
+                    suggestion="使用业务语义名称，例如“接收售后诉求”“生成理发售后回复”。",
+                )
+            )
+        if node.type == "llm" and "system_prompt" in node.params and not str(node.params.get("system_prompt") or "").strip():
+            issues.append(
+                ValidationIssue(
+                    code="PLAN_LLM_SYSTEM_PROMPT_EMPTY",
+                    message="llm node has an empty system_prompt.",
+                    node_id=node.id,
+                    severity="warning",
+                    path=f"nodes.{node.id}.params.system_prompt",
+                    suggestion="system_prompt 应定义模型身份、规则、输出格式和审核标准。",
+                )
+            )
+    return issues
+
+
+def _is_generic_title(title: str, node_type: str) -> bool:
+    normalized = GENERIC_TITLE_RE.sub("", str(title or "").strip().lower())
+    default = GENERIC_TITLE_RE.sub("", node_type.replace("-", " ").title().lower())
+    return normalized in GENERIC_TITLES or normalized == default
 
 
 def _validate_plan_variable_references(plan: WorkflowPlan) -> list[ValidationIssue]:

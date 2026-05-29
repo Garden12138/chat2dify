@@ -19,8 +19,15 @@ Return only JSON. Supported node types are:
 start, llm, code, if-else, end, http-request, template-transform.
 Use exactly one start node and at least one end node. Keep nodes connected.
 For simple requests, use start -> llm -> end.
+Every node must have a business-specific title. Do not use generic titles like
+Start, LLM, End, Code, Node, 开始, 大模型, 结束. Good Chinese examples:
+接收售后诉求, 判断售后类型, 生成理发售后回复, 返回处理结果.
 Use start params.variables, not params.inputs.
-Use llm params.user_prompt, not params.prompt.
+Use llm params.system_prompt and params.user_prompt, not params.prompt.
+For every llm node:
+- system_prompt defines role, rules, output format, and review criteria.
+- user_prompt contains the specific input, task, and Dify variable references.
+Keep Dify variable references in user_prompt whenever possible.
 Variable references inside text must use Dify syntax like {{#start_1.query#}}.
 If an if-else node has cases, each outgoing edge from it must set source_handle
 to the case_id, and the else branch must use source_handle "false".
@@ -142,6 +149,7 @@ class WorkflowPlanner:
 
 def fallback_plan(message: str, *, app_name: str | None = None) -> WorkflowPlan:
     name = app_name or _title_from_message(message)
+    subject = _subject_from_title(name)
     return WorkflowPlan.model_validate(
         {
             "name": name,
@@ -150,26 +158,32 @@ def fallback_plan(message: str, *, app_name: str | None = None) -> WorkflowPlan:
                 {
                     "id": "start",
                     "type": "start",
-                    "title": "Start",
+                    "title": f"接收{subject}诉求",
                     "params": {
                         "variables": [
-                            {"name": "query", "type": "paragraph", "required": True, "label": "Query"}
+                            {"name": "query", "type": "paragraph", "required": True, "label": "用户输入"}
                         ]
                     },
                 },
                 {
                     "id": "llm",
                     "type": "llm",
-                    "title": "LLM",
+                    "title": f"生成{subject}回复",
                     "params": {
-                        "system_prompt": "You are a helpful workflow assistant.",
-                        "user_prompt": f"User request: {message}\n\nInput: {{{{#start.query#}}}}",
+                        "system_prompt": (
+                            f"你是{subject}专员，负责根据用户输入生成专业、礼貌、可执行的回复。\n"
+                            "规则：先理解用户诉求，再给出清晰处理建议；不得编造订单、金额、门店或政策信息；"
+                            "遇到不确定信息时说明需要进一步核实。\n"
+                            "输出格式：用自然中文输出，结构清楚，语气友好。\n"
+                            "审核标准：回复必须贴合用户输入，不推卸责任，不承诺超出权限的赔付或处理结果。"
+                        ),
+                        "user_prompt": f"请根据以下用户输入完成“{message}”任务：\n{{{{#start.query#}}}}",
                     },
                 },
                 {
                     "id": "end",
                     "type": "end",
-                    "title": "End",
+                    "title": f"返回{subject}结果",
                     "params": {
                         "outputs": [
                             {"variable": "answer", "value_selector": ["llm", "text"]}
@@ -215,6 +229,14 @@ def _extract_plan_payload(payload: dict[str, Any]) -> dict[str, Any]:
 def _title_from_message(message: str) -> str:
     compact = re.sub(r"\s+", " ", message).strip()
     return compact[:30] or "Generated Workflow"
+
+
+def _subject_from_title(title: str) -> str:
+    text = re.sub(r"\s+", " ", title).strip()
+    for suffix in ("工作流", "流程", "机器人", "助手", "自动化", "处理"):
+        text = text.replace(suffix, "")
+    text = text.strip(" -_：:，,。.")
+    return text[:16] or "业务"
 
 
 def _strip_json_fences(content: str) -> str:

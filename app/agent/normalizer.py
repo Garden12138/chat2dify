@@ -9,6 +9,40 @@ from typing import Any
 SOURCE_HANDLE = "source"
 FALSE_HANDLE = "false"
 DIFY_REF_PATTERN = re.compile(r"\{\{\s*#([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)#\s*\}\}")
+GENERIC_TITLES = {
+    "",
+    "node",
+    "start",
+    "begin",
+    "input",
+    "llm",
+    "model",
+    "code",
+    "end",
+    "output",
+    "ifelse",
+    "if",
+    "condition",
+    "branch",
+    "httprequest",
+    "http",
+    "template",
+    "templatetransform",
+    "开始",
+    "开始节点",
+    "输入",
+    "大模型",
+    "模型",
+    "代码",
+    "结束",
+    "结束节点",
+    "输出",
+    "判断",
+    "条件",
+    "分支",
+    "接口",
+    "模板",
+}
 
 
 @dataclass(frozen=True)
@@ -53,7 +87,7 @@ def normalize_plan_payload(payload: dict[str, Any], *, app_name: str | None = No
             case "start":
                 node["params"] = _normalize_start_params(params)
             case "llm":
-                node["params"] = _normalize_llm_params(params)
+                node["params"] = _normalize_llm_params(params, workflow_name=str(data.get("name", "")))
             case "code":
                 node["params"] = _normalize_code_params(params)
             case "if-else":
@@ -68,6 +102,15 @@ def normalize_plan_payload(payload: dict[str, Any], *, app_name: str | None = No
             changes.append(f"normalized {node.get('id', '<unknown>')} params")
 
     node_by_id = {str(node.get("id")): node for node in nodes if isinstance(node, dict)}
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        old_title = str(node.get("title") or "")
+        node_type = str(node.get("type") or "")
+        if _is_generic_title(old_title, node_type):
+            node["title"] = _semantic_title(node, data, node_by_id, edges)
+            changes.append(f"normalized generic title for {node.get('id', '<unknown>')}")
+
     edge_positions = _if_else_edge_positions(edges, node_by_id)
     for edge in edges:
         if not isinstance(edge, dict):
@@ -115,12 +158,23 @@ def _normalize_start_params(params: dict[str, Any]) -> dict[str, Any]:
     return {"variables": variables}
 
 
-def _normalize_llm_params(params: dict[str, Any]) -> dict[str, Any]:
+def _normalize_llm_params(params: dict[str, Any], *, workflow_name: str) -> dict[str, Any]:
     result = dict(params)
+    raw_prompt = str(params.get("prompt", "") or "")
+    raw_system = str(params.get("system_prompt", "") or "")
+    raw_user = str(params.get("user_prompt", "") or raw_prompt or "")
+    split_system, split_user = _split_prompt_sections(raw_user or raw_prompt)
+
+    if not raw_system.strip():
+        raw_system = split_system or _default_system_prompt(workflow_name)
+        raw_user = split_user or raw_user
+    elif split_user and not params.get("user_prompt"):
+        raw_user = split_user
+
     result.pop("prompt", None)
-    result["system_prompt"] = normalize_template_refs(str(params.get("system_prompt", "")))
+    result["system_prompt"] = normalize_template_refs(_clean_prompt(raw_system))
     result["user_prompt"] = normalize_template_refs(
-        str(params.get("user_prompt") or params.get("prompt") or "{{#start.query#}}")
+        _clean_prompt(_ensure_user_prompt(raw_user, workflow_name=workflow_name))
     )
     result.setdefault("completion_params", {"temperature": 0.7})
     return result
@@ -224,6 +278,220 @@ def _normalize_template_params(params: dict[str, Any]) -> dict[str, Any]:
         "template": template,
         "variables": _add_template_ref_variables(template, variables),
     }
+
+
+def _split_prompt_sections(text: str) -> tuple[str, str]:
+    normalized = normalize_template_refs(str(text or "").strip())
+    if not normalized:
+        return "", ""
+
+    explicit = _split_explicit_prompt_sections(normalized)
+    if explicit:
+        return explicit
+
+    system_lines: list[str] = []
+    user_lines: list[str] = []
+    for raw_line in normalized.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if DIFY_REF_PATTERN.search(line) and _looks_like_system_instruction(line):
+            mixed_system, mixed_user = _split_mixed_prompt_line(line)
+            system_lines.extend(mixed_system)
+            user_lines.extend(mixed_user)
+        elif DIFY_REF_PATTERN.search(line):
+            user_lines.append(line)
+        elif _looks_like_system_instruction(line):
+            system_lines.append(line)
+        else:
+            user_lines.append(line)
+
+    if system_lines and user_lines:
+        return "\n".join(system_lines), "\n".join(user_lines)
+    return "", normalized
+
+
+def _split_explicit_prompt_sections(text: str) -> tuple[str, str] | None:
+    labels = [
+        ("system", r"(?:system_prompt|system|系统提示词|系统)\s*[:：]"),
+        ("user", r"(?:user_prompt|user|用户提示词|用户)\s*[:：]"),
+    ]
+    matches: list[tuple[int, int, str]] = []
+    for section, pattern in labels:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            matches.append((match.start(), match.end(), section))
+    matches.sort(key=lambda item: item[0])
+    if len({section for _, _, section in matches}) < 2:
+        return None
+
+    sections: dict[str, list[str]] = {"system": [], "user": []}
+    for idx, (_, content_start, section) in enumerate(matches):
+        content_end = matches[idx + 1][0] if idx + 1 < len(matches) else len(text)
+        content = text[content_start:content_end].strip()
+        if content:
+            sections[section].append(content)
+    system_text = "\n".join(sections["system"]).strip()
+    user_text = "\n".join(sections["user"]).strip()
+    if system_text or user_text:
+        return system_text, user_text
+    return None
+
+
+def _split_mixed_prompt_line(line: str) -> tuple[list[str], list[str]]:
+    system_parts: list[str] = []
+    user_parts: list[str] = []
+    parts = [part.strip() for part in re.split(r"(?<=[。；;!！?？])\s*", line) if part.strip()]
+    if not parts:
+        return [], [line]
+
+    for part in parts:
+        if DIFY_REF_PATTERN.search(part):
+            user_parts.append(part)
+        elif _looks_like_system_instruction(part):
+            system_parts.append(part)
+        else:
+            user_parts.append(part)
+    if not system_parts or not user_parts:
+        return [], [line]
+    return system_parts, user_parts
+
+
+def _looks_like_system_instruction(line: str) -> bool:
+    lowered = line.lower()
+    markers = (
+        "你是",
+        "角色",
+        "身份",
+        "规则",
+        "输出格式",
+        "审核",
+        "标准",
+        "不得",
+        "禁止",
+        "必须",
+        "只输出",
+        "不要",
+        "保持",
+        "tone",
+        "role",
+        "rules",
+        "format",
+        "criteria",
+        "must",
+        "never",
+        "do not",
+    )
+    return any(marker in lowered or marker in line for marker in markers)
+
+
+def _clean_prompt(text: str) -> str:
+    return re.sub(r"\n{3,}", "\n\n", str(text or "").strip())
+
+
+def _ensure_user_prompt(text: str, *, workflow_name: str) -> str:
+    prompt = _clean_prompt(text)
+    if DIFY_REF_PATTERN.search(normalize_template_refs(prompt)):
+        return prompt
+    subject = _workflow_subject(workflow_name)
+    if prompt:
+        return f"{prompt}\n\n请处理以下用户输入：{{{{#start.query#}}}}"
+    return f"请根据以下用户输入完成{subject}任务：{{{{#start.query#}}}}"
+
+
+def _default_system_prompt(workflow_name: str) -> str:
+    subject = _workflow_subject(workflow_name)
+    return (
+        f"你是{subject}专员，负责根据用户输入生成专业、礼貌、可执行的回复。\n"
+        "规则：先理解用户诉求，再给出清晰处理建议；不得编造订单、金额、门店或政策信息；"
+        "遇到不确定信息时说明需要进一步核实。\n"
+        "输出格式：用自然中文输出，结构清楚，语气友好。\n"
+        "审核标准：回复必须贴合用户输入，不推卸责任，不承诺超出权限的赔付或处理结果。"
+    )
+
+
+def _semantic_title(
+    node: dict[str, Any],
+    data: dict[str, Any],
+    node_by_id: dict[str, dict[str, Any]],
+    edges: list[Any],
+) -> str:
+    node_type = str(node.get("type") or "")
+    params = node.get("params", {}) if isinstance(node.get("params"), dict) else {}
+    subject = _workflow_subject(str(data.get("name") or data.get("description") or "业务"))
+    subject = subject[:16]
+
+    match node_type:
+        case "start":
+            return f"接收{subject}诉求"
+        case "llm":
+            prompt_text = f"{params.get('system_prompt', '')}\n{params.get('user_prompt', '')}\n{node.get('id', '')}"
+            branch = _branch_label_from_text(prompt_text)
+            if branch:
+                return f"生成{branch}回复"
+            return f"生成{subject}回复"
+        case "if-else":
+            return f"判断{subject}类型"
+        case "code":
+            return f"处理{subject}数据"
+        case "http-request":
+            return f"调用{subject}接口"
+        case "template-transform":
+            return f"整理{subject}内容"
+        case "end":
+            upstream = _first_upstream(node, node_by_id, edges)
+            if upstream and upstream.get("type") == "llm":
+                upstream_title = str(upstream.get("title") or "")
+                if not _is_generic_title(upstream_title, "llm") and upstream_title.startswith("生成"):
+                    return upstream_title.replace("生成", "返回", 1).replace("回复", "结果")
+            return f"返回{subject}结果"
+    return f"{subject}节点"
+
+
+def _first_upstream(
+    node: dict[str, Any],
+    node_by_id: dict[str, dict[str, Any]],
+    edges: list[Any],
+) -> dict[str, Any] | None:
+    node_id = str(node.get("id") or "")
+    for edge in edges:
+        if isinstance(edge, dict) and str(edge.get("target") or "") == node_id:
+            return node_by_id.get(str(edge.get("source") or ""))
+    return None
+
+
+def _branch_label_from_text(text: str) -> str:
+    lowered = text.lower()
+    mapping = [
+        ("退款", "退款处理"),
+        ("refund", "退款处理"),
+        ("发票", "发票处理"),
+        ("invoice", "发票处理"),
+        ("投诉", "投诉安抚"),
+        ("complaint", "投诉安抚"),
+        ("售后", "售后服务"),
+        ("after-sales", "售后服务"),
+        ("urgent", "紧急问题"),
+        ("紧急", "紧急问题"),
+    ]
+    for marker, label in mapping:
+        if marker in lowered or marker in text:
+            return label
+    return ""
+
+
+def _workflow_subject(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    text = re.sub(r"(?i)\b(workflow|flow|assistant|bot)\b", "", text)
+    for suffix in ("工作流", "流程", "机器人", "助手", "自动化", "处理"):
+        text = text.replace(suffix, "")
+    text = text.strip(" -_：:，,。.")
+    return text or "业务"
+
+
+def _is_generic_title(title: str, node_type: str) -> bool:
+    normalized = re.sub(r"[\s_\-]+", "", str(title or "").strip().lower())
+    default = re.sub(r"[\s_\-]+", "", _default_title(node_type).lower())
+    return normalized in GENERIC_TITLES or normalized == default
 
 
 def _normalize_variables(items: Any, inputs: Any = None) -> list[dict[str, Any]]:

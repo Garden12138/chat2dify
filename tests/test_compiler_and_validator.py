@@ -20,6 +20,7 @@ def test_compiler_outputs_dify_workflow_dsl() -> None:
     plan = fallback_plan("Summarize the input", app_name="Summary")
     dsl = _compiler().compile(plan)
     data = yaml.safe_load(dsl)
+    llm = next(node for node in data["workflow"]["graph"]["nodes"] if node["id"] == "llm")
 
     assert data["version"] == "9.9.9"
     assert data["kind"] == "app"
@@ -29,6 +30,11 @@ def test_compiler_outputs_dify_workflow_dsl() -> None:
     assert data["workflow"]["environment_variables"] == []
     assert data["workflow"]["graph"]["nodes"]
     assert data["workflow"]["graph"]["edges"]
+    assert llm["data"]["title"] == "生成Summary回复"
+    assert llm["data"]["prompt_template"][0]["role"] == "system"
+    assert llm["data"]["prompt_template"][0]["text"]
+    assert llm["data"]["prompt_template"][1]["role"] == "user"
+    assert "{{#start.query#}}" in llm["data"]["prompt_template"][1]["text"]
 
 
 def test_validator_accepts_compiled_fallback_plan() -> None:
@@ -131,6 +137,28 @@ def test_plan_validator_rejects_unknown_variable_reference() -> None:
     assert any(issue.code == "PLAN_VARIABLE_UNKNOWN" for issue in issues)
 
 
+def test_plan_validator_warns_about_generic_titles_and_empty_system_prompt() -> None:
+    plan = WorkflowPlan.model_validate(
+        {
+            "name": "quality warnings",
+            "nodes": [
+                {"id": "start", "type": "start", "title": "Start", "params": {"variables": [{"name": "query"}]}},
+                {"id": "llm", "type": "llm", "title": "LLM", "params": {"system_prompt": "", "user_prompt": "{{#start.query#}}"}},
+                {"id": "end", "type": "end", "title": "End", "params": {"outputs": [{"variable": "answer", "value_selector": ["llm", "text"]}]}},
+            ],
+            "edges": [
+                {"source": "start", "target": "llm"},
+                {"source": "llm", "target": "end"},
+            ],
+        }
+    )
+
+    issues = validate_plan(plan)
+
+    assert any(issue.code == "PLAN_NODE_TITLE_GENERIC" and issue.severity == "warning" for issue in issues)
+    assert any(issue.code == "PLAN_LLM_SYSTEM_PROMPT_EMPTY" and issue.severity == "warning" for issue in issues)
+
+
 def test_normalizer_canonicalizes_common_llm_plan_shorthand() -> None:
     normalized = normalize_plan_payload(_shorthand_branch_plan(), app_name="客服分流")
     plan = WorkflowPlan.model_validate(normalized.payload)
@@ -147,6 +175,99 @@ def test_normalizer_canonicalizes_common_llm_plan_shorthand() -> None:
     assert if_node["data"]["cases"][0]["conditions"][0]["value"] == "退款"
     assert [edge["sourceHandle"] for edge in if_edges] == ["refund", "invoice", "false"]
     assert normalized.changed
+
+
+def test_normalizer_repairs_generic_titles_and_splits_llm_prompt() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "name": "理发售后服务工作流",
+            "nodes": [
+                {"id": "start", "type": "start", "title": "Start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "llm",
+                    "type": "llm",
+                    "title": "LLM",
+                    "params": {
+                        "prompt": (
+                            "你是理发门店售后服务专员。\n"
+                            "规则：先安抚，再核实事实。\n"
+                            "输出格式：先致歉，再给处理建议。\n"
+                            "请根据以下售后诉求生成回复：{{start.query}}"
+                        )
+                    },
+                },
+                {"id": "end", "type": "end", "title": "End", "params": {"outputs": [{"variable": "answer", "value_selector": ["llm", "text"]}]}},
+            ],
+            "edges": [
+                {"source": "start", "target": "llm"},
+                {"source": "llm", "target": "end"},
+            ],
+        }
+    )
+
+    nodes = {node["id"]: node for node in normalized.payload["nodes"]}
+
+    assert nodes["start"]["title"] == "接收理发售后服务诉求"
+    assert nodes["llm"]["title"] == "生成售后服务回复"
+    assert nodes["end"]["title"] == "返回售后服务结果"
+    assert "你是理发门店售后服务专员" in nodes["llm"]["params"]["system_prompt"]
+    assert "输出格式" in nodes["llm"]["params"]["system_prompt"]
+    assert nodes["llm"]["params"]["user_prompt"] == "请根据以下售后诉求生成回复：{{#start.query#}}"
+    assert "normalized generic title" in " ".join(normalized.changes)
+
+
+def test_normalizer_splits_mixed_single_line_llm_prompt() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "name": "理发售后服务工作流",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "llm",
+                    "type": "llm",
+                    "params": {
+                        "user_prompt": (
+                            "你是理发门店售后服务专员。规则：先安抚，再核实事实。"
+                            "输出格式：先致歉，再给处理建议。请根据以下售后诉求生成回复：{{start.query}}"
+                        )
+                    },
+                },
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["llm", "text"]}]}},
+            ],
+            "edges": [
+                {"source": "start", "target": "llm"},
+                {"source": "llm", "target": "end"},
+            ],
+        }
+    )
+
+    llm = next(node for node in normalized.payload["nodes"] if node["id"] == "llm")
+
+    assert "你是理发门店售后服务专员" in llm["params"]["system_prompt"]
+    assert "输出格式" in llm["params"]["system_prompt"]
+    assert llm["params"]["user_prompt"] == "请根据以下售后诉求生成回复：{{#start.query#}}"
+
+
+def test_normalizer_adds_default_system_prompt_when_only_user_prompt_is_present() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "name": "理发售后服务工作流",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {"id": "llm", "type": "llm", "params": {"user_prompt": "请处理 {{#start.query#}}"}},
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["llm", "text"]}]}},
+            ],
+            "edges": [
+                {"source": "start", "target": "llm"},
+                {"source": "llm", "target": "end"},
+            ],
+        }
+    )
+
+    llm = next(node for node in normalized.payload["nodes"] if node["id"] == "llm")
+
+    assert "你是理发售后服务专员" in llm["params"]["system_prompt"]
+    assert llm["params"]["user_prompt"] == "请处理 {{#start.query#}}"
 
 
 def test_normalizer_infers_code_outputs_from_return_dict() -> None:

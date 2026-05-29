@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from app.agent.planner import PlannerError, WorkflowPlanner
+from app.agent.planner import PlannerError, WorkflowPlanner, fallback_plan
 from app.config import Settings
 
 
@@ -39,6 +39,18 @@ def test_planner_fallback_when_no_openai_key() -> None:
     assert result.attempts == 0
     assert result.plan.name == "Fallback"
     assert result.metadata()["mode"] == "fallback"
+
+
+def test_fallback_plan_uses_semantic_titles_and_split_prompts() -> None:
+    plan = fallback_plan("理发售后服务工作流")
+    titles = [node.title for node in plan.nodes]
+    llm = next(node for node in plan.nodes if node.type == "llm")
+
+    assert titles == ["接收理发售后服务诉求", "生成理发售后服务回复", "返回理发售后服务结果"]
+    assert "你是理发售后服务专员" in llm.params["system_prompt"]
+    assert "{{#start.query#}}" in llm.params["user_prompt"]
+    assert "审核标准" in llm.params["system_prompt"]
+    assert "审核标准" not in llm.params["user_prompt"]
 
 
 def test_planner_success_normalizes_shorthand() -> None:

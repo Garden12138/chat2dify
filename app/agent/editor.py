@@ -26,6 +26,11 @@ Supported node types are only:
 start, llm, code, if-else, end, http-request, template-transform.
 Prefer the smallest safe change that satisfies the request.
 Preserve existing node ids when a node keeps the same purpose.
+Every node must keep or receive a business-specific title. Do not use generic
+titles like Start, LLM, End, Code, Node, 开始, 大模型, 结束.
+For every llm node, split prompts clearly:
+- system_prompt defines role, rules, output format, and review criteria.
+- user_prompt contains the specific input, task, and Dify variable references.
 Preserve existing start inputs unless the user explicitly asks to change them.
 Preserve existing end outputs unless the user explicitly asks to change them.
 Preserve all unrelated node params and edges exactly.
@@ -104,6 +109,9 @@ class WorkflowEditPlanner:
                 "default": "Make a minimal targeted edit.",
                 "must_preserve": [
                     "Existing node ids for unchanged purposes.",
+                    "Business-specific node titles; never return generic Start/LLM/End titles.",
+                    "LLM system_prompt for identity/rules/output format/review criteria.",
+                    "LLM user_prompt for the current input/task and Dify variables.",
                     "Existing start inputs unless explicitly requested.",
                     "Existing end outputs unless explicitly requested.",
                     "Unrelated node params and edges.",

@@ -54,6 +54,28 @@ def test_edit_planner_success_returns_full_revised_plan() -> None:
     assert result.metadata()["mode"] == "llm-edit"
 
 
+def test_edit_planner_normalizes_generic_titles_and_empty_system_prompt() -> None:
+    current = fallback_plan("理发售后服务工作流")
+    revised = current.model_dump()
+    revised["nodes"][0]["title"] = "Start"
+    revised["nodes"][1]["title"] = "LLM"
+    revised["nodes"][1]["params"].pop("system_prompt")
+    revised["nodes"][1]["params"]["user_prompt"] = "请根据以下售后诉求生成回复：{{#start.query#}}"
+    revised["nodes"][2]["title"] = "End"
+    planner = FakeEditPlanner([json.dumps(revised)])
+
+    result = planner.generate("修复节点名称", current_plan=current, dsl_version="9.9.9")
+
+    assert [node.title for node in result.plan.nodes] == [
+        "接收理发售后服务诉求",
+        "生成售后服务回复",
+        "返回售后服务结果",
+    ]
+    assert "你是理发售后服务专员" in result.plan.nodes[1].params["system_prompt"]
+    assert result.plan.nodes[1].params["user_prompt"] == "请根据以下售后诉求生成回复：{{#start.query#}}"
+    assert result.repaired is True
+
+
 def test_edit_planner_self_repairs_after_validation_failure() -> None:
     current = fallback_plan("hello", app_name="Existing")
     bad = current.model_dump()
