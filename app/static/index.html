@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>chat2dify</title>
-    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="stylesheet" href="/static/styles.css?v=workbench-20260529">
   </head>
   <body>
     <header class="app-header">
@@ -13,6 +13,7 @@
         <p class="subtitle">Workflow console for the local Dify sidecar</p>
       </div>
       <div class="header-actions">
+        <button id="refresh-health" type="button" class="secondary">Refresh</button>
         <span id="health-status" class="status-pill status-muted">Checking</span>
       </div>
     </header>
@@ -79,6 +80,10 @@
             Inputs JSON
             <textarea id="run-inputs" name="inputs" rows="6" spellcheck="false" required>{"query":"我要投诉订单配送太慢"}</textarea>
           </label>
+          <div class="button-row">
+            <button id="format-inputs" type="button" class="secondary">Format JSON</button>
+            <button id="reset-inputs" type="button" class="secondary">Reset JSON</button>
+          </div>
           <label>
             Timeout seconds
             <input id="run-timeout" name="timeout_seconds" type="number" min="1" step="1" value="120">
@@ -87,20 +92,44 @@
         </form>
       </section>
 
+      <section class="history-panel" aria-labelledby="history-title">
+        <div class="panel-heading">
+          <h2 id="history-title">Recent Apps</h2>
+          <button id="clear-history" type="button" class="secondary">Clear</button>
+        </div>
+        <div id="history-list" class="history-list"></div>
+      </section>
+
       <section class="result-panel" aria-labelledby="result-title">
         <div class="panel-heading">
           <h2 id="result-title">Result</h2>
-          <button id="clear-result" type="button" class="secondary">Clear</button>
+          <div class="result-actions">
+            <a id="open-workflow" class="ghost-link is-hidden" href="#" target="_blank" rel="noreferrer">Open workflow</a>
+            <button id="copy-app-id" type="button" class="secondary" disabled>Copy app ID</button>
+            <button id="copy-workflow-url" type="button" class="secondary" disabled>Copy URL</button>
+            <button id="copy-hash" type="button" class="secondary" disabled>Copy hash</button>
+            <button id="copy-raw-json" type="button" class="secondary">Copy JSON</button>
+            <button id="clear-result" type="button" class="secondary">Clear</button>
+          </div>
         </div>
         <div id="summary-grid" class="summary-grid"></div>
-        <div id="changes-list" class="changes-list"></div>
-        <details open>
-          <summary>Response JSON</summary>
+        <div id="result-tabs" class="result-tabs" role="tablist" aria-label="Result sections">
+          <button type="button" class="tab-button is-active" data-tab="changes">Changes</button>
+          <button type="button" class="tab-button" data-tab="validation">Validation</button>
+          <button type="button" class="tab-button" data-tab="outputs">Outputs</button>
+          <button type="button" class="tab-button" data-tab="plan">Plan</button>
+          <button type="button" class="tab-button" data-tab="raw">Raw JSON</button>
+        </div>
+        <section id="tab-changes" class="tab-panel" data-tab-panel="changes"></section>
+        <section id="tab-validation" class="tab-panel is-hidden" data-tab-panel="validation"></section>
+        <section id="tab-outputs" class="tab-panel is-hidden" data-tab-panel="outputs"></section>
+        <section id="tab-plan" class="tab-panel is-hidden" data-tab-panel="plan"></section>
+        <section id="tab-raw" class="tab-panel is-hidden" data-tab-panel="raw">
           <pre id="result-json" class="json-output">{}</pre>
-        </details>
+        </section>
       </section>
     </main>
 
-    <script src="/static/app.js" defer></script>
+    <script src="/static/app.js?v=workbench-20260529" defer></script>
   </body>
 </html>

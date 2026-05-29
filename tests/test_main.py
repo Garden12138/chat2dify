@@ -25,10 +25,16 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert index.status_code == 200
     assert "chat2dify" in index.text
     assert 'id="create-form"' in index.text
+    assert 'id="history-list"' in index.text
+    assert 'id="result-tabs"' in index.text
     assert script.status_code == 200
     assert "handleCreate" in script.text
+    assert "localStorage" in script.text
+    assert "renderValidationPanel" in script.text
     assert styles.status_code == 200
     assert ".workspace" in styles.text
+    assert ".history-item" in styles.text
+    assert ".tab-button" in styles.text
 
 
 def test_draft_response_includes_phase2_fields(monkeypatch) -> None:

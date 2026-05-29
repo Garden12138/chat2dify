@@ -1,28 +1,50 @@
+const HISTORY_KEY = "chat2dify.workbench.history.v1";
+const MAX_HISTORY_ITEMS = 12;
+const DEFAULT_RUN_INPUTS = '{"query":"我要投诉订单配送太慢"}';
+
 const state = {
   lastResponse: {},
+  history: [],
+  activeTab: "changes",
 };
 
 const els = {
   healthStatus: document.querySelector("#health-status"),
+  refreshHealth: document.querySelector("#refresh-health"),
   resultJson: document.querySelector("#result-json"),
   summaryGrid: document.querySelector("#summary-grid"),
-  changesList: document.querySelector("#changes-list"),
+  resultTabs: document.querySelector("#result-tabs"),
+  tabPanels: Array.from(document.querySelectorAll("[data-tab-panel]")),
   createForm: document.querySelector("#create-form"),
   createStatus: document.querySelector("#create-status"),
+  modifyForm: document.querySelector("#modify-form"),
   modifyStatus: document.querySelector("#modify-status"),
+  runForm: document.querySelector("#run-form"),
   runStatus: document.querySelector("#run-status"),
+  createAppName: document.querySelector("#create-app-name"),
   modifyAppId: document.querySelector("#modify-app-id"),
   modifyExpectedHash: document.querySelector("#modify-expected-hash"),
   runAppId: document.querySelector("#run-app-id"),
+  runInputs: document.querySelector("#run-inputs"),
+  historyList: document.querySelector("#history-list"),
+  openWorkflow: document.querySelector("#open-workflow"),
+  copyAppId: document.querySelector("#copy-app-id"),
+  copyWorkflowUrl: document.querySelector("#copy-workflow-url"),
+  copyHash: document.querySelector("#copy-hash"),
+  copyRawJson: document.querySelector("#copy-raw-json"),
 };
 
 document.addEventListener("DOMContentLoaded", () => {
+  state.history = loadHistory();
   bindEvents();
+  renderHistory();
   refreshHealth();
   renderResult({});
 });
 
 function bindEvents() {
+  els.refreshHealth.addEventListener("click", refreshHealth);
+
   els.createForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     await handleCreate();
@@ -36,24 +58,44 @@ function bindEvents() {
     await handleModify("/api/workflows/modify/apply", "apply");
   });
 
-  document.querySelector("#run-form").addEventListener("submit", async (event) => {
+  els.runForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     await handleRun();
   });
 
-  document.querySelector("#clear-result").addEventListener("click", () => {
-    renderResult({});
-    setPanelStatus(els.createStatus, "");
-    setPanelStatus(els.modifyStatus, "");
-    setPanelStatus(els.runStatus, "");
+  document.querySelector("#format-inputs").addEventListener("click", formatRunInputs);
+  document.querySelector("#reset-inputs").addEventListener("click", resetRunInputs);
+  document.querySelector("#clear-result").addEventListener("click", clearResult);
+  document.querySelector("#clear-history").addEventListener("click", clearHistory);
+
+  els.resultTabs.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-tab]");
+    if (button) {
+      setActiveTab(button.dataset.tab);
+    }
   });
+
+  els.historyList.addEventListener("click", (event) => {
+    const item = event.target.closest("[data-history-index]");
+    if (item) {
+      selectHistoryItem(Number(item.dataset.historyIndex));
+    }
+  });
+
+  els.copyAppId.addEventListener("click", () => copyValue(currentAppId(), els.copyAppId, "Copy app ID"));
+  els.copyWorkflowUrl.addEventListener("click", () => copyValue(currentWorkflowUrl(), els.copyWorkflowUrl, "Copy URL"));
+  els.copyHash.addEventListener("click", () => copyValue(currentHash(), els.copyHash, "Copy hash"));
+  els.copyRawJson.addEventListener("click", () => copyValue(JSON.stringify(state.lastResponse, null, 2), els.copyRawJson, "Copy JSON"));
 }
 
 async function refreshHealth() {
   try {
+    els.healthStatus.textContent = "Checking";
+    els.healthStatus.className = "status-pill status-muted";
     const data = await requestJson("/health");
     const version = data?.dify?.app_dsl_version || "unknown";
-    els.healthStatus.textContent = `Healthy · DSL ${version}`;
+    const source = data?.dify?.git_describe || "source";
+    els.healthStatus.textContent = `Healthy · DSL ${version} · ${source}`;
     els.healthStatus.className = "status-pill status-ok";
   } catch (error) {
     els.healthStatus.textContent = "Offline";
@@ -71,18 +113,22 @@ async function handleCreate() {
       method: "POST",
       body: payload,
     });
-    syncAppId(data.app_id);
+    syncAppContext(data);
+    rememberApp(data, {
+      operation: "create",
+      request: payload.message,
+      appName: payload.app_name,
+    });
     setPanelStatus(els.createStatus, data.status || "Created", "ok");
-    renderResult(data);
+    renderResult(data, "changes");
   });
 }
 
 async function handleModify(path, mode) {
-  const form = document.querySelector("#modify-form");
-  if (!form.reportValidity()) {
+  if (!els.modifyForm.reportValidity()) {
     return;
   }
-  await withBusy(document.querySelector("#modify-form"), els.modifyStatus, mode === "apply" ? "Applying" : "Previewing", async () => {
+  await withBusy(els.modifyForm, els.modifyStatus, mode === "apply" ? "Applying" : "Previewing", async () => {
     const payload = {
       app_id: valueOf("#modify-app-id"),
       message: valueOf("#modify-message"),
@@ -93,20 +139,20 @@ async function handleModify(path, mode) {
       method: "POST",
       body: payload,
     });
-    if (data.new_hash) {
-      document.querySelector("#modify-expected-hash").value = data.new_hash;
-    } else if (data.base_hash && !payload.expected_hash) {
-      document.querySelector("#modify-expected-hash").value = data.base_hash;
-    }
-    syncAppId(data.app_id || payload.app_id);
+    syncAppContext(data, payload.app_id);
+    rememberApp(data, {
+      operation: mode === "apply" ? "modify apply" : "modify preview",
+      request: payload.message,
+      appId: payload.app_id,
+    });
     const guard = data.guard?.risk ? `Guard ${data.guard.risk}` : "Ready";
     setPanelStatus(els.modifyStatus, mode === "apply" ? "Applied" : guard, guardClass(data.guard));
-    renderResult(data);
+    renderResult(data, "changes");
   });
 }
 
 async function handleRun() {
-  await withBusy(document.querySelector("#run-form"), els.runStatus, "Running", async () => {
+  await withBusy(els.runForm, els.runStatus, "Running", async () => {
     const payload = {
       app_id: valueOf("#run-app-id"),
       inputs: parseJsonField("#run-inputs", "Inputs JSON"),
@@ -116,8 +162,15 @@ async function handleRun() {
       method: "POST",
       body: payload,
     });
+    syncAppContext(data, payload.app_id);
+    rememberApp(data, {
+      operation: "run draft",
+      request: JSON.stringify(payload.inputs),
+      appId: payload.app_id,
+      lastRunStatus: data.status,
+    });
     setPanelStatus(els.runStatus, data.status || "Done", data.ok ? "ok" : "error");
-    renderResult(data);
+    renderResult(data, "outputs");
   });
 }
 
@@ -131,7 +184,7 @@ async function withBusy(container, statusElement, label, action) {
     await action();
   } catch (error) {
     setPanelStatus(statusElement, "Error", "error");
-    renderResult(error.payload || { error: error.message });
+    renderResult(error.payload || { error: error.message }, "raw");
   } finally {
     buttons.forEach((button) => {
       button.disabled = false;
@@ -159,11 +212,16 @@ async function requestJson(path, options = {}) {
   return data;
 }
 
-function renderResult(data) {
+function renderResult(data, preferredTab = state.activeTab) {
   state.lastResponse = data || {};
   els.resultJson.textContent = JSON.stringify(state.lastResponse, null, 2);
   renderSummary(state.lastResponse);
-  renderChanges(state.lastResponse);
+  renderChangesPanel(state.lastResponse);
+  renderValidationPanel(state.lastResponse);
+  renderOutputsPanel(state.lastResponse);
+  renderPlanPanel(state.lastResponse);
+  renderResultActions(state.lastResponse);
+  setActiveTab(preferredTab);
 }
 
 function renderSummary(data) {
@@ -172,14 +230,24 @@ function renderSummary(data) {
     ["Workflow", linkValue(data.workflow_url)],
     ["Status", data.status ?? data.guard?.risk],
     ["Run OK", typeof data.ok === "boolean" ? String(data.ok) : undefined],
+    ["Guard", data.guard?.risk],
+    ["Planner", data.planner?.mode],
+    ["Fallback", typeof data.planner?.used_fallback === "boolean" ? String(data.planner.used_fallback) : undefined],
+    ["Attempts", data.planner?.attempts],
     ["Base hash", data.base_hash],
     ["New hash", data.new_hash],
+    ["Sync", data.sync?.result],
     ["Run ID", data.workflow_run_id],
     ["Task ID", data.task_id],
     ["Tokens", data.total_tokens],
     ["Steps", data.total_steps],
     ["Error", data.error || data.detail?.message || data.detail],
   ].filter((item) => item[1] !== undefined && item[1] !== null && item[1] !== "");
+
+  if (items.length === 0) {
+    els.summaryGrid.replaceChildren(emptyState("Run an action to see workflow details here."));
+    return;
+  }
 
   els.summaryGrid.replaceChildren(
     ...items.map(([label, value]) => {
@@ -201,26 +269,199 @@ function renderSummary(data) {
   );
 }
 
-function renderChanges(data) {
-  const messages = [];
+function renderChangesPanel(data) {
+  const panel = panelFor("changes");
+  const rows = [];
+  if (data.explanation?.summary) {
+    rows.push({ tone: "info", text: data.explanation.summary });
+  }
+  if (Array.isArray(data.explanation?.steps)) {
+    rows.push(...data.explanation.steps.map((step) => ({ tone: "info", text: step })));
+  }
   if (Array.isArray(data.changes)) {
-    messages.push(...data.changes.map((change) => change.message || `${change.type}: ${change.target}`));
+    rows.push(...data.changes.map((change) => ({ tone: changeTone(change), text: changeMessage(change) })));
+  }
+  if (data.guard) {
+    rows.push({ tone: guardClass(data.guard), text: guardMessage(data.guard) });
   }
   if (Array.isArray(data.guard?.issues)) {
-    messages.push(...data.guard.issues.map((issue) => `${issue.severity}: ${issue.message}`));
+    rows.push(...data.guard.issues.map((issue) => ({ tone: severityTone(issue.severity), text: issueMessage(issue) })));
   }
-  if (data.outputs) {
-    messages.push(`Outputs: ${JSON.stringify(data.outputs)}`);
+  if (data.sync?.result) {
+    rows.push({ tone: "ok", text: `Sync: ${data.sync.result}${data.sync.updated_at ? ` at ${data.sync.updated_at}` : ""}` });
+  }
+  if (data.planner) {
+    rows.push({ tone: "muted", text: plannerMessage(data.planner) });
   }
 
-  els.changesList.replaceChildren(
-    ...messages.slice(0, 12).map((message) => {
-      const row = document.createElement("div");
-      row.className = "change-row";
-      row.textContent = message;
-      return row;
-    })
-  );
+  if (rows.length === 0) {
+    panel.replaceChildren(emptyState("No changes or planner diagnostics yet."));
+    return;
+  }
+
+  panel.replaceChildren(...rows.slice(0, 24).map(renderMessageRow));
+}
+
+function renderValidationPanel(data) {
+  const panel = panelFor("validation");
+  const validation = data.validation || data.detail?.validation;
+  const issues = validation?.issues || data.detail?.issues || [];
+  const rows = [];
+  if (validation) {
+    rows.push({ tone: validation.ok ? "ok" : "error", text: `Validation: ${validation.ok ? "ok" : "failed"}` });
+  }
+  if (Array.isArray(issues)) {
+    rows.push(...issues.map((issue) => ({ tone: severityTone(issue.severity), text: issueMessage(issue) })));
+  }
+  if (data.detail?.code) {
+    rows.push({ tone: "error", text: `Code: ${data.detail.code}` });
+  }
+  if (data.detail?.message) {
+    rows.push({ tone: "error", text: data.detail.message });
+  }
+
+  if (rows.length === 0) {
+    panel.replaceChildren(emptyState("No validation issues reported."));
+    return;
+  }
+
+  panel.replaceChildren(...rows.map(renderMessageRow));
+}
+
+function renderOutputsPanel(data) {
+  const panel = panelFor("outputs");
+  const sections = [];
+  if (data.outputs !== undefined && data.outputs !== null) {
+    sections.push(jsonBlock("Outputs", data.outputs));
+  }
+  if (data.events_summary) {
+    sections.push(keyValueGroup("Run summary", data.events_summary));
+  }
+  if (data.final_event) {
+    sections.push(jsonBlock("Final event", data.final_event));
+  }
+  if (data.error) {
+    sections.push(renderMessageRow({ tone: "error", text: String(data.error) }));
+  }
+
+  if (sections.length === 0) {
+    panel.replaceChildren(emptyState("Run a draft workflow to see outputs and SSE summary here."));
+    return;
+  }
+
+  panel.replaceChildren(...sections);
+}
+
+function renderPlanPanel(data) {
+  const panel = panelFor("plan");
+  const sections = [];
+  if (data.plan) {
+    sections.push(planSummary(data.plan));
+    sections.push(jsonBlock("Plan IR", data.plan));
+  }
+  if (data.before_plan) {
+    sections.push(jsonBlock("Before plan", data.before_plan));
+  }
+  if (data.raw_plan) {
+    sections.push(jsonBlock("Raw plan", data.raw_plan));
+  }
+
+  if (sections.length === 0) {
+    panel.replaceChildren(emptyState("Create or modify a workflow to inspect its Plan IR."));
+    return;
+  }
+
+  panel.replaceChildren(...sections);
+}
+
+function renderResultActions(data) {
+  const appId = data.app_id || "";
+  const workflowUrl = data.workflow_url || "";
+  const hash = data.new_hash || data.base_hash || "";
+  els.copyAppId.disabled = !appId;
+  els.copyWorkflowUrl.disabled = !workflowUrl;
+  els.copyHash.disabled = !hash;
+  if (workflowUrl) {
+    els.openWorkflow.href = workflowUrl;
+    els.openWorkflow.classList.remove("is-hidden");
+  } else {
+    els.openWorkflow.href = "#";
+    els.openWorkflow.classList.add("is-hidden");
+  }
+}
+
+function setActiveTab(tabName) {
+  state.activeTab = tabName;
+  Array.from(els.resultTabs.querySelectorAll("[data-tab]")).forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.tab === tabName);
+  });
+  els.tabPanels.forEach((panel) => {
+    panel.classList.toggle("is-hidden", panel.dataset.tabPanel !== tabName);
+  });
+}
+
+function panelFor(name) {
+  return document.querySelector(`[data-tab-panel="${name}"]`);
+}
+
+function renderMessageRow({ tone = "muted", text }) {
+  const row = document.createElement("div");
+  row.className = `message-row tone-${tone}`;
+  row.textContent = text;
+  return row;
+}
+
+function keyValueGroup(title, values) {
+  const section = document.createElement("section");
+  section.className = "result-section";
+  const heading = document.createElement("h3");
+  heading.textContent = title;
+  const grid = document.createElement("div");
+  grid.className = "mini-grid";
+  Object.entries(values || {}).forEach(([key, value]) => {
+    const item = document.createElement("div");
+    item.className = "mini-item";
+    const label = document.createElement("span");
+    label.className = "summary-label";
+    label.textContent = key;
+    const body = document.createElement("span");
+    body.className = "summary-value";
+    body.textContent = typeof value === "object" && value !== null ? JSON.stringify(value) : String(value);
+    item.append(label, body);
+    grid.append(item);
+  });
+  section.append(heading, grid);
+  return section;
+}
+
+function jsonBlock(title, value) {
+  const section = document.createElement("section");
+  section.className = "result-section";
+  const heading = document.createElement("h3");
+  heading.textContent = title;
+  const pre = document.createElement("pre");
+  pre.className = "json-output compact-json";
+  pre.textContent = JSON.stringify(value, null, 2);
+  section.append(heading, pre);
+  return section;
+}
+
+function planSummary(plan) {
+  const nodes = Array.isArray(plan.nodes) ? plan.nodes : [];
+  const edges = Array.isArray(plan.edges) ? plan.edges : [];
+  return keyValueGroup("Plan summary", {
+    name: plan.name || "Untitled",
+    nodes: nodes.length,
+    edges: edges.length,
+    node_types: [...new Set(nodes.map((node) => node.type).filter(Boolean))].join(", ") || "none",
+  });
+}
+
+function emptyState(message) {
+  const item = document.createElement("div");
+  item.className = "empty-state";
+  item.textContent = message;
+  return item;
 }
 
 function linkValue(url) {
@@ -235,12 +476,192 @@ function linkValue(url) {
   return link;
 }
 
-function syncAppId(appId) {
+function syncAppContext(data, fallbackAppId = "") {
+  const appId = data.app_id || fallbackAppId;
   if (!appId) {
     return;
   }
   els.modifyAppId.value = appId;
   els.runAppId.value = appId;
+  const latestHash = data.new_hash || data.base_hash;
+  if (latestHash) {
+    els.modifyExpectedHash.value = latestHash;
+  }
+}
+
+function loadHistory() {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    return [];
+  }
+}
+
+function saveHistory() {
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(state.history.slice(0, MAX_HISTORY_ITEMS)));
+}
+
+function rememberApp(data, meta = {}) {
+  const appId = data.app_id || meta.appId;
+  if (!appId) {
+    return;
+  }
+  const previous = state.history.find((item) => item.app_id === appId) || {};
+  const record = {
+    ...previous,
+    app_id: appId,
+    app_name: meta.appName || data.plan?.name || previous.app_name || "",
+    workflow_url: data.workflow_url || previous.workflow_url || "",
+    base_hash: data.base_hash || previous.base_hash || "",
+    new_hash: data.new_hash || previous.new_hash || "",
+    last_request: meta.request || previous.last_request || "",
+    last_operation: meta.operation || previous.last_operation || "",
+    last_run_status: meta.lastRunStatus || (typeof data.ok === "boolean" ? data.status : previous.last_run_status || ""),
+    updated_at: new Date().toISOString(),
+  };
+  state.history = [record, ...state.history.filter((item) => item.app_id !== appId)].slice(0, MAX_HISTORY_ITEMS);
+  saveHistory();
+  renderHistory();
+}
+
+function renderHistory() {
+  if (state.history.length === 0) {
+    els.historyList.replaceChildren(emptyState("Created and modified apps will appear here."));
+    return;
+  }
+
+  const items = state.history.map((item, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "history-item";
+    button.dataset.historyIndex = String(index);
+    const title = document.createElement("span");
+    title.className = "history-title";
+    title.textContent = item.app_name || item.app_id;
+    const id = document.createElement("span");
+    id.className = "history-id";
+    id.textContent = item.app_id;
+    const meta = document.createElement("span");
+    meta.className = "history-meta";
+    meta.textContent = historyMeta(item);
+    const request = document.createElement("span");
+    request.className = "history-request";
+    request.textContent = item.last_request || "No recent request";
+    button.append(title, id, meta, request);
+    return button;
+  });
+  els.historyList.replaceChildren(...items);
+}
+
+function historyMeta(item) {
+  const parts = [item.last_operation, item.last_run_status, item.new_hash || item.base_hash ? "hash saved" : ""].filter(Boolean);
+  if (item.updated_at) {
+    parts.push(new Date(item.updated_at).toLocaleString());
+  }
+  return parts.join(" · ");
+}
+
+function selectHistoryItem(index) {
+  const item = state.history[index];
+  if (!item) {
+    return;
+  }
+  syncAppContext(
+    {
+      app_id: item.app_id,
+      workflow_url: item.workflow_url,
+      base_hash: item.base_hash,
+      new_hash: item.new_hash,
+    },
+    item.app_id
+  );
+  if (item.app_name) {
+    els.createAppName.value = item.app_name;
+  }
+  renderResult(
+    {
+      app_id: item.app_id,
+      workflow_url: item.workflow_url,
+      base_hash: item.base_hash,
+      new_hash: item.new_hash,
+      status: item.last_run_status || item.last_operation,
+    },
+    "changes"
+  );
+}
+
+function clearHistory() {
+  state.history = [];
+  saveHistory();
+  renderHistory();
+}
+
+function clearResult() {
+  renderResult({});
+  setPanelStatus(els.createStatus, "");
+  setPanelStatus(els.modifyStatus, "");
+  setPanelStatus(els.runStatus, "");
+}
+
+function formatRunInputs() {
+  try {
+    const value = parseJsonField("#run-inputs", "Inputs JSON");
+    els.runInputs.value = JSON.stringify(value, null, 2);
+    setPanelStatus(els.runStatus, "Formatted", "ok");
+  } catch (error) {
+    setPanelStatus(els.runStatus, error.message, "error");
+    renderResult({ error: error.message }, "raw");
+  }
+}
+
+function resetRunInputs() {
+  els.runInputs.value = DEFAULT_RUN_INPUTS;
+  setPanelStatus(els.runStatus, "Reset", "muted");
+}
+
+async function copyValue(value, button, originalLabel) {
+  if (!value) {
+    return;
+  }
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+    } else {
+      const textarea = document.createElement("textarea");
+      textarea.value = value;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.append(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      textarea.remove();
+    }
+    flashButton(button, "Copied", originalLabel);
+  } catch (error) {
+    flashButton(button, "Copy failed", originalLabel);
+  }
+}
+
+function flashButton(button, text, originalLabel) {
+  button.textContent = text;
+  setTimeout(() => {
+    button.textContent = originalLabel;
+  }, 1200);
+}
+
+function currentAppId() {
+  return state.lastResponse.app_id || "";
+}
+
+function currentWorkflowUrl() {
+  return state.lastResponse.workflow_url || "";
+}
+
+function currentHash() {
+  return state.lastResponse.new_hash || state.lastResponse.base_hash || "";
 }
 
 function valueOf(selector) {
@@ -271,8 +692,21 @@ function setPanelStatus(element, text, tone = "muted") {
     element.className = "panel-status";
     return;
   }
-  const className = tone === "ok" ? "status-ok" : tone === "error" ? "status-error" : tone === "warning" ? "status-warning" : "status-muted";
+  const className = toneClass(tone);
   element.className = `panel-status ${className}`;
+}
+
+function toneClass(tone) {
+  if (tone === "ok") {
+    return "status-ok";
+  }
+  if (tone === "error") {
+    return "status-error";
+  }
+  if (tone === "warning") {
+    return "status-warning";
+  }
+  return "status-muted";
 }
 
 function guardClass(guard) {
@@ -288,6 +722,81 @@ function guardClass(guard) {
   return "ok";
 }
 
+function severityTone(severity) {
+  if (severity === "error" || severity === "high") {
+    return "error";
+  }
+  if (severity === "warning" || severity === "medium") {
+    return "warning";
+  }
+  return "muted";
+}
+
+function changeTone(change) {
+  if (change?.type === "deleted") {
+    return "warning";
+  }
+  if (change?.type === "added") {
+    return "ok";
+  }
+  return "info";
+}
+
+function changeMessage(change) {
+  if (typeof change === "string") {
+    return change;
+  }
+  return change?.message || [change?.type, change?.target].filter(Boolean).join(": ") || JSON.stringify(change);
+}
+
+function guardMessage(guard) {
+  if (!guard) {
+    return "Guard: not reported";
+  }
+  const parts = [`Guard: ${guard.risk || "unknown"}`];
+  if (guard.no_op) {
+    parts.push("no-op");
+  }
+  if (guard.ok === false) {
+    parts.push("blocked");
+  }
+  return parts.join(" · ");
+}
+
+function plannerMessage(planner) {
+  const parts = [`Planner: ${planner.mode || "unknown"}`];
+  if (planner.attempts !== undefined) {
+    parts.push(`${planner.attempts} attempt${planner.attempts === 1 ? "" : "s"}`);
+  }
+  if (planner.used_fallback) {
+    parts.push("fallback");
+  }
+  if (planner.repaired) {
+    parts.push("self-repaired");
+  }
+  return parts.join(" · ");
+}
+
+function issueMessage(issue) {
+  if (typeof issue === "string") {
+    return issue;
+  }
+  const parts = [];
+  if (issue.severity) {
+    parts.push(issue.severity);
+  }
+  if (issue.path) {
+    parts.push(issue.path);
+  }
+  if (issue.message) {
+    parts.push(issue.message);
+  }
+  if (issue.suggestion) {
+    parts.push(`Suggestion: ${issue.suggestion}`);
+  }
+  return parts.join(" · ") || JSON.stringify(issue);
+}
+
 function extractErrorMessage(data, status) {
   if (typeof data === "string") {
     return data || `Request failed with ${status}`;
@@ -297,6 +806,9 @@ function extractErrorMessage(data, status) {
   }
   if (data?.detail?.message) {
     return data.detail.message;
+  }
+  if (data?.error) {
+    return data.error;
   }
   return `Request failed with ${status}`;
 }
