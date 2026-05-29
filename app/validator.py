@@ -9,7 +9,17 @@ from pydantic import ValidationError
 from app.models import ValidationIssue, WorkflowPlan
 
 
-SUPPORTED_NODE_TYPES = {"start", "llm", "code", "if-else", "end", "http-request", "template-transform"}
+SUPPORTED_NODE_TYPES = {
+    "start",
+    "llm",
+    "code",
+    "if-else",
+    "end",
+    "http-request",
+    "template-transform",
+    "question-classifier",
+    "parameter-extractor",
+}
 TEMPLATE_REF_RE = re.compile(r"\{\{#([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)#\}\}")
 BARE_TEMPLATE_REF_RE = re.compile(r"\{\{\s*(?!#)([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)\s*\}\}")
 GENERIC_TITLE_RE = re.compile(r"[\s_\-]+")
@@ -32,6 +42,10 @@ GENERIC_TITLES = {
     "http",
     "template",
     "templatetransform",
+    "questionclassifier",
+    "classifier",
+    "parameterextractor",
+    "extractor",
     "开始",
     "开始节点",
     "输入",
@@ -46,6 +60,21 @@ GENERIC_TITLES = {
     "分支",
     "接口",
     "模板",
+    "问题分类",
+    "分类器",
+    "参数提取",
+    "提取器",
+}
+
+PARAMETER_EXTRACTOR_TYPES = {
+    "string",
+    "number",
+    "boolean",
+    "select",
+    "array[string]",
+    "array[number]",
+    "array[object]",
+    "array[boolean]",
 }
 
 
@@ -72,7 +101,7 @@ def validate_plan(plan: WorkflowPlan) -> list[ValidationIssue]:
                     message=f"Unsupported node type: {node.type}",
                     node_id=node.id,
                     path=f"nodes.{node.id}.type",
-                    suggestion="仅使用第一阶段支持的 7 类节点。",
+                    suggestion="仅使用当前支持的 start、llm、code、if-else、end、http-request、template-transform、question-classifier、parameter-extractor 节点。",
                 )
             )
     issues.extend(_validate_graph_semantics(plan))
@@ -242,6 +271,49 @@ def _validate_graph_semantics(plan: WorkflowPlan) -> list[ValidationIssue]:
                         suggestion="source_handle 必须匹配 case_id，else 分支必须为 false。",
                     )
                 )
+
+    for node in plan.nodes:
+        if node.type != "question-classifier":
+            continue
+        source_edges = [edge for edge in plan.edges if edge.source == node.id]
+        handles = [edge.source_handle for edge in source_edges]
+        duplicate_handles = sorted({handle for handle in handles if handles.count(handle) > 1})
+        for handle in duplicate_handles:
+            issues.append(
+                ValidationIssue(
+                    code="PLAN_QUESTION_CLASSIFIER_DUPLICATE_BRANCH",
+                    message=f"question-classifier branch handle is duplicated: {handle}",
+                    node_id=node.id,
+                    path=f"edges.{node.id}.{handle}",
+                    suggestion="每个分类分支只保留一条出边。",
+                )
+            )
+
+        classes = [item for item in node.params.get("classes", []) if isinstance(item, dict)]
+        class_ids = [str(item.get("id")) for item in classes if item.get("id")]
+        for class_id in class_ids:
+            if class_id not in handles:
+                issues.append(
+                    ValidationIssue(
+                        code="PLAN_QUESTION_CLASSIFIER_CLASS_EDGE_MISSING",
+                        message=f"question-classifier class has no outgoing edge: {class_id}",
+                        node_id=node.id,
+                        path=f"nodes.{node.id}.params.classes",
+                        suggestion=f"添加 source_handle 为 {class_id} 的出边。",
+                    )
+                )
+        valid_handles = set(class_ids)
+        for edge in source_edges:
+            if edge.source_handle not in valid_handles:
+                issues.append(
+                    ValidationIssue(
+                        code="PLAN_QUESTION_CLASSIFIER_BRANCH_INVALID",
+                        message=f"question-classifier edge uses invalid source_handle: {edge.source_handle}",
+                        node_id=node.id,
+                        path=f"edges.{edge.source}.{edge.target}.source_handle",
+                        suggestion="source_handle 必须匹配 classes[].id。",
+                    )
+                )
     return issues
 
 
@@ -289,6 +361,101 @@ def _validate_node_params(plan: WorkflowPlan) -> list[ValidationIssue]:
             case "template-transform":
                 if not params.get("template"):
                     issues.append(_node_issue("PLAN_TEMPLATE_MISSING", "template-transform node requires template.", node.id, "params.template"))
+            case "question-classifier":
+                if not isinstance(params.get("query_variable_selector"), list) or not params.get("query_variable_selector"):
+                    issues.append(
+                        _node_issue(
+                            "PLAN_QUESTION_CLASSIFIER_QUERY_MISSING",
+                            "question-classifier node requires query_variable_selector.",
+                            node.id,
+                            "params.query_variable_selector",
+                        )
+                    )
+                classes = params.get("classes")
+                if not isinstance(classes, list) or not classes:
+                    issues.append(
+                        _node_issue(
+                            "PLAN_QUESTION_CLASSIFIER_CLASSES_MISSING",
+                            "question-classifier node requires classes.",
+                            node.id,
+                            "params.classes",
+                        )
+                    )
+                seen_class_ids: set[str] = set()
+                for idx, item in enumerate(classes or []):
+                    if not isinstance(item, dict) or not item.get("id") or not item.get("name"):
+                        issues.append(
+                            _node_issue(
+                                "PLAN_QUESTION_CLASSIFIER_CLASS_INVALID",
+                                "question-classifier class requires id and name.",
+                                node.id,
+                                f"params.classes.{idx}",
+                            )
+                        )
+                        continue
+                    class_id = str(item.get("id"))
+                    if class_id in seen_class_ids:
+                        issues.append(
+                            _node_issue(
+                                "PLAN_QUESTION_CLASSIFIER_CLASS_DUPLICATE",
+                                f"question-classifier class id is duplicated: {class_id}",
+                                node.id,
+                                f"params.classes.{idx}.id",
+                            )
+                        )
+                    seen_class_ids.add(class_id)
+            case "parameter-extractor":
+                if not isinstance(params.get("query"), list) or not params.get("query"):
+                    issues.append(
+                        _node_issue(
+                            "PLAN_PARAMETER_EXTRACTOR_QUERY_MISSING",
+                            "parameter-extractor node requires query.",
+                            node.id,
+                            "params.query",
+                        )
+                    )
+                parameters = params.get("parameters")
+                if not isinstance(parameters, list) or not parameters:
+                    issues.append(
+                        _node_issue(
+                            "PLAN_PARAMETER_EXTRACTOR_PARAMETERS_MISSING",
+                            "parameter-extractor node requires parameters.",
+                            node.id,
+                            "params.parameters",
+                        )
+                    )
+                seen_names: set[str] = set()
+                for idx, item in enumerate(parameters or []):
+                    if not isinstance(item, dict) or not item.get("name") or not item.get("description"):
+                        issues.append(
+                            _node_issue(
+                                "PLAN_PARAMETER_EXTRACTOR_PARAMETER_INVALID",
+                                "parameter-extractor parameter requires name and description.",
+                                node.id,
+                                f"params.parameters.{idx}",
+                            )
+                        )
+                        continue
+                    name = str(item.get("name"))
+                    if name in seen_names:
+                        issues.append(
+                            _node_issue(
+                                "PLAN_PARAMETER_EXTRACTOR_PARAMETER_DUPLICATE",
+                                f"parameter-extractor parameter name is duplicated: {name}",
+                                node.id,
+                                f"params.parameters.{idx}.name",
+                            )
+                        )
+                    seen_names.add(name)
+                    if str(item.get("type", "string")) not in PARAMETER_EXTRACTOR_TYPES:
+                        issues.append(
+                            _node_issue(
+                                "PLAN_PARAMETER_EXTRACTOR_PARAMETER_TYPE_INVALID",
+                                f"parameter-extractor parameter type is invalid: {item.get('type')}",
+                                node.id,
+                                f"params.parameters.{idx}.type",
+                            )
+                        )
     return issues
 
 
@@ -386,6 +553,15 @@ def _known_outputs(plan: WorkflowPlan) -> dict[str, set[str]]:
                 outputs[node.id] = {"body", "status_code", "headers"}
             case "template-transform":
                 outputs[node.id] = {"output"}
+            case "question-classifier":
+                outputs[node.id] = set()
+            case "parameter-extractor":
+                names = {
+                    str(item.get("name"))
+                    for item in node.params.get("parameters", [])
+                    if isinstance(item, dict) and item.get("name")
+                }
+                outputs[node.id] = {*names, "__is_success", "__reason", "__usage"}
             case "end" | "if-else":
                 outputs[node.id] = set()
     return outputs
@@ -395,7 +571,7 @@ def _selectors_in_value(value: Any) -> list[list[str]]:
     selectors: list[list[str]] = []
     if isinstance(value, dict):
         for key, child in value.items():
-            if key in {"value_selector", "variable_selector"} and isinstance(child, list) and child:
+            if key in {"value_selector", "variable_selector", "query", "query_variable_selector"} and isinstance(child, list) and child:
                 selectors.append([str(item) for item in child])
             else:
                 selectors.extend(_selectors_in_value(child))

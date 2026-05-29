@@ -526,10 +526,39 @@ function nodeDetails(node) {
   if (node.type === "template-transform") {
     return [promptPreview("Template", params.template)];
   }
+  if (node.type === "question-classifier") {
+    const classes = Array.isArray(params.classes) ? params.classes : [];
+    return [
+      nodeLine("Model", modelLabel(params)),
+      nodeLine("Input", selectorLabel(params.query_variable_selector)),
+      nodeLine("Classes", classes.map((item) => `${item.name || item.id} (${item.id})`).filter(Boolean).join(", ") || "none"),
+      promptPreview("Instruction", params.instruction),
+    ];
+  }
+  if (node.type === "parameter-extractor") {
+    const parameters = Array.isArray(params.parameters) ? params.parameters : [];
+    return [
+      nodeLine("Model", modelLabel(params)),
+      nodeLine("Input", selectorLabel(params.query)),
+      nodeLine("Parameters", parameters.map((item) => `${item.name}:${item.type || "string"}`).filter(Boolean).join(", ") || "none"),
+      promptPreview("Instruction", params.instruction),
+    ];
+  }
   if (node.type === "code") {
     return [promptPreview("Code", params.code)];
   }
   return [];
+}
+
+function modelLabel(params) {
+  const model = params.model || {};
+  const provider = model.provider || params.model_provider;
+  const name = model.name || params.model_name;
+  return [provider, name].filter(Boolean).join(" / ") || "default model";
+}
+
+function selectorLabel(selector) {
+  return Array.isArray(selector) ? selector.join(".") : selector || "none";
 }
 
 function nodeLine(label, value) {

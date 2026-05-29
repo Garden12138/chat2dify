@@ -8,7 +8,7 @@ def explain_plan(plan: WorkflowPlan) -> dict[str, list[str] | str]:
     starts = [node for node in plan.nodes if node.type == "start"]
     ends = [node for node in plan.nodes if node.type == "end"]
     llms = [node for node in plan.nodes if node.type == "llm"]
-    branches = [node for node in plan.nodes if node.type == "if-else"]
+    branches = [node for node in plan.nodes if node.type in {"if-else", "question-classifier"}]
 
     inputs = []
     for node in starts:
@@ -19,18 +19,29 @@ def explain_plan(plan: WorkflowPlan) -> dict[str, list[str] | str]:
     branch_lines = []
     for node in branches:
         case_text = []
-        for case in node.params.get("cases", []):
-            conditions = case.get("conditions", []) if isinstance(case, dict) else []
-            values = [str(item.get("value", "")).strip() for item in conditions if isinstance(item, dict)]
-            values = [value for value in values if value]
-            case_text.append(f"{case.get('case_id')}: {' / '.join(values) or '条件判断'}")
-        branch_lines.append(f"{node.id} 根据条件分流：{'; '.join(case_text)}；否则走 false 分支")
+        if node.type == "if-else":
+            for case in node.params.get("cases", []):
+                conditions = case.get("conditions", []) if isinstance(case, dict) else []
+                values = [str(item.get("value", "")).strip() for item in conditions if isinstance(item, dict)]
+                values = [value for value in values if value]
+                case_text.append(f"{case.get('case_id')}: {' / '.join(values) or '条件判断'}")
+            branch_lines.append(f"{node.id} 根据条件分流：{'; '.join(case_text)}；否则走 false 分支")
+        else:
+            for item in node.params.get("classes", []):
+                if isinstance(item, dict):
+                    case_text.append(f"{item.get('id')}: {item.get('name')}")
+            branch_lines.append(f"{node.id} 根据语义分类分流：{'; '.join(case_text)}")
 
     steps = []
     for node in plan.nodes:
         if node.type == "llm":
             prompt = str(node.params.get("user_prompt", "")).replace("\n", " ")
             steps.append(f"{node.id} 生成回复：{prompt[:80]}")
+        elif node.type == "question-classifier":
+            steps.append(f"{node.id} 识别用户输入所属类别")
+        elif node.type == "parameter-extractor":
+            names = [str(item.get("name")) for item in node.params.get("parameters", []) if isinstance(item, dict)]
+            steps.append(f"{node.id} 提取结构化参数：{', '.join(names) or '未配置'}")
         elif node.type in {"code", "http-request", "template-transform"}:
             steps.append(f"{node.id} 执行 {node.type} 节点")
 

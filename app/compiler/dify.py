@@ -103,6 +103,10 @@ class DifyDslCompiler:
                 data.update(self._http_request_data(node))
             case "template-transform":
                 data.update(self._template_transform_data(node))
+            case "question-classifier":
+                data.update(self._question_classifier_data(node))
+            case "parameter-extractor":
+                data.update(self._parameter_extractor_data(node))
 
         return {
             "id": node.id,
@@ -254,6 +258,39 @@ class DifyDslCompiler:
             "variables": variables,
         }
 
+    def _question_classifier_data(self, node: PlanNode) -> dict[str, Any]:
+        classes = _classifier_classes(node.params.get("classes", []))
+        return {
+            "query_variable_selector": _selector(node.params.get("query_variable_selector"), ["start", "query"]),
+            "model": self._model_config(node),
+            "classes": classes,
+            "_targetBranches": [{"id": item["id"], "name": item["name"]} for item in classes],
+            "instruction": normalize_template_refs(str(node.params.get("instruction", ""))),
+            "vision": _vision(node.params.get("vision")),
+            "memory": node.params.get("memory"),
+        }
+
+    def _parameter_extractor_data(self, node: PlanNode) -> dict[str, Any]:
+        return {
+            "query": _selector(node.params.get("query"), ["start", "query"]),
+            "model": self._model_config(node),
+            "parameters": _extractor_parameters(node.params.get("parameters", [])),
+            "instruction": normalize_template_refs(str(node.params.get("instruction", ""))),
+            "reasoning_mode": node.params.get("reasoning_mode", "prompt"),
+            "vision": _vision(node.params.get("vision")),
+            "memory": node.params.get("memory"),
+        }
+
+    def _model_config(self, node: PlanNode) -> dict[str, Any]:
+        model = node.params.get("model") if isinstance(node.params.get("model"), dict) else {}
+        return {
+            "provider": model.get("provider") or node.params.get("model_provider") or self.default_model_provider,
+            "name": model.get("name") or node.params.get("model_name") or self.default_model_name,
+            "mode": model.get("mode") or node.params.get("model_mode", "chat"),
+            "completion_params": model.get("completion_params")
+            or node.params.get("completion_params", {"temperature": 0.7}),
+        }
+
 
 def _variables(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     variables = []
@@ -263,6 +300,57 @@ def _variables(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if variable and selector:
             variables.append(_normalize_output({"variable": variable, "value_selector": selector}))
     return variables
+
+
+def _selector(value: Any, default: list[str]) -> list[str]:
+    if isinstance(value, list):
+        selector = [str(item) for item in value if str(item)]
+        return selector or default
+    if isinstance(value, str):
+        normalized = normalize_template_refs(value)
+        match = DIFY_REF_PATTERN.search(normalized)
+        if match:
+            return [match.group(1), match.group(2)]
+        pieces = [piece for piece in value.split(".") if piece]
+        return pieces if len(pieces) >= 2 else default
+    return default
+
+
+def _classifier_classes(items: Any) -> list[dict[str, str]]:
+    classes = []
+    for idx, item in enumerate(items or []):
+        if not isinstance(item, dict):
+            continue
+        class_id = str(item.get("id") or item.get("case_id") or f"class_{idx + 1}")
+        name = str(item.get("name") or item.get("label") or class_id)
+        classes.append({"id": class_id, "name": name, "label": str(item.get("label") or f"CLASS {idx + 1}")})
+    return classes
+
+
+def _extractor_parameters(items: Any) -> list[dict[str, Any]]:
+    parameters = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        parameter = {
+            "name": str(item.get("name", "")),
+            "type": str(item.get("type", "string")),
+            "description": str(item.get("description", "")),
+            "required": bool(item.get("required", True)),
+        }
+        if parameter["type"] == "select" and isinstance(item.get("options"), list):
+            parameter["options"] = [str(option) for option in item["options"]]
+        parameters.append(parameter)
+    return parameters
+
+
+def _vision(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        enabled = bool(value.get("enabled", False))
+        configs = deepcopy(value.get("configs")) if isinstance(value.get("configs"), dict) else {"variable_selector": []}
+        configs.setdefault("variable_selector", [])
+        return {"enabled": enabled, "configs": configs}
+    return {"enabled": False, "configs": {"variable_selector": []}}
 
 
 def _normalize_output(item: dict[str, Any]) -> dict[str, Any]:
@@ -373,6 +461,10 @@ def _node_height(node_type: str, data: dict[str, Any]) -> int:
         return 54
     if node_type == "if-else":
         return 126
+    if node_type == "question-classifier":
+        return 112 + max(0, len(data.get("classes", [])) - 2) * 26
+    if node_type == "parameter-extractor":
+        return 112 + max(0, len(data.get("parameters", [])) - 2) * 22
     if node_type == "end":
         return 90 + max(0, len(data.get("outputs", [])) - 1) * 26
     return 90

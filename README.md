@@ -48,8 +48,8 @@ app_id + edit request -> Dify draft graph -> WorkflowPlan IR -> revised Workflow
 Use `POST /api/workflows/modify/draft` to preview a modification and
 `POST /api/workflows/modify/apply` to write it back to the Dify draft. Both
 accept `app_id`, `message`, and optional `expected_hash`; apply returns the new
-Dify draft `hash`. Third-stage edits still support only the seven stabilized
-node types and do not publish the workflow. Edits run in safe mode by default:
+Dify draft `hash`. Third-stage edits support the stabilized node set listed
+below and do not publish the workflow. Edits run in safe mode by default:
 large node deletions, start/end rewrites, or broad edge rewiring are reported in
 `guard` and blocked on apply unless `allow_destructive=true` is sent. No-op
 edits return `sync.result="noop"` and are not written back to Dify.
@@ -192,15 +192,18 @@ curl -X POST http://127.0.0.1:8000/api/workflows/run/draft \
 
 ## Supported Nodes
 
-Phase 2 stabilizes these Plan IR node types:
+The current Plan IR supports these node types:
 
 ```text
-start, llm, code, if-else, end, http-request, template-transform
+start, llm, code, if-else, end, http-request, template-transform,
+question-classifier, parameter-extractor
 ```
 
-Current non-goals: patching an existing canvas, multi-turn incremental edits,
-plugin registry sync, model capability registry, and a custom Dify frontend
-panel.
+`question-classifier` is used for semantic routing such as complaint /
+consultation / appointment branches. `parameter-extractor` is used to extract
+structured fields such as `order_id`, `car_model`, `store`, and `issue` from
+the user input. Plugin/tool nodes, knowledge retrieval, loops, and model
+capability registry sync remain out of scope for now.
 
 ## Test
 

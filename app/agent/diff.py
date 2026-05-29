@@ -119,6 +119,10 @@ def _param_change_type(node_type: str, field: str) -> str:
         return "code_changed"
     if node_type == "http-request" and field in {"method", "url", "headers", "params", "body"}:
         return "http_changed"
+    if node_type == "question-classifier" and field in {"classes", "instruction", "query_variable_selector"}:
+        return "classifier_changed"
+    if node_type == "parameter-extractor" and field in {"parameters", "instruction", "query", "reasoning_mode"}:
+        return "extractor_changed"
     return "node_params_updated"
 
 
@@ -135,6 +139,10 @@ def _param_change_message(node: PlanNode, field: str) -> str:
             return f"更新代码节点 {title} 的代码配置。"
         case "http_changed":
             return f"更新 HTTP 节点 {title} 的 {field}。"
+        case "classifier_changed":
+            return f"更新分类节点 {title} 的 {field}。"
+        case "extractor_changed":
+            return f"更新参数提取节点 {title} 的 {field}。"
     return f"更新 {node.type} 节点 {title} 的 {field}。"
 
 

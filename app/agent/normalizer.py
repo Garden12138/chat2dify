@@ -28,6 +28,10 @@ GENERIC_TITLES = {
     "http",
     "template",
     "templatetransform",
+    "questionclassifier",
+    "classifier",
+    "parameterextractor",
+    "extractor",
     "开始",
     "开始节点",
     "输入",
@@ -42,6 +46,23 @@ GENERIC_TITLES = {
     "分支",
     "接口",
     "模板",
+    "问题分类",
+    "分类器",
+    "参数提取",
+    "提取器",
+}
+
+NODE_TYPE_ALIASES = {
+    "classifier": "question-classifier",
+    "question_classifier": "question-classifier",
+    "questionclassifier": "question-classifier",
+    "intent-classifier": "question-classifier",
+    "intent_classifier": "question-classifier",
+    "parameter_extractor": "parameter-extractor",
+    "parameterextractor": "parameter-extractor",
+    "extractor": "parameter-extractor",
+    "param-extractor": "parameter-extractor",
+    "param_extractor": "parameter-extractor",
 }
 
 
@@ -74,6 +95,11 @@ def normalize_plan_payload(payload: dict[str, Any], *, app_name: str | None = No
     for node in nodes:
         if not isinstance(node, dict):
             raise ValueError("plan.nodes items must be objects")
+        old_type = str(node.get("type", ""))
+        node_type = _normalize_node_type(old_type)
+        if old_type != node_type:
+            node["type"] = node_type
+            changes.append(f"normalized node type for {node.get('id', '<unknown>')}: {old_type} -> {node_type}")
         node.setdefault("title", _default_title(str(node.get("type", ""))))
         node.setdefault("desc", "")
         params = node.get("params")
@@ -98,6 +124,10 @@ def normalize_plan_payload(payload: dict[str, Any], *, app_name: str | None = No
                 node["params"] = _normalize_http_params(params)
             case "template-transform":
                 node["params"] = _normalize_template_params(params)
+            case "question-classifier":
+                node["params"] = _normalize_question_classifier_params(params)
+            case "parameter-extractor":
+                node["params"] = _normalize_parameter_extractor_params(params)
         if before != node.get("params"):
             changes.append(f"normalized {node.get('id', '<unknown>')} params")
 
@@ -111,7 +141,8 @@ def normalize_plan_payload(payload: dict[str, Any], *, app_name: str | None = No
             node["title"] = _semantic_title(node, data, node_by_id, edges)
             changes.append(f"normalized generic title for {node.get('id', '<unknown>')}")
 
-    edge_positions = _if_else_edge_positions(edges, node_by_id)
+    edge_positions = _branch_edge_positions(edges, node_by_id, "if-else")
+    classifier_edge_positions = _branch_edge_positions(edges, node_by_id, "question-classifier")
     for edge in edges:
         if not isinstance(edge, dict):
             raise ValueError("plan.edges items must be objects")
@@ -124,6 +155,19 @@ def normalize_plan_payload(payload: dict[str, Any], *, app_name: str | None = No
             if old_handle != new_handle:
                 edge["source_handle"] = new_handle
                 changes.append(f"normalized if-else edge handle for {edge.get('source')} -> {edge.get('target')}")
+        elif source and source.get("type") == "question-classifier":
+            old_handle = edge.get("source_handle")
+            new_handle = _infer_question_classifier_source_handle(
+                source,
+                edge,
+                node_by_id,
+                classifier_edge_positions,
+            )
+            if old_handle != new_handle:
+                edge["source_handle"] = new_handle
+                changes.append(
+                    f"normalized question-classifier edge handle for {edge.get('source')} -> {edge.get('target')}"
+                )
 
     return NormalizationResult(payload=data, changed=bool(changes), changes=changes)
 
@@ -134,6 +178,13 @@ def normalize_template_refs(text: str) -> str:
         r"{{#\1.\2#}}",
         text,
     )
+
+
+def _normalize_node_type(value: str) -> str:
+    normalized = str(value or "").strip().replace(" ", "-")
+    normalized = re.sub(r"-+", "-", normalized)
+    alias_key = normalized.lower()
+    return NODE_TYPE_ALIASES.get(alias_key, normalized)
 
 
 def _normalize_start_params(params: dict[str, Any]) -> dict[str, Any]:
@@ -278,6 +329,212 @@ def _normalize_template_params(params: dict[str, Any]) -> dict[str, Any]:
         "template": template,
         "variables": _add_template_ref_variables(template, variables),
     }
+
+
+def _normalize_question_classifier_params(params: dict[str, Any]) -> dict[str, Any]:
+    result = dict(params)
+    raw_selector = (
+        result.get("query_variable_selector")
+        or result.get("query")
+        or result.get("variable_selector")
+        or result.get("input_selector")
+        or ["start", "query"]
+    )
+    result["query_variable_selector"] = _normalize_selector(raw_selector)
+    result["classes"] = _normalize_classifier_classes(
+        result.get("classes") or result.get("topics") or result.get("categories") or result.get("intents") or []
+    )
+    result["instruction"] = normalize_template_refs(str(result.get("instruction") or result.get("prompt") or ""))
+    result.pop("query", None)
+    result.pop("variable_selector", None)
+    result.pop("input_selector", None)
+    result.pop("topics", None)
+    result.pop("categories", None)
+    result.pop("intents", None)
+    result.pop("prompt", None)
+    result["vision"] = _normalize_vision(result.get("vision"))
+    return result
+
+
+def _normalize_parameter_extractor_params(params: dict[str, Any]) -> dict[str, Any]:
+    result = dict(params)
+    raw_selector = (
+        result.get("query")
+        or result.get("query_variable_selector")
+        or result.get("variable_selector")
+        or result.get("input_selector")
+        or ["start", "query"]
+    )
+    result["query"] = _normalize_selector(raw_selector)
+    result["parameters"] = _normalize_extractor_parameters(
+        result.get("parameters") or result.get("fields") or result.get("extract_parameters") or []
+    )
+    result["instruction"] = normalize_template_refs(str(result.get("instruction") or result.get("prompt") or ""))
+    result["reasoning_mode"] = str(result.get("reasoning_mode") or "prompt")
+    if result["reasoning_mode"] not in {"prompt", "function_call"}:
+        result["reasoning_mode"] = "prompt"
+    result.pop("query_variable_selector", None)
+    result.pop("variable_selector", None)
+    result.pop("input_selector", None)
+    result.pop("fields", None)
+    result.pop("extract_parameters", None)
+    result.pop("prompt", None)
+    result["vision"] = _normalize_vision(result.get("vision"))
+    return result
+
+
+def _normalize_classifier_classes(value: Any) -> list[dict[str, str]]:
+    classes: list[dict[str, str]] = []
+    if isinstance(value, dict):
+        value = [{"id": key, "name": item} for key, item in value.items()]
+    for idx, item in enumerate(value or []):
+        if isinstance(item, str):
+            raw_id = _safe_branch_id(item) or f"class_{idx + 1}"
+            name = item
+            label = f"CLASS {idx + 1}"
+        elif isinstance(item, dict):
+            name = str(item.get("name") or item.get("label") or item.get("title") or "").strip()
+            raw_id = str(item.get("id") or item.get("case_id") or item.get("value") or name or f"class_{idx + 1}")
+            label = str(item.get("label") or f"CLASS {idx + 1}")
+        else:
+            continue
+        if not name:
+            name = f"类别{idx + 1}"
+        classes.append({"id": _safe_branch_id(raw_id) or f"class_{idx + 1}", "name": name, "label": label})
+    return classes
+
+
+def _normalize_extractor_parameters(value: Any) -> list[dict[str, Any]]:
+    parameters: list[dict[str, Any]] = []
+    used_names: set[str] = set()
+    if isinstance(value, dict):
+        value = [{"name": key, **(item if isinstance(item, dict) else {"description": str(item)})} for key, item in value.items()]
+    for item in value or []:
+        if isinstance(item, str):
+            name = _unique_parameter_name(item, used_names)
+            parameters.append(
+                {
+                    "name": name,
+                    "type": "string",
+                    "description": item,
+                    "required": True,
+                }
+            )
+            continue
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("variable") or item.get("field") or "").strip()
+        if not name:
+            continue
+        param_type = _parameter_type(str(item.get("type") or item.get("value_type") or "string"))
+        safe_name = _unique_parameter_name(name, used_names)
+        parameter = {
+            "name": safe_name,
+            "type": param_type,
+            "description": str(item.get("description") or item.get("desc") or name),
+            "required": bool(item.get("required", True)),
+        }
+        options = item.get("options")
+        if param_type == "select" and isinstance(options, list):
+            parameter["options"] = [str(option) for option in options if str(option)]
+        parameters.append(parameter)
+    return parameters
+
+
+def _unique_parameter_name(value: str, used_names: set[str]) -> str:
+    preferred = _parameter_name(value)
+    candidate = preferred
+    index = 2
+    while candidate in used_names:
+        candidate = f"{preferred}_{index}"
+        index += 1
+    used_names.add(candidate)
+    return candidate
+
+
+def _parameter_name(value: str) -> str:
+    raw = str(value or "").strip()
+    mapping = {
+        "车型": "car_model",
+        "车牌": "license_plate",
+        "门店": "store",
+        "订单": "order_id",
+        "订单号": "order_id",
+        "手机号": "phone",
+        "电话": "phone",
+        "时间": "time",
+        "预约时间": "appointment_time",
+        "诉求": "request",
+        "问题": "issue",
+        "姓名": "name",
+        "客户姓名": "customer_name",
+    }
+    return mapping.get(raw, _safe_variable_name(raw))
+
+
+def _normalize_selector(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item)]
+    if isinstance(value, str):
+        return _selector_from_ref(value)
+    return ["start", "query"]
+
+
+def _normalize_vision(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        enabled = bool(value.get("enabled", False))
+        configs = value.get("configs") if isinstance(value.get("configs"), dict) else {"variable_selector": []}
+        configs.setdefault("variable_selector", [])
+        return {"enabled": enabled, "configs": configs}
+    return {"enabled": False, "configs": {"variable_selector": []}}
+
+
+def _parameter_type(value: str) -> str:
+    normalized = value.strip().lower().replace("_", "-")
+    mapping = {
+        "str": "string",
+        "text": "string",
+        "paragraph": "string",
+        "integer": "number",
+        "int": "number",
+        "float": "number",
+        "bool": "boolean",
+        "boolean": "boolean",
+        "enum": "select",
+        "choice": "select",
+        "array-string": "array[string]",
+        "array_string": "array[string]",
+        "string[]": "array[string]",
+        "array-number": "array[number]",
+        "array_number": "array[number]",
+        "number[]": "array[number]",
+        "array-object": "array[object]",
+        "array_object": "array[object]",
+        "object[]": "array[object]",
+        "array-boolean": "array[boolean]",
+        "array_bool": "array[boolean]",
+        "boolean[]": "array[boolean]",
+    }
+    return mapping.get(normalized, normalized if normalized in _allowed_parameter_types() else "string")
+
+
+def _allowed_parameter_types() -> set[str]:
+    return {
+        "string",
+        "number",
+        "boolean",
+        "select",
+        "array[string]",
+        "array[number]",
+        "array[object]",
+        "array[boolean]",
+    }
+
+
+def _safe_branch_id(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(value or "").strip())
+    safe = re.sub(r"_+", "_", safe).strip("_")
+    return safe
 
 
 def _split_prompt_sections(text: str) -> tuple[str, str]:
@@ -437,6 +694,10 @@ def _semantic_title(
             return f"调用{subject}接口"
         case "template-transform":
             return f"整理{subject}内容"
+        case "question-classifier":
+            return f"识别{subject}类型"
+        case "parameter-extractor":
+            return f"提取{subject}信息"
         case "end":
             upstream = _first_upstream(node, node_by_id, edges)
             if upstream and upstream.get("type") == "llm":
@@ -662,14 +923,18 @@ def _selector_from_ref(value: str) -> list[str]:
     return pieces if len(pieces) >= 2 else [value]
 
 
-def _if_else_edge_positions(edges: list[Any], node_by_id: dict[str, dict[str, Any]]) -> dict[tuple[str, str], int]:
+def _branch_edge_positions(
+    edges: list[Any],
+    node_by_id: dict[str, dict[str, Any]],
+    node_type: str,
+) -> dict[tuple[str, str], int]:
     positions: dict[tuple[str, str], int] = {}
     counters: dict[str, int] = {}
     for edge in edges:
         if not isinstance(edge, dict):
             continue
         source = node_by_id.get(str(edge.get("source")))
-        if not source or source.get("type") != "if-else":
+        if not source or source.get("type") != node_type:
             continue
         key = (str(edge.get("source")), str(edge.get("target")))
         positions[key] = counters.get(str(edge.get("source")), 0)
@@ -703,6 +968,32 @@ def _infer_if_else_source_handle(
     branch_ids = [*case_ids, FALSE_HANDLE]
     position = positions.get((str(edge.get("source")), str(edge.get("target"))), 0)
     return branch_ids[position] if position < len(branch_ids) else FALSE_HANDLE
+
+
+def _infer_question_classifier_source_handle(
+    source: dict[str, Any],
+    edge: dict[str, Any],
+    node_by_id: dict[str, dict[str, Any]],
+    positions: dict[tuple[str, str], int],
+) -> str:
+    classes = source.get("params", {}).get("classes", [])
+    class_ids = [str(item.get("id")) for item in classes if isinstance(item, dict) and item.get("id")]
+    valid = set(class_ids)
+    current = str(edge.get("source_handle", SOURCE_HANDLE))
+    if current in valid:
+        return current
+
+    target = node_by_id.get(str(edge.get("target")), {})
+    target_text = f"{edge.get('target')} {target.get('title') or ''}".lower()
+    for item in classes:
+        if not isinstance(item, dict):
+            continue
+        class_id = str(item.get("id") or "")
+        class_name = str(item.get("name") or "")
+        if class_id and (class_id.lower() in target_text or class_name.lower() in target_text or class_name in target_text):
+            return class_id
+    position = positions.get((str(edge.get("source")), str(edge.get("target"))), 0)
+    return class_ids[position] if position < len(class_ids) else current
 
 
 def _input_type(value: str) -> str:

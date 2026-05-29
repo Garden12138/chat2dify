@@ -66,6 +66,20 @@ def test_planner_success_normalizes_shorthand() -> None:
     assert result.plan.edges[2].source_handle == "false"
 
 
+def test_planner_accepts_understanding_nodes() -> None:
+    planner = FakePlanner([json.dumps(_understanding_plan())])
+
+    result = planner.generate("修车售后分类并提取字段", app_name="修车售后服务工作流", dsl_version="9.9.9")
+
+    assert result.used_fallback is False
+    assert {node.type for node in result.plan.nodes} >= {"question-classifier", "parameter-extractor"}
+    extractor = next(node for node in result.plan.nodes if node.id == "extract")
+    classifier = next(node for node in result.plan.nodes if node.id == "classifier")
+    assert extractor.params["parameters"][0]["name"] == "car_model"
+    assert classifier.params["classes"][0]["id"] == "complaint"
+    assert [edge.source_handle for edge in result.plan.edges if edge.source == "classifier"] == ["complaint", "consult"]
+
+
 def test_planner_self_repairs_after_validation_failure() -> None:
     bad = {
         "name": "bad",
@@ -125,5 +139,49 @@ def _shorthand_plan() -> dict:
             {"source": "if_1", "target": "llm_general"},
             {"source": "llm_refund", "target": "end_refund"},
             {"source": "llm_general", "target": "end_general"},
+        ],
+    }
+
+
+def _understanding_plan() -> dict:
+    return {
+        "nodes": [
+            {"id": "start", "type": "start", "title": "接收修车售后诉求", "params": {"variables": [{"name": "query"}]}},
+            {
+                "id": "extract",
+                "type": "parameter-extractor",
+                "title": "提取修车售后信息",
+                "params": {
+                    "query": ["start", "query"],
+                    "parameters": [
+                        {"name": "car_model", "type": "string", "description": "车辆型号", "required": False},
+                        {"name": "issue", "type": "string", "description": "用户诉求", "required": True},
+                    ],
+                },
+            },
+            {
+                "id": "classifier",
+                "type": "question-classifier",
+                "title": "识别售后类型",
+                "params": {
+                    "query_variable_selector": ["start", "query"],
+                    "classes": [
+                        {"id": "complaint", "name": "投诉"},
+                        {"id": "consult", "name": "咨询"},
+                    ],
+                },
+            },
+            {"id": "llm_complaint", "type": "llm", "title": "生成投诉回复", "params": {"user_prompt": "投诉：{{#extract.issue#}}"}},
+            {"id": "llm_consult", "type": "llm", "title": "生成咨询回复", "params": {"user_prompt": "咨询：{{#start.query#}}"}},
+            {"id": "end_complaint", "type": "end", "title": "返回投诉结果", "params": {"outputs": [{"variable": "answer", "value_selector": ["llm_complaint", "text"]}]}},
+            {"id": "end_consult", "type": "end", "title": "返回咨询结果", "params": {"outputs": [{"variable": "answer", "value_selector": ["llm_consult", "text"]}]}},
+        ],
+        "edges": [
+            {"source": "start", "target": "extract"},
+            {"source": "extract", "target": "classifier"},
+            {"source": "classifier", "target": "llm_complaint", "source_handle": "complaint"},
+            {"source": "classifier", "target": "llm_consult", "source_handle": "consult"},
+            {"source": "llm_complaint", "target": "end_complaint"},
+            {"source": "llm_consult", "target": "end_consult"},
         ],
     }

@@ -29,9 +29,13 @@ def test_decompile_dify_graph_covers_supported_node_types() -> None:
         "end",
         "http-request",
         "template-transform",
+        "question-classifier",
+        "parameter-extractor",
     }
     assert decompiled.nodes[0].params["variables"][0]["name"] == "query"
     assert next(node for node in decompiled.nodes if node.id == "llm_yes").params["user_prompt"]
+    assert next(node for node in decompiled.nodes if node.id == "classifier").params["classes"][0]["id"] == "complaint"
+    assert next(node for node in decompiled.nodes if node.id == "extract").params["parameters"][0]["name"] == "issue"
 
 
 def test_compile_plan_to_dify_graph_preserves_existing_layout_and_places_new_nodes() -> None:
@@ -108,6 +112,25 @@ def _seven_type_plan() -> WorkflowPlan:
                     },
                 },
                 {
+                    "id": "extract",
+                    "type": "parameter-extractor",
+                    "params": {
+                        "query": ["start", "query"],
+                        "parameters": [{"name": "issue", "type": "string", "description": "用户诉求"}],
+                    },
+                },
+                {
+                    "id": "classifier",
+                    "type": "question-classifier",
+                    "params": {
+                        "query_variable_selector": ["start", "query"],
+                        "classes": [
+                            {"id": "complaint", "name": "投诉"},
+                            {"id": "consult", "name": "咨询"},
+                        ],
+                    },
+                },
+                {
                     "id": "branch",
                     "type": "if-else",
                     "params": {
@@ -136,7 +159,10 @@ def _seven_type_plan() -> WorkflowPlan:
                 {"source": "start", "target": "http"},
                 {"source": "http", "target": "template"},
                 {"source": "template", "target": "code"},
-                {"source": "code", "target": "branch"},
+                {"source": "code", "target": "extract"},
+                {"source": "extract", "target": "classifier"},
+                {"source": "classifier", "target": "branch", "source_handle": "complaint"},
+                {"source": "classifier", "target": "llm_no", "source_handle": "consult"},
                 {"source": "branch", "target": "llm_yes", "source_handle": "urgent"},
                 {"source": "branch", "target": "llm_no", "source_handle": "false"},
                 {"source": "llm_yes", "target": "end_yes"},

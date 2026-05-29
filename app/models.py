@@ -5,7 +5,17 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 
-NodeType = Literal["start", "llm", "code", "if-else", "end", "http-request", "template-transform"]
+NodeType = Literal[
+    "start",
+    "llm",
+    "code",
+    "if-else",
+    "end",
+    "http-request",
+    "template-transform",
+    "question-classifier",
+    "parameter-extractor",
+]
 InputType = Literal["text", "paragraph", "number", "boolean", "file", "file-list", "json"]
 
 

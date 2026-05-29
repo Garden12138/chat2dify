@@ -11,7 +11,17 @@ from app.compiler.dify import DifyDslCompiler
 from app.models import WorkflowPlan
 
 
-SUPPORTED_DIFY_NODE_TYPES = {"start", "llm", "code", "if-else", "end", "http-request", "template-transform"}
+SUPPORTED_DIFY_NODE_TYPES = {
+    "start",
+    "llm",
+    "code",
+    "if-else",
+    "end",
+    "http-request",
+    "template-transform",
+    "question-classifier",
+    "parameter-extractor",
+}
 LAYOUT_KEYS = ("position", "positionAbsolute", "width", "height", "sourcePosition", "targetPosition")
 
 
@@ -132,6 +142,33 @@ def _params_from_dify_node_data(node_type: str, data: dict[str, Any]) -> dict[st
             return {
                 "template": data.get("template", ""),
                 "variables": deepcopy(data.get("variables") or []),
+            }
+        case "question-classifier":
+            model = data.get("model") if isinstance(data.get("model"), dict) else {}
+            return {
+                "query_variable_selector": deepcopy(data.get("query_variable_selector") or ["start", "query"]),
+                "model_provider": model.get("provider"),
+                "model_name": model.get("name"),
+                "model_mode": model.get("mode", "chat"),
+                "completion_params": model.get("completion_params", {"temperature": 0.7}),
+                "classes": deepcopy(data.get("classes") or []),
+                "instruction": data.get("instruction", ""),
+                "vision": deepcopy(data.get("vision") or {"enabled": False, "configs": {"variable_selector": []}}),
+                "memory": deepcopy(data.get("memory")),
+            }
+        case "parameter-extractor":
+            model = data.get("model") if isinstance(data.get("model"), dict) else {}
+            return {
+                "query": deepcopy(data.get("query") or ["start", "query"]),
+                "model_provider": model.get("provider"),
+                "model_name": model.get("name"),
+                "model_mode": model.get("mode", "chat"),
+                "completion_params": model.get("completion_params", {"temperature": 0.7}),
+                "parameters": deepcopy(data.get("parameters") or []),
+                "instruction": data.get("instruction", ""),
+                "reasoning_mode": data.get("reasoning_mode", "prompt"),
+                "vision": deepcopy(data.get("vision") or {"enabled": False, "configs": {"variable_selector": []}}),
+                "memory": deepcopy(data.get("memory")),
             }
     return {}
 

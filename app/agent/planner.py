@@ -16,9 +16,17 @@ from app.validator import has_errors, validate_dsl, validate_plan
 
 SYSTEM_PROMPT = """You turn a user's workflow request into a compact JSON WorkflowPlan.
 Return only JSON. Supported node types are:
-start, llm, code, if-else, end, http-request, template-transform.
+start, llm, code, if-else, end, http-request, template-transform,
+question-classifier, parameter-extractor.
 Use exactly one start node and at least one end node. Keep nodes connected.
 For simple requests, use start -> llm -> end.
+Use if-else for explicit string or numeric conditions.
+Use question-classifier for semantic intent/category routing. Its params must include:
+{"query_variable_selector":["start","query"],"classes":[{"id":"complaint","name":"投诉","label":"CLASS 1"}],"instruction":"..."}.
+Each outgoing edge from question-classifier must set source_handle to the matching classes[].id.
+Use parameter-extractor to extract structured fields from natural language. Its params must include:
+{"query":["start","query"],"reasoning_mode":"prompt","parameters":[{"name":"car_model","type":"string","description":"车辆型号","required":false}],"instruction":"..."}.
+Prefer English variable-safe parameter names such as order_id, car_model, store, issue.
 Every node must have a business-specific title. Do not use generic titles like
 Start, LLM, End, Code, Node, 开始, 大模型, 结束. Good Chinese examples:
 接收售后诉求, 判断售后类型, 生成理发售后回复, 返回处理结果.

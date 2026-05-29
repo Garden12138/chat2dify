@@ -365,6 +365,60 @@ def test_template_transform_reuses_declared_variable_alias() -> None:
     ]
 
 
+def test_normalizer_canonicalizes_understanding_node_shorthand() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "name": "修车售后服务工作流",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "extract",
+                    "type": "parameter_extractor",
+                    "title": "Extractor",
+                    "params": {
+                        "query_variable_selector": "{{start.query}}",
+                        "fields": [
+                            {"name": "车型", "type": "string", "description": "车辆型号", "required": False},
+                            {"name": "诉求", "type": "text", "description": "用户诉求"},
+                        ],
+                    },
+                },
+                {
+                    "id": "classifier",
+                    "type": "classifier",
+                    "title": "Classifier",
+                    "params": {
+                        "query": "{{start.query}}",
+                        "categories": ["投诉", "咨询"],
+                    },
+                },
+                {"id": "llm_complaint", "type": "llm", "params": {"user_prompt": "处理 {{#extract.request#}}"}},
+                {"id": "llm_consult", "type": "llm", "params": {"user_prompt": "处理 {{#start.query#}}"}},
+                {"id": "end_complaint", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["llm_complaint", "text"]}]}},
+                {"id": "end_consult", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["llm_consult", "text"]}]}},
+            ],
+            "edges": [
+                {"source": "start", "target": "extract"},
+                {"source": "extract", "target": "classifier"},
+                {"source": "classifier", "target": "llm_complaint"},
+                {"source": "classifier", "target": "llm_consult"},
+                {"source": "llm_complaint", "target": "end_complaint"},
+                {"source": "llm_consult", "target": "end_consult"},
+            ],
+        }
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    nodes = {node.id: node for node in plan.nodes}
+
+    assert nodes["extract"].type == "parameter-extractor"
+    assert nodes["extract"].params["query"] == ["start", "query"]
+    assert [item["name"] for item in nodes["extract"].params["parameters"]] == ["car_model", "request"]
+    assert nodes["classifier"].type == "question-classifier"
+    assert nodes["classifier"].params["query_variable_selector"] == ["start", "query"]
+    assert [edge.source_handle for edge in plan.edges if edge.source == "classifier"] == ["class_1", "class_2"]
+    assert validate_plan(plan) == []
+
+
 def test_http_request_normalizes_empty_headers_params_and_body() -> None:
     normalized = normalize_plan_payload(
         {
@@ -423,7 +477,7 @@ def test_http_request_normalizes_key_value_shorthand() -> None:
 def test_compiler_covers_supported_node_minimum_structure() -> None:
     plan = WorkflowPlan.model_validate(
         {
-            "name": "seven nodes",
+            "name": "supported nodes",
             "nodes": [
                 {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
                 {"id": "http", "type": "http-request", "params": {"url": "https://example.com?q={{#start.query#}}"}},
@@ -442,6 +496,41 @@ def test_compiler_covers_supported_node_minimum_structure() -> None:
                         "code": "def main(raw: str) -> dict:\n    return {\"result\": raw}\n",
                         "variables": [{"variable": "raw", "value_selector": ["template", "output"]}],
                         "outputs": {"result": {"type": "string", "children": None}},
+                    },
+                },
+                {
+                    "id": "extract",
+                    "type": "parameter-extractor",
+                    "params": {
+                        "query": ["start", "query"],
+                        "reasoning_mode": "prompt",
+                        "parameters": [
+                            {
+                                "name": "issue",
+                                "type": "string",
+                                "description": "用户诉求",
+                                "required": True,
+                            },
+                            {
+                                "name": "car_model",
+                                "type": "string",
+                                "description": "车辆型号",
+                                "required": False,
+                            },
+                        ],
+                        "instruction": "提取修车售后字段",
+                    },
+                },
+                {
+                    "id": "classifier",
+                    "type": "question-classifier",
+                    "params": {
+                        "query_variable_selector": ["start", "query"],
+                        "classes": [
+                            {"id": "complaint", "name": "投诉", "label": "CLASS 1"},
+                            {"id": "consult", "name": "咨询", "label": "CLASS 2"},
+                        ],
+                        "instruction": "判断用户诉求属于投诉还是咨询",
                     },
                 },
                 {
@@ -464,8 +553,8 @@ def test_compiler_covers_supported_node_minimum_structure() -> None:
                         ]
                     },
                 },
-                {"id": "llm_yes", "type": "llm", "params": {"user_prompt": "Handle {{#code.result#}} urgently"}},
-                {"id": "llm_no", "type": "llm", "params": {"user_prompt": "Handle {{#code.result#}} normally"}},
+                {"id": "llm_yes", "type": "llm", "params": {"user_prompt": "Handle {{#extract.issue#}} urgently"}},
+                {"id": "llm_no", "type": "llm", "params": {"user_prompt": "Handle {{#extract.issue#}} normally"}},
                 {"id": "end_yes", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["llm_yes", "text"]}]}},
                 {"id": "end_no", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["llm_no", "text"]}]}},
             ],
@@ -473,7 +562,10 @@ def test_compiler_covers_supported_node_minimum_structure() -> None:
                 {"source": "start", "target": "http"},
                 {"source": "http", "target": "template"},
                 {"source": "template", "target": "code"},
-                {"source": "code", "target": "branch"},
+                {"source": "code", "target": "extract"},
+                {"source": "extract", "target": "classifier"},
+                {"source": "classifier", "target": "branch", "source_handle": "complaint"},
+                {"source": "classifier", "target": "llm_no", "source_handle": "consult"},
                 {"source": "branch", "target": "llm_yes", "source_handle": "urgent"},
                 {"source": "branch", "target": "llm_no", "source_handle": "false"},
                 {"source": "llm_yes", "target": "end_yes"},
@@ -485,8 +577,24 @@ def test_compiler_covers_supported_node_minimum_structure() -> None:
     dsl = _compiler().compile(plan)
     data = yaml.safe_load(dsl)
     node_types = {node["data"]["type"] for node in data["workflow"]["graph"]["nodes"]}
+    extract = next(node for node in data["workflow"]["graph"]["nodes"] if node["id"] == "extract")
+    classifier = next(node for node in data["workflow"]["graph"]["nodes"] if node["id"] == "classifier")
 
-    assert node_types == {"start", "llm", "code", "if-else", "end", "http-request", "template-transform"}
+    assert node_types == {
+        "start",
+        "llm",
+        "code",
+        "if-else",
+        "end",
+        "http-request",
+        "template-transform",
+        "question-classifier",
+        "parameter-extractor",
+    }
+    assert extract["data"]["model"]["provider"] == "openai"
+    assert extract["data"]["parameters"][0]["name"] == "issue"
+    assert classifier["data"]["classes"][0]["id"] == "complaint"
+    assert classifier["data"]["query_variable_selector"] == ["start", "query"]
     assert validate_plan(plan) == []
     assert validate_dsl(dsl, expected_dsl_version="9.9.9") == []
 
@@ -574,6 +682,101 @@ def test_validator_rejects_duplicate_if_else_branch_handle() -> None:
     issues = validate_plan(plan)
 
     assert any(issue.code == "PLAN_IF_ELSE_DUPLICATE_BRANCH" for issue in issues)
+
+
+def test_validator_rejects_question_classifier_missing_class_edge() -> None:
+    plan = WorkflowPlan.model_validate(
+        {
+            "name": "classifier missing edge",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "classifier",
+                    "type": "question-classifier",
+                    "params": {
+                        "query_variable_selector": ["start", "query"],
+                        "classes": [
+                            {"id": "complaint", "name": "投诉"},
+                            {"id": "consult", "name": "咨询"},
+                        ],
+                    },
+                },
+                {"id": "llm_complaint", "type": "llm", "params": {"user_prompt": "投诉 {{#start.query#}}"}},
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["llm_complaint", "text"]}]}},
+            ],
+            "edges": [
+                {"source": "start", "target": "classifier"},
+                {"source": "classifier", "target": "llm_complaint", "source_handle": "complaint"},
+                {"source": "llm_complaint", "target": "end"},
+            ],
+        }
+    )
+
+    issues = validate_plan(plan)
+
+    assert any(issue.code == "PLAN_QUESTION_CLASSIFIER_CLASS_EDGE_MISSING" for issue in issues)
+
+
+def test_validator_rejects_parameter_extractor_invalid_parameter_type() -> None:
+    plan = WorkflowPlan.model_validate(
+        {
+            "name": "extractor invalid type",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "extract",
+                    "type": "parameter-extractor",
+                    "params": {
+                        "query": ["start", "query"],
+                        "parameters": [
+                            {
+                                "name": "issue",
+                                "type": "date",
+                                "description": "用户诉求",
+                            }
+                        ],
+                    },
+                },
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "issue", "value_selector": ["extract", "issue"]}]}},
+            ],
+            "edges": [
+                {"source": "start", "target": "extract"},
+                {"source": "extract", "target": "end"},
+            ],
+        }
+    )
+
+    issues = validate_plan(plan)
+
+    assert any(issue.code == "PLAN_PARAMETER_EXTRACTOR_PARAMETER_TYPE_INVALID" for issue in issues)
+
+
+def test_validator_accepts_parameter_extractor_outputs() -> None:
+    plan = WorkflowPlan.model_validate(
+        {
+            "name": "extractor outputs",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "extract",
+                    "type": "parameter-extractor",
+                    "params": {
+                        "query": ["start", "query"],
+                        "parameters": [
+                            {"name": "issue", "type": "string", "description": "用户诉求"},
+                        ],
+                    },
+                },
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "issue", "value_selector": ["extract", "issue"]}]}},
+            ],
+            "edges": [
+                {"source": "start", "target": "extract"},
+                {"source": "extract", "target": "end"},
+            ],
+        }
+    )
+
+    assert validate_plan(plan) == []
 
 
 def test_validator_rejects_start_incoming_and_end_outgoing() -> None:
