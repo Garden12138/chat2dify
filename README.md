@@ -39,6 +39,16 @@ the form `/app/{app_id}/workflow`.
 Draft/create responses include `raw_plan`, normalized `plan`, rule-based
 `explanation`, `planner` metadata, `dsl`, and structured validation issues.
 
+## Screenshots
+
+Web UI workbench for create, modify, and draft run:
+
+![chat2dify Web UI workbench](docs/images/webui-workbench-run.svg)
+
+Dify draft workflow generated from the repair after-sales example:
+
+![Dify workflow canvas](docs/images/dify-workflow-canvas.svg)
+
 The third-stage edit flow modifies an existing Dify draft in place:
 
 ```text
