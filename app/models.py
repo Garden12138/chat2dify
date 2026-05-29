@@ -96,6 +96,7 @@ class WorkflowModifyRequest(BaseModel):
     message: str = Field(min_length=1)
     expected_hash: str | None = None
     allow_destructive: bool = False
+    plan: WorkflowPlan | None = None
 
 
 class WorkflowRunDraftRequest(BaseModel):

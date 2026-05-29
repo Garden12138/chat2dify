@@ -6,6 +6,8 @@ const state = {
   lastResponse: {},
   history: [],
   activeTab: "changes",
+  modifyPreview: null,
+  modifyPreviewDirty: false,
 };
 
 const els = {
@@ -55,10 +57,15 @@ function bindEvents() {
   });
 
   document.querySelector("#apply-modify").addEventListener("click", async () => {
-    await handleModify("/api/workflows/modify/apply", "apply");
+    await handleReviewedPreviewApply();
   });
 
   document.querySelector("#load-draft").addEventListener("click", handleLoadDraft);
+  ["#modify-app-id", "#modify-message", "#modify-expected-hash", "#modify-allow-destructive"].forEach((selector) => {
+    const element = document.querySelector(selector);
+    element.addEventListener("input", markModifyPreviewDirty);
+    element.addEventListener("change", markModifyPreviewDirty);
+  });
 
   els.runForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -142,6 +149,9 @@ async function handleModify(path, mode) {
       body: payload,
     });
     syncAppContext(data, payload.app_id);
+    if (mode === "preview") {
+      storeModifyPreview(data, payload);
+    }
     rememberApp(data, {
       operation: mode === "apply" ? "modify apply" : "modify preview",
       request: payload.message,
@@ -149,6 +159,49 @@ async function handleModify(path, mode) {
     });
     const guard = data.guard?.risk ? `Guard ${data.guard.risk}` : "Ready";
     setPanelStatus(els.modifyStatus, mode === "apply" ? "Applied" : guard, guardClass(data.guard));
+    renderResult(data, "changes");
+  });
+}
+
+async function handleReviewedPreviewApply() {
+  if (!els.modifyForm.reportValidity()) {
+    return;
+  }
+  const current = currentModifyPayload();
+  if (!state.modifyPreview || state.modifyPreviewDirty || !modifyPreviewMatches(current)) {
+    setPanelStatus(els.modifyStatus, "Preview required", "warning");
+    renderResult(
+      {
+        error: "Modify Apply uses the reviewed preview plan. Run Preview again before applying.",
+        app_id: current.app_id,
+        base_hash: current.expected_hash,
+      },
+      "raw"
+    );
+    return;
+  }
+
+  await withBusy(els.modifyForm, els.modifyStatus, "Applying preview", async () => {
+    const payload = {
+      app_id: state.modifyPreview.app_id,
+      message: state.modifyPreview.message,
+      expected_hash: state.modifyPreview.base_hash,
+      allow_destructive: state.modifyPreview.allow_destructive,
+      plan: state.modifyPreview.plan,
+    };
+    const data = await requestJson("/api/workflows/modify/apply", {
+      method: "POST",
+      body: payload,
+    });
+    syncAppContext(data, payload.app_id);
+    rememberApp(data, {
+      operation: "modify apply reviewed preview",
+      request: payload.message,
+      appId: payload.app_id,
+    });
+    state.modifyPreview = null;
+    state.modifyPreviewDirty = false;
+    setPanelStatus(els.modifyStatus, "Applied preview", "ok");
     renderResult(data, "changes");
   });
 }
@@ -168,6 +221,8 @@ async function handleLoadDraft() {
       appId,
       appName: data.app?.name || data.plan?.name,
     });
+    state.modifyPreview = null;
+    state.modifyPreviewDirty = false;
     setPanelStatus(els.modifyStatus, "Loaded", "ok");
     renderResult(data, "plan");
   });
@@ -296,6 +351,9 @@ function renderSummary(data) {
 function renderChangesPanel(data) {
   const panel = panelFor("changes");
   const rows = [];
+  if (data.planner?.mode === "preview-plan" && data.sync?.result) {
+    rows.push({ tone: "ok", text: "Applied reviewed preview. No second LLM generation was used." });
+  }
   if (data.explanation?.summary) {
     rows.push({ tone: "info", text: data.explanation.summary });
   }
@@ -605,6 +663,54 @@ function syncAppContext(data, fallbackAppId = "") {
   const latestHash = data.new_hash || data.base_hash;
   if (latestHash) {
     els.modifyExpectedHash.value = latestHash;
+  }
+}
+
+function currentModifyPayload() {
+  return {
+    app_id: valueOf("#modify-app-id"),
+    message: valueOf("#modify-message"),
+    expected_hash: optionalValue("#modify-expected-hash"),
+    allow_destructive: document.querySelector("#modify-allow-destructive").checked,
+  };
+}
+
+function storeModifyPreview(data, payload) {
+  if (!data.plan || !data.base_hash) {
+    state.modifyPreview = null;
+    state.modifyPreviewDirty = false;
+    return;
+  }
+  state.modifyPreview = {
+    app_id: data.app_id || payload.app_id,
+    message: payload.message,
+    base_hash: data.base_hash,
+    allow_destructive: payload.allow_destructive,
+    plan: data.plan,
+  };
+  state.modifyPreviewDirty = false;
+}
+
+function modifyPreviewMatches(payload) {
+  const preview = state.modifyPreview;
+  if (!preview) {
+    return false;
+  }
+  return (
+    payload.app_id === preview.app_id &&
+    payload.message === preview.message &&
+    payload.expected_hash === preview.base_hash &&
+    payload.allow_destructive === preview.allow_destructive
+  );
+}
+
+function markModifyPreviewDirty() {
+  if (!state.modifyPreview) {
+    return;
+  }
+  state.modifyPreviewDirty = !modifyPreviewMatches(currentModifyPayload());
+  if (state.modifyPreviewDirty) {
+    setPanelStatus(els.modifyStatus, "Preview stale", "warning");
   }
 }
 

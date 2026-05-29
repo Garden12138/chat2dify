@@ -217,45 +217,39 @@ def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:
                 )
 
             before_plan = decompile_dify_graph(draft.graph, name=_draft_plan_name(app_detail, request.app_id))
-            edit_result = WorkflowEditPlanner(settings).generate(
-                request.message,
-                current_plan=before_plan,
-                dsl_version=version_info.app_dsl_version,
-            )
-            plan = edit_result.plan
-            dsl = compiler.compile(plan)
-            graph = compile_plan_to_dify_graph(plan, compiler=compiler, base_graph=draft.graph)
-            issues = [*validate_plan(plan), *validate_dsl(dsl, expected_dsl_version=version_info.app_dsl_version)]
-            changes = diff_plans(before_plan, plan)
-            guard = guard_plan_change(before_plan, plan, changes)
-            explanation = explain_plan(plan)
-            explanation["changes"] = [change["message"] for change in changes]
-            explanation["preserved"] = _preserved_node_summary(before_plan, plan, changes)
+            if apply and request.plan is not None:
+                plan = request.plan
+                raw_plan = plan.model_dump()
+                planner_metadata = _preview_plan_planner_metadata()
+            else:
+                edit_result = WorkflowEditPlanner(settings).generate(
+                    request.message,
+                    current_plan=before_plan,
+                    dsl_version=version_info.app_dsl_version,
+                )
+                plan = edit_result.plan
+                raw_plan = edit_result.raw_plan
+                planner_metadata = edit_result.metadata()
 
-            response = {
-                "app_id": request.app_id,
-                "workflow_url": settings.workflow_url(request.app_id),
-                "base_hash": draft.hash,
-                "app": _app_payload(app_detail),
-                "raw_plan": edit_result.raw_plan,
-                "before_plan": before_plan.model_dump(),
-                "plan": plan.model_dump(),
-                "changes": changes,
-                "explanation": explanation,
-                "planner": edit_result.metadata(),
-                "guard": guard.to_dict(),
-                "validation": {
-                    "ok": not has_errors(issues),
-                    "issues": [issue.model_dump() for issue in issues],
-                },
-                "dsl": dsl,
-            }
+            response, graph = _build_modify_response(
+                settings=settings,
+                version_info=version_info,
+                compiler=compiler,
+                app_id=request.app_id,
+                app_detail=app_detail,
+                draft_hash=draft.hash,
+                base_graph=draft.graph,
+                before_plan=before_plan,
+                plan=plan,
+                raw_plan=raw_plan,
+                planner_metadata=planner_metadata,
+            )
 
             if not apply:
                 return response
             if not response["validation"]["ok"]:
                 raise HTTPException(status_code=422, detail=response["validation"]["issues"])
-            if guard.no_op:
+            if response["guard"]["no_op"]:
                 response["new_hash"] = draft.hash
                 response["sync"] = {
                     "result": "noop",
@@ -263,13 +257,13 @@ def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:
                     "workflow_url": settings.workflow_url(request.app_id),
                 }
                 return response
-            if not guard.ok and not request.allow_destructive:
+            if not response["guard"]["ok"] and not request.allow_destructive:
                 raise HTTPException(
                     status_code=422,
                     detail={
                         "code": "PLAN_CHANGE_GUARD_BLOCKED",
                         "message": "修改风险较高，默认安全模式已阻断写回。",
-                        "guard": guard.to_dict(),
+                        "guard": response["guard"],
                     },
                 )
 
@@ -304,6 +298,62 @@ def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except DifyClientError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+def _build_modify_response(
+    *,
+    settings,
+    version_info,
+    compiler: DifyDslCompiler,
+    app_id: str,
+    app_detail: DifyAppDetail | None,
+    draft_hash: str,
+    base_graph: dict,
+    before_plan: WorkflowPlan,
+    plan: WorkflowPlan,
+    raw_plan: dict,
+    planner_metadata: dict,
+) -> tuple[dict, dict]:
+    dsl = compiler.compile(plan)
+    graph = compile_plan_to_dify_graph(plan, compiler=compiler, base_graph=base_graph)
+    issues = [*validate_plan(plan), *validate_dsl(dsl, expected_dsl_version=version_info.app_dsl_version)]
+    changes = diff_plans(before_plan, plan)
+    guard = guard_plan_change(before_plan, plan, changes)
+    explanation = explain_plan(plan)
+    explanation["changes"] = [change["message"] for change in changes]
+    explanation["preserved"] = _preserved_node_summary(before_plan, plan, changes)
+
+    response = {
+        "app_id": app_id,
+        "workflow_url": settings.workflow_url(app_id),
+        "base_hash": draft_hash,
+        "app": _app_payload(app_detail),
+        "raw_plan": raw_plan,
+        "before_plan": before_plan.model_dump(),
+        "plan": plan.model_dump(),
+        "changes": changes,
+        "explanation": explanation,
+        "planner": planner_metadata,
+        "guard": guard.to_dict(),
+        "validation": {
+            "ok": not has_errors(issues),
+            "issues": [issue.model_dump() for issue in issues],
+        },
+        "dsl": dsl,
+    }
+    return response, graph
+
+
+def _preview_plan_planner_metadata() -> dict:
+    return {
+        "mode": "preview-plan",
+        "attempts": 0,
+        "used_fallback": False,
+        "repaired": False,
+        "replanned": False,
+        "normalizations": [],
+        "errors": [],
+    }
 
 
 def _preserved_node_summary(

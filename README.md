@@ -107,6 +107,15 @@ Open the local Web UI:
 http://127.0.0.1:8000/
 ```
 
+Recommended Web UI edit flow:
+
+```text
+Load draft -> Preview -> Apply reviewed preview
+```
+
+The Web UI applies the exact Plan IR returned by Preview. It does not ask the
+LLM to generate a second modification during Apply.
+
 Health check:
 
 ```bash
@@ -149,6 +158,20 @@ Apply the change to the Dify draft:
 curl -X POST http://127.0.0.1:8000/api/workflows/modify/apply \
   -H 'Content-Type: application/json' \
   -d '{"app_id":"YOUR_APP_ID","message":"Make the final answer warmer","expected_hash":"OPTIONAL_CURRENT_HASH"}'
+```
+
+Apply a reviewed preview plan without re-running the edit planner. The `plan`
+value should be the exact `plan` object returned by `modify/draft`:
+
+```json
+{
+  "app_id": "YOUR_APP_ID",
+  "message": "Make the final answer warmer",
+  "expected_hash": "PREVIEW_BASE_HASH",
+  "plan": {
+    "...": "copy the full preview plan object here"
+  }
+}
 ```
 
 Allow a confirmed destructive rewrite:

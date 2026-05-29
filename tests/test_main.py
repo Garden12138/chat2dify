@@ -31,6 +31,9 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert script.status_code == 200
     assert "handleCreate" in script.text
     assert "handleLoadDraft" in script.text
+    assert "handleReviewedPreviewApply" in script.text
+    assert "modifyPreview" in script.text
+    assert "Applied reviewed preview" in script.text
     assert "localStorage" in script.text
     assert "renderValidationPanel" in script.text
     assert "planNodeOverview" in script.text
@@ -271,6 +274,233 @@ def test_apply_workflow_modification_syncs_dify_draft(monkeypatch) -> None:
     assert data["sync"]["result"] == "success"
     assert seen["sync_hash"] == "hash-1"
     assert seen["sync_graph"]["nodes"]
+
+
+def test_apply_workflow_modification_with_preview_plan_does_not_replan(monkeypatch) -> None:
+    settings = _test_settings()
+    compiler = DifyDslCompiler(
+        dsl_version="9.9.9",
+        default_model_provider="openai",
+        default_model_name="gpt-4o-mini",
+    )
+    current_plan = fallback_plan("hello", app_name="Loaded")
+    graph = yaml.safe_load(compiler.compile(current_plan))["workflow"]["graph"]
+    preview_plan = current_plan.model_copy(deep=True)
+    preview_plan.nodes[1].params["user_prompt"] = "Reviewed preview {{#start.query#}}"
+    seen = {}
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get_draft_workflow(self, _app_id):
+            return DifyDraftWorkflow(
+                id="workflow-1",
+                graph=graph,
+                features={},
+                hash="hash-1",
+                version="draft",
+                environment_variables=[],
+                conversation_variables=[],
+                raw={},
+            )
+
+        def sync_draft_workflow(self, app_id, **kwargs):
+            seen["sync_app_id"] = app_id
+            seen["sync_hash"] = kwargs["hash"]
+            seen["sync_graph"] = kwargs["graph"]
+            return DifyDraftSyncResult(
+                result="success",
+                hash="hash-2",
+                updated_at="123",
+                workflow_url=settings.workflow_url(app_id),
+            )
+
+    class FailingEditPlanner:
+        def __init__(self, _settings):
+            raise AssertionError("apply with plan must not instantiate edit planner")
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+    monkeypatch.setattr("app.main.WorkflowEditPlanner", FailingEditPlanner)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/modify/apply",
+            json={
+                "app_id": "app-1",
+                "message": "apply reviewed preview",
+                "expected_hash": "hash-1",
+                "plan": preview_plan.model_dump(),
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["planner"]["mode"] == "preview-plan"
+    assert data["planner"]["attempts"] == 0
+    assert data["planner"]["replanned"] is False
+    assert data["new_hash"] == "hash-2"
+    assert data["sync"]["result"] == "success"
+    assert seen["sync_hash"] == "hash-1"
+    assert seen["sync_graph"]["nodes"]
+
+
+def test_apply_workflow_modification_with_preview_plan_hash_conflict(monkeypatch) -> None:
+    settings = _test_settings()
+    compiler = DifyDslCompiler(
+        dsl_version="9.9.9",
+        default_model_provider="openai",
+        default_model_name="gpt-4o-mini",
+    )
+    plan = fallback_plan("hello", app_name="Loaded")
+    graph = yaml.safe_load(compiler.compile(plan))["workflow"]["graph"]
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get_draft_workflow(self, _app_id):
+            return DifyDraftWorkflow(
+                id="workflow-1",
+                graph=graph,
+                features={},
+                hash="hash-current",
+                version="draft",
+                environment_variables=[],
+                conversation_variables=[],
+                raw={},
+            )
+
+        def sync_draft_workflow(self, _app_id, **_kwargs):
+            raise AssertionError("hash conflict should block before sync")
+
+    class FailingEditPlanner:
+        def __init__(self, _settings):
+            raise AssertionError("apply with plan must not instantiate edit planner")
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+    monkeypatch.setattr("app.main.WorkflowEditPlanner", FailingEditPlanner)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/modify/apply",
+            json={
+                "app_id": "app-1",
+                "message": "apply reviewed preview",
+                "expected_hash": "stale",
+                "plan": plan.model_dump(),
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["current_hash"] == "hash-current"
+
+
+def test_apply_workflow_modification_with_invalid_preview_plan_returns_422(monkeypatch) -> None:
+    monkeypatch.setattr("app.main.load_settings", _test_settings)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/modify/apply",
+            json={
+                "app_id": "app-1",
+                "message": "apply invalid preview",
+                "plan": {"name": "bad", "nodes": [], "edges": []},
+            },
+        )
+
+    assert response.status_code == 422
+
+
+def test_apply_workflow_modification_with_destructive_preview_plan_is_blocked(monkeypatch) -> None:
+    settings = _test_settings()
+    compiler = DifyDslCompiler(
+        dsl_version="9.9.9",
+        default_model_provider="openai",
+        default_model_name="gpt-4o-mini",
+    )
+    current_plan = fallback_plan("hello", app_name="Loaded")
+    graph = yaml.safe_load(compiler.compile(current_plan))["workflow"]["graph"]
+    destructive_plan = current_plan.model_copy(deep=True)
+    destructive_plan.nodes = [destructive_plan.nodes[0], destructive_plan.nodes[2]]
+    destructive_plan.edges = [type(destructive_plan.edges[0])(source=destructive_plan.nodes[0].id, target=destructive_plan.nodes[1].id)]
+    destructive_plan.nodes[1].params["outputs"] = [{"variable": "answer", "value_selector": ["start", "query"]}]
+    seen = {"synced": False}
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get_draft_workflow(self, _app_id):
+            return DifyDraftWorkflow(
+                id="workflow-1",
+                graph=graph,
+                features={},
+                hash="hash-1",
+                version="draft",
+                environment_variables=[],
+                conversation_variables=[],
+                raw={},
+            )
+
+        def sync_draft_workflow(self, _app_id, **_kwargs):
+            seen["synced"] = True
+            raise AssertionError("destructive preview plan should be blocked before sync")
+
+    class FailingEditPlanner:
+        def __init__(self, _settings):
+            raise AssertionError("apply with plan must not instantiate edit planner")
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+    monkeypatch.setattr("app.main.WorkflowEditPlanner", FailingEditPlanner)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/modify/apply",
+            json={
+                "app_id": "app-1",
+                "message": "apply destructive preview",
+                "expected_hash": "hash-1",
+                "plan": destructive_plan.model_dump(),
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "PLAN_CHANGE_GUARD_BLOCKED"
+    assert seen["synced"] is False
 
 
 def test_apply_workflow_modification_blocks_destructive_change(monkeypatch) -> None:
