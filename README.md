@@ -54,6 +54,11 @@ large node deletions, start/end rewrites, or broad edge rewiring are reported in
 `guard` and blocked on apply unless `allow_destructive=true` is sent. No-op
 edits return `sync.result="noop"` and are not written back to Dify.
 
+Use `GET /api/workflows/{app_id}/draft` to inspect the current Dify draft
+without calling an LLM or writing anything back. The response includes the
+current draft hash, Dify app metadata when available, the decompiled Plan IR,
+and validation diagnostics.
+
 The fourth-stage validation flow runs an existing Dify workflow draft with
 explicit test inputs and returns a blocking summary:
 
@@ -130,6 +135,12 @@ Preview a change to an existing Dify workflow draft:
 curl -X POST http://127.0.0.1:8000/api/workflows/modify/draft \
   -H 'Content-Type: application/json' \
   -d '{"app_id":"YOUR_APP_ID","message":"Make the final answer warmer"}'
+```
+
+Inspect the current Dify workflow draft without modifying it:
+
+```bash
+curl http://127.0.0.1:8000/api/workflows/YOUR_APP_ID/draft
 ```
 
 Apply the change to the Dify draft:

@@ -58,6 +58,8 @@ function bindEvents() {
     await handleModify("/api/workflows/modify/apply", "apply");
   });
 
+  document.querySelector("#load-draft").addEventListener("click", handleLoadDraft);
+
   els.runForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     await handleRun();
@@ -151,6 +153,26 @@ async function handleModify(path, mode) {
   });
 }
 
+async function handleLoadDraft() {
+  const appId = valueOf("#modify-app-id");
+  if (!appId) {
+    setPanelStatus(els.modifyStatus, "App ID required", "error");
+    els.modifyAppId.focus();
+    return;
+  }
+  await withBusy(els.modifyForm, els.modifyStatus, "Loading", async () => {
+    const data = await requestJson(`/api/workflows/${encodeURIComponent(appId)}/draft`);
+    syncAppContext(data, appId);
+    rememberApp(data, {
+      operation: "load draft",
+      appId,
+      appName: data.app?.name || data.plan?.name,
+    });
+    setPanelStatus(els.modifyStatus, "Loaded", "ok");
+    renderResult(data, "plan");
+  });
+}
+
 async function handleRun() {
   await withBusy(els.runForm, els.runStatus, "Running", async () => {
     const payload = {
@@ -227,6 +249,8 @@ function renderResult(data, preferredTab = state.activeTab) {
 function renderSummary(data) {
   const items = [
     ["App ID", data.app_id],
+    ["App name", data.app?.name || data.plan?.name],
+    ["Mode", data.app?.mode || data.app_mode],
     ["Workflow", linkValue(data.workflow_url)],
     ["Status", data.status ?? data.guard?.risk],
     ["Run OK", typeof data.ok === "boolean" ? String(data.ok) : undefined],
@@ -355,8 +379,12 @@ function renderOutputsPanel(data) {
 function renderPlanPanel(data) {
   const panel = panelFor("plan");
   const sections = [];
+  if (data.before_plan) {
+    sections.push(planNodeOverview("Before draft nodes", data.before_plan));
+  }
   if (data.plan) {
     sections.push(planSummary(data.plan));
+    sections.push(planNodeOverview(data.before_plan ? "After plan nodes" : "Current draft nodes", data.plan));
     sections.push(jsonBlock("Plan IR", data.plan));
   }
   if (data.before_plan) {
@@ -372,6 +400,97 @@ function renderPlanPanel(data) {
   }
 
   panel.replaceChildren(...sections);
+}
+
+function planNodeOverview(title, plan) {
+  const section = document.createElement("section");
+  section.className = "result-section";
+  const heading = document.createElement("h3");
+  heading.textContent = title;
+  const nodes = Array.isArray(plan?.nodes) ? plan.nodes : [];
+  if (nodes.length === 0) {
+    section.append(heading, emptyState("No nodes found in this plan."));
+    return section;
+  }
+
+  const list = document.createElement("div");
+  list.className = "node-list";
+  nodes.forEach((node) => {
+    list.append(renderNodeCard(node));
+  });
+  section.append(heading, list);
+  return section;
+}
+
+function renderNodeCard(node) {
+  const card = document.createElement("article");
+  card.className = "node-card";
+  const header = document.createElement("div");
+  header.className = "node-card-header";
+  const title = document.createElement("span");
+  title.className = "node-title";
+  title.textContent = node.title || node.id || "Untitled node";
+  const meta = document.createElement("span");
+  meta.className = "node-meta";
+  meta.textContent = [node.type, node.id].filter(Boolean).join(" · ");
+  header.append(title, meta);
+  card.append(header);
+
+  nodeDetails(node).forEach((detail) => {
+    card.append(detail);
+  });
+  return card;
+}
+
+function nodeDetails(node) {
+  const params = node.params || {};
+  if (node.type === "start") {
+    const variables = Array.isArray(params.variables) ? params.variables : [];
+    return [nodeLine("Inputs", variables.map((item) => item.name || item.variable).filter(Boolean).join(", ") || "none")];
+  }
+  if (node.type === "llm") {
+    return [
+      promptPreview("System", params.system_prompt),
+      promptPreview("User", params.user_prompt),
+    ];
+  }
+  if (node.type === "end") {
+    const outputs = Array.isArray(params.outputs) ? params.outputs : [];
+    return [nodeLine("Outputs", outputs.map((item) => item.variable).filter(Boolean).join(", ") || "none")];
+  }
+  if (node.type === "if-else") {
+    const cases = Array.isArray(params.cases) ? params.cases : [];
+    return [nodeLine("Branches", cases.map((item) => item.case_id || item.id).filter(Boolean).join(", ") || "none")];
+  }
+  if (node.type === "http-request") {
+    return [nodeLine("Request", [params.method, params.url].filter(Boolean).join(" ") || "not configured")];
+  }
+  if (node.type === "template-transform") {
+    return [promptPreview("Template", params.template)];
+  }
+  if (node.type === "code") {
+    return [promptPreview("Code", params.code)];
+  }
+  return [];
+}
+
+function nodeLine(label, value) {
+  const row = document.createElement("div");
+  row.className = "node-detail";
+  const labelEl = document.createElement("span");
+  labelEl.className = "node-detail-label";
+  labelEl.textContent = label;
+  const valueEl = document.createElement("span");
+  valueEl.className = "node-detail-value";
+  valueEl.textContent = value || "empty";
+  row.append(labelEl, valueEl);
+  return row;
+}
+
+function promptPreview(label, value) {
+  const row = nodeLine(label, truncateText(value || "empty", 700));
+  row.classList.add("prompt-preview");
+  return row;
 }
 
 function renderResultActions(data) {
@@ -671,6 +790,14 @@ function valueOf(selector) {
 function optionalValue(selector) {
   const value = valueOf(selector);
   return value || undefined;
+}
+
+function truncateText(value, maxLength) {
+  const text = String(value || "");
+  if (text.length <= maxLength) {
+    return text;
+  }
+  return `${text.slice(0, maxLength)}...`;
 }
 
 function parseJsonField(selector, label) {

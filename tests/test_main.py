@@ -5,7 +5,7 @@ from app.agent.editor import WorkflowEditResult
 from app.agent.planner import fallback_plan
 from app.compiler.dify import DifyDslCompiler
 from app.config import Settings
-from app.dify.client import DifyDraftRunResult, DifyDraftSyncResult, DifyDraftWorkflow
+from app.dify.client import DifyAppDetail, DifyClientError, DifyDraftRunResult, DifyDraftSyncResult, DifyDraftWorkflow
 from app.dify.version import DifyVersionInfo
 from app.main import app
 
@@ -27,14 +27,18 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert 'id="create-form"' in index.text
     assert 'id="history-list"' in index.text
     assert 'id="result-tabs"' in index.text
+    assert 'id="load-draft"' in index.text
     assert script.status_code == 200
     assert "handleCreate" in script.text
+    assert "handleLoadDraft" in script.text
     assert "localStorage" in script.text
     assert "renderValidationPanel" in script.text
+    assert "planNodeOverview" in script.text
     assert styles.status_code == 200
     assert ".workspace" in styles.text
     assert ".history-item" in styles.text
     assert ".tab-button" in styles.text
+    assert ".node-card" in styles.text
 
 
 def test_draft_response_includes_phase2_fields(monkeypatch) -> None:
@@ -69,6 +73,121 @@ def test_draft_response_includes_phase2_fields(monkeypatch) -> None:
     assert data["planner"]["mode"] == "fallback"
     assert data["planner"]["used_fallback"] is True
     assert data["validation"]["ok"] is True
+
+
+def test_get_workflow_draft_returns_app_detail_and_plan(monkeypatch) -> None:
+    settings = _test_settings()
+    compiler = DifyDslCompiler(
+        dsl_version="9.9.9",
+        default_model_provider="openai",
+        default_model_name="gpt-4o-mini",
+    )
+    graph = yaml.safe_load(compiler.compile(fallback_plan("修车售后服务工作流", app_name="修车售后服务工作流")))["workflow"]["graph"]
+    seen = {}
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get_app_detail(self, app_id):
+            seen["app_id"] = app_id
+            return DifyAppDetail(
+                id=app_id,
+                name="修车售后服务工作流",
+                mode="workflow",
+                description="处理修车售后诉求",
+                raw={},
+            )
+
+        def get_draft_workflow(self, app_id):
+            seen["draft_app_id"] = app_id
+            return DifyDraftWorkflow(
+                id="workflow-1",
+                graph=graph,
+                features={},
+                hash="hash-1",
+                version="draft",
+                environment_variables=[],
+                conversation_variables=[],
+                raw={},
+            )
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+
+    with TestClient(app) as client:
+        response = client.get("/api/workflows/app-1/draft")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["app_id"] == "app-1"
+    assert data["workflow_url"] == "http://dify.local/app/app-1/workflow"
+    assert data["base_hash"] == "hash-1"
+    assert data["app"]["name"] == "修车售后服务工作流"
+    assert data["plan"]["name"] == "修车售后服务工作流"
+    assert data["validation"]["ok"] is True
+    assert seen == {"app_id": "app-1", "draft_app_id": "app-1"}
+
+
+def test_get_workflow_draft_falls_back_when_app_detail_fails(monkeypatch) -> None:
+    settings = _test_settings()
+    compiler = DifyDslCompiler(
+        dsl_version="9.9.9",
+        default_model_provider="openai",
+        default_model_name="gpt-4o-mini",
+    )
+    graph = yaml.safe_load(compiler.compile(fallback_plan("hello", app_name="Loaded")))["workflow"]["graph"]
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get_app_detail(self, _app_id):
+            raise DifyClientError("app detail unavailable")
+
+        def get_draft_workflow(self, _app_id):
+            return DifyDraftWorkflow(
+                id="workflow-1",
+                graph=graph,
+                features={},
+                hash="hash-1",
+                version="draft",
+                environment_variables=[],
+                conversation_variables=[],
+                raw={},
+            )
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+
+    with TestClient(app) as client:
+        response = client.get("/api/workflows/app-1/draft")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["app"] is None
+    assert data["plan"]["name"] == "Dify Workflow app-1"
+    assert data["base_hash"] == "hash-1"
 
 
 def test_apply_workflow_modification_syncs_dify_draft(monkeypatch) -> None:

@@ -51,6 +51,25 @@ class DifyImportResult:
 
 
 @dataclass(frozen=True)
+class DifyAppDetail:
+    id: str
+    name: str
+    mode: str
+    description: str
+    raw: dict[str, Any]
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "DifyAppDetail":
+        return cls(
+            id=str(payload.get("id", "")),
+            name=str(payload.get("name", "")),
+            mode=str(payload.get("mode", "")),
+            description=str(payload.get("description", "") or ""),
+            raw=payload,
+        )
+
+
+@dataclass(frozen=True)
 class DifyDraftWorkflow:
     id: str
     graph: dict[str, Any]
@@ -192,6 +211,18 @@ class DifyClient:
     def confirm_import(self, import_id: str) -> DifyImportResult:
         response = self._post_with_auth_retry(f"/apps/imports/{import_id}/confirm", {})
         return self._result_from_response(response)
+
+    def get_app_detail(self, app_id: str) -> DifyAppDetail:
+        self._ensure_logged_in()
+        response = self._get_with_auth_retry(f"/apps/{app_id}")
+        self._raise_for_response(response)
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise DifyClientError(f"Invalid Dify JSON response: {response.text}") from exc
+        if not isinstance(payload, dict):
+            raise DifyClientError("Dify app detail response must be a JSON object.")
+        return DifyAppDetail.from_payload(payload)
 
     def get_draft_workflow(self, app_id: str) -> DifyDraftWorkflow:
         self._ensure_logged_in()

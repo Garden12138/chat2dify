@@ -172,6 +172,35 @@ def test_get_and_sync_draft_workflow_send_csrf_and_hash() -> None:
     assert result.workflow_url == "http://dify.local/app/app-1/workflow"
 
 
+def test_get_app_detail_returns_console_app_metadata() -> None:
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/console/api/login":
+            return httpx.Response(200, json={"result": "success"}, headers=[("set-cookie", "csrf_token=csrf123; Path=/")])
+        if request.url.path == "/console/api/apps/app-1":
+            seen["csrf"] = request.headers.get(CSRF_HEADER_NAME, "")
+            return httpx.Response(
+                200,
+                json={
+                    "id": "app-1",
+                    "name": "修车售后服务工作流",
+                    "mode": "workflow",
+                    "description": "Handle repair after-sales requests.",
+                },
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+    detail = client.get_app_detail("app-1")
+
+    assert seen["csrf"] == "csrf123"
+    assert detail.id == "app-1"
+    assert detail.name == "修车售后服务工作流"
+    assert detail.mode == "workflow"
+    assert detail.description == "Handle repair after-sales requests."
+
+
 def test_sync_draft_workflow_conflict_is_typed() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/console/api/login":

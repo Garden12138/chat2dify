@@ -15,7 +15,7 @@ from app.agent.guard import guard_plan_change
 from app.agent.planner import PlannerError, WorkflowPlanner
 from app.compiler.dify import DifyDslCompiler
 from app.config import ConfigurationError, load_settings
-from app.dify.client import DifyClient, DifyClientError, DifyConflictError
+from app.dify.client import DifyAppDetail, DifyClient, DifyClientError, DifyConflictError
 from app.dify.graph import (
     DifyGraphAdapterError,
     UnsupportedExistingNodeType,
@@ -126,6 +126,46 @@ def create_workflow(request: WorkflowRequest) -> dict:
     }
 
 
+@app.get("/api/workflows/{app_id}/draft")
+def get_workflow_draft(app_id: str) -> dict:
+    settings = load_settings()
+    version_info = read_dify_version_info(settings.dify_source_path)
+    try:
+        with DifyClient(settings) as client:
+            app_detail = _load_app_detail(client, app_id)
+            draft = client.get_draft_workflow(app_id)
+
+        plan = decompile_dify_graph(draft.graph, name=_draft_plan_name(app_detail, app_id))
+        issues = validate_plan(plan)
+        return {
+            "app_id": app_id,
+            "workflow_url": settings.workflow_url(app_id),
+            "base_hash": draft.hash,
+            "app": _app_payload(app_detail),
+            "plan": plan.model_dump(),
+            "explanation": explain_plan(plan),
+            "validation": {
+                "ok": not has_errors(issues),
+                "issues": [issue.model_dump() for issue in issues],
+            },
+            "dify": asdict(version_info),
+        }
+    except UnsupportedExistingNodeType as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "UNSUPPORTED_EXISTING_NODE_TYPE",
+                "message": str(exc),
+                "node_id": exc.node_id,
+                "node_type": exc.node_type,
+            },
+        ) from exc
+    except DifyGraphAdapterError as exc:
+        raise HTTPException(status_code=422, detail={"code": "DIFY_GRAPH_UNSUPPORTED", "message": str(exc)}) from exc
+    except DifyClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @app.post("/api/workflows/modify/draft")
 def draft_workflow_modification(request: WorkflowModifyRequest) -> dict:
     return _modify_workflow(request, apply=False)
@@ -163,6 +203,7 @@ def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:
 
     try:
         with DifyClient(settings) as client:
+            app_detail = _load_app_detail(client, request.app_id)
             draft = client.get_draft_workflow(request.app_id)
             if request.expected_hash and request.expected_hash != draft.hash:
                 raise HTTPException(
@@ -175,7 +216,7 @@ def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:
                     },
                 )
 
-            before_plan = decompile_dify_graph(draft.graph, name=f"Dify Workflow {request.app_id}")
+            before_plan = decompile_dify_graph(draft.graph, name=_draft_plan_name(app_detail, request.app_id))
             edit_result = WorkflowEditPlanner(settings).generate(
                 request.message,
                 current_plan=before_plan,
@@ -195,6 +236,7 @@ def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:
                 "app_id": request.app_id,
                 "workflow_url": settings.workflow_url(request.app_id),
                 "base_hash": draft.hash,
+                "app": _app_payload(app_detail),
                 "raw_plan": edit_result.raw_plan,
                 "before_plan": before_plan.model_dump(),
                 "plan": plan.model_dump(),
@@ -283,3 +325,29 @@ def _preserved_node_summary(
     if not preserved:
         return []
     return [f"保留 {len(preserved)} 个未改动节点：" + "、".join(node.title or node.id for node in preserved[:6])]
+
+
+def _load_app_detail(client: DifyClient, app_id: str) -> DifyAppDetail | None:
+    try:
+        return client.get_app_detail(app_id)
+    except AttributeError:
+        return None
+    except DifyClientError:
+        return None
+
+
+def _draft_plan_name(app_detail: DifyAppDetail | None, app_id: str) -> str:
+    if app_detail and app_detail.name:
+        return app_detail.name
+    return f"Dify Workflow {app_id}"
+
+
+def _app_payload(app_detail: DifyAppDetail | None) -> dict | None:
+    if app_detail is None:
+        return None
+    return {
+        "id": app_detail.id,
+        "name": app_detail.name,
+        "mode": app_detail.mode,
+        "description": app_detail.description,
+    }
