@@ -123,6 +123,14 @@ def _param_change_type(node_type: str, field: str) -> str:
         return "classifier_changed"
     if node_type == "parameter-extractor" and field in {"parameters", "instruction", "query", "reasoning_mode"}:
         return "extractor_changed"
+    if node_type == "variable-aggregator" and field in {"variables", "output_type", "advanced_settings"}:
+        return "aggregator_changed"
+    if node_type == "document-extractor" and field in {"variable_selector", "is_array_file"}:
+        return "document_extractor_changed"
+    if node_type == "assigner" and field in {"items", "version"}:
+        return "assigner_changed"
+    if node_type == "list-operator" and field in {"variable", "filter_by", "extract_by", "order_by", "limit"}:
+        return "list_operator_changed"
     return "node_params_updated"
 
 
@@ -143,6 +151,14 @@ def _param_change_message(node: PlanNode, field: str) -> str:
             return f"更新分类节点 {title} 的 {field}。"
         case "extractor_changed":
             return f"更新参数提取节点 {title} 的 {field}。"
+        case "aggregator_changed":
+            return f"更新变量聚合节点 {title} 的 {field}。"
+        case "document_extractor_changed":
+            return f"更新文档提取节点 {title} 的 {field}。"
+        case "assigner_changed":
+            return f"更新变量赋值节点 {title} 的 {field}。"
+        case "list_operator_changed":
+            return f"更新列表处理节点 {title} 的 {field}。"
     return f"更新 {node.type} 节点 {title} 的 {field}。"
 
 

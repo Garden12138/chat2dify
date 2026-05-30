@@ -80,6 +80,23 @@ def test_planner_accepts_understanding_nodes() -> None:
     assert [edge.source_handle for edge in result.plan.edges if edge.source == "classifier"] == ["complaint", "consult"]
 
 
+def test_planner_accepts_stable_builtin_nodes() -> None:
+    planner = FakePlanner([json.dumps(_stable_builtin_plan())])
+
+    result = planner.generate("维修单附件总结并筛选记录", app_name="维修单处理", dsl_version="9.9.9")
+
+    assert result.used_fallback is False
+    assert {node.type for node in result.plan.nodes} >= {
+        "document-extractor",
+        "variable-aggregator",
+        "list-operator",
+    }
+    doc = next(node for node in result.plan.nodes if node.id == "doc")
+    list_node = next(node for node in result.plan.nodes if node.id == "list")
+    assert doc.params["variable_selector"] == ["start", "files"]
+    assert list_node.params["limit"]["size"] == 1
+
+
 def test_planner_self_repairs_after_validation_failure() -> None:
     bad = {
         "name": "bad",
@@ -183,5 +200,52 @@ def _understanding_plan() -> dict:
             {"source": "classifier", "target": "llm_consult", "source_handle": "consult"},
             {"source": "llm_complaint", "target": "end_complaint"},
             {"source": "llm_consult", "target": "end_consult"},
+        ],
+    }
+
+
+def _stable_builtin_plan() -> dict:
+    return {
+        "nodes": [
+            {
+                "id": "start",
+                "type": "start",
+                "title": "接收维修单和售后记录",
+                "params": {
+                    "variables": [
+                        {"name": "query", "type": "paragraph"},
+                        {"name": "files", "type": "file-list"},
+                        {"name": "items", "type": "json"},
+                    ]
+                },
+            },
+            {"id": "doc", "type": "document-extractor", "title": "提取维修单文本", "params": {"variable_selector": ["start", "files"], "is_array_file": True}},
+            {
+                "id": "aggregate",
+                "type": "variable-aggregator",
+                "title": "聚合售后上下文",
+                "params": {"variables": [["doc", "text"], ["start", "query"]], "output_type": "string"},
+            },
+            {
+                "id": "list",
+                "type": "list-operator",
+                "title": "筛选投诉记录",
+                "params": {
+                    "variable": ["start", "items"],
+                    "var_type": "array[string]",
+                    "item_var_type": "string",
+                    "filter_by": {"enabled": True, "conditions": [{"comparison_operator": "contains", "value": "投诉"}]},
+                    "limit": {"enabled": True, "size": 1},
+                },
+            },
+            {"id": "llm", "type": "llm", "title": "生成维修单总结", "params": {"user_prompt": "{{#aggregate.output#}}\n{{#list.first_record#}}"}},
+            {"id": "end", "type": "end", "title": "返回总结结果", "params": {"outputs": [{"variable": "answer", "value_selector": ["llm", "text"]}]}},
+        ],
+        "edges": [
+            {"source": "start", "target": "doc"},
+            {"source": "doc", "target": "aggregate"},
+            {"source": "aggregate", "target": "list"},
+            {"source": "list", "target": "llm"},
+            {"source": "llm", "target": "end"},
         ],
     }

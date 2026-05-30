@@ -107,6 +107,14 @@ class DifyDslCompiler:
                 data.update(self._question_classifier_data(node))
             case "parameter-extractor":
                 data.update(self._parameter_extractor_data(node))
+            case "variable-aggregator":
+                data.update(self._variable_aggregator_data(node))
+            case "document-extractor":
+                data.update(self._document_extractor_data(node))
+            case "assigner":
+                data.update(self._assigner_data(node))
+            case "list-operator":
+                data.update(self._list_operator_data(node))
 
         return {
             "id": node.id,
@@ -281,6 +289,40 @@ class DifyDslCompiler:
             "memory": node.params.get("memory"),
         }
 
+    def _variable_aggregator_data(self, node: PlanNode) -> dict[str, Any]:
+        advanced = node.params.get("advanced_settings") if isinstance(node.params.get("advanced_settings"), dict) else {}
+        return {
+            "variables": _selector_list(node.params.get("variables", [])),
+            "output_type": node.params.get("output_type", "string"),
+            "advanced_settings": {
+                "group_enabled": bool(advanced.get("group_enabled", False)),
+                "groups": deepcopy(advanced.get("groups") or []),
+            },
+        }
+
+    def _document_extractor_data(self, node: PlanNode) -> dict[str, Any]:
+        return {
+            "variable_selector": _selector(node.params.get("variable_selector"), ["start", "files"]),
+            "is_array_file": bool(node.params.get("is_array_file", False)),
+        }
+
+    def _assigner_data(self, node: PlanNode) -> dict[str, Any]:
+        return {
+            "version": str(node.params.get("version") or "2"),
+            "items": _assigner_items(node.params.get("items", [])),
+        }
+
+    def _list_operator_data(self, node: PlanNode) -> dict[str, Any]:
+        return {
+            "variable": _selector(node.params.get("variable"), ["start", "items"]),
+            "var_type": node.params.get("var_type", "array[string]"),
+            "item_var_type": node.params.get("item_var_type", "string"),
+            "filter_by": _list_filter(node.params.get("filter_by")),
+            "extract_by": _extract_by(node.params.get("extract_by")),
+            "order_by": _order_by(node.params.get("order_by")),
+            "limit": _limit(node.params.get("limit")),
+        }
+
     def _model_config(self, node: PlanNode) -> dict[str, Any]:
         model = node.params.get("model") if isinstance(node.params.get("model"), dict) else {}
         return {
@@ -316,6 +358,15 @@ def _selector(value: Any, default: list[str]) -> list[str]:
     return default
 
 
+def _selector_list(value: Any) -> list[list[str]]:
+    selectors = []
+    for item in value or []:
+        selector = _selector(item, [])
+        if len(selector) >= 2:
+            selectors.append(selector)
+    return selectors
+
+
 def _classifier_classes(items: Any) -> list[dict[str, str]]:
     classes = []
     for idx, item in enumerate(items or []):
@@ -342,6 +393,61 @@ def _extractor_parameters(items: Any) -> list[dict[str, Any]]:
             parameter["options"] = [str(option) for option in item["options"]]
         parameters.append(parameter)
     return parameters
+
+
+def _assigner_items(items: Any) -> list[dict[str, Any]]:
+    result = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        input_type = str(item.get("input_type") or "constant")
+        value = item.get("value")
+        if input_type == "variable":
+            value = _selector(value, [])
+        result.append(
+            {
+                "variable_selector": _selector(item.get("variable_selector"), []),
+                "input_type": input_type,
+                "operation": str(item.get("operation") or "over-write"),
+                "value": value,
+            }
+        )
+    return result
+
+
+def _list_filter(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"enabled": False, "conditions": []}
+    return {
+        "enabled": bool(value.get("enabled", False)),
+        "conditions": deepcopy(value.get("conditions") if isinstance(value.get("conditions"), list) else []),
+    }
+
+
+def _extract_by(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"enabled": False, "serial": "1"}
+    return {"enabled": bool(value.get("enabled", False)), "serial": str(value.get("serial") or "1")}
+
+
+def _order_by(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"enabled": False, "key": "", "value": "asc"}
+    return {
+        "enabled": bool(value.get("enabled", False)),
+        "key": deepcopy(value.get("key", "")),
+        "value": str(value.get("value") or "asc"),
+    }
+
+
+def _limit(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"enabled": False, "size": 10}
+    try:
+        size = int(value.get("size", 10))
+    except (TypeError, ValueError):
+        size = 10
+    return {"enabled": bool(value.get("enabled", False)), "size": max(1, size)}
 
 
 def _vision(value: Any) -> dict[str, Any]:
@@ -465,6 +571,14 @@ def _node_height(node_type: str, data: dict[str, Any]) -> int:
         return 112 + max(0, len(data.get("classes", [])) - 2) * 26
     if node_type == "parameter-extractor":
         return 112 + max(0, len(data.get("parameters", [])) - 2) * 22
+    if node_type == "variable-aggregator":
+        return 92 + max(0, len(data.get("variables", [])) - 1) * 20
+    if node_type == "document-extractor":
+        return 92
+    if node_type == "assigner":
+        return 92 + max(0, len(data.get("items", [])) - 1) * 24
+    if node_type == "list-operator":
+        return 112
     if node_type == "end":
         return 90 + max(0, len(data.get("outputs", [])) - 1) * 26
     return 90

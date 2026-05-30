@@ -544,6 +544,39 @@ function nodeDetails(node) {
       promptPreview("Instruction", params.instruction),
     ];
   }
+  if (node.type === "variable-aggregator") {
+    const variables = Array.isArray(params.variables) ? params.variables : [];
+    const groups = params.advanced_settings && Array.isArray(params.advanced_settings.groups)
+      ? params.advanced_settings.groups
+      : [];
+    return [
+      nodeLine("Output", params.output_type || "string"),
+      nodeLine("Variables", variables.map(selectorLabel).join(", ") || "none"),
+      nodeLine("Groups", groups.map((item) => item.group_name || item.groupId).filter(Boolean).join(", ") || "disabled"),
+    ];
+  }
+  if (node.type === "document-extractor") {
+    return [
+      nodeLine("File input", selectorLabel(params.variable_selector)),
+      nodeLine("Array file", params.is_array_file ? "true" : "false"),
+      nodeLine("Output", "text"),
+    ];
+  }
+  if (node.type === "assigner") {
+    const items = Array.isArray(params.items) ? params.items : [];
+    return [
+      nodeLine("Version", params.version || "2"),
+      nodeLine("Operations", items.map((item) => `${selectorLabel(item.variable_selector)} ${item.operation || "over-write"}`).join(", ") || "none"),
+    ];
+  }
+  if (node.type === "list-operator") {
+    return [
+      nodeLine("Input", selectorLabel(params.variable)),
+      nodeLine("Types", `${params.var_type || "array[string]"} -> ${params.item_var_type || "string"}`),
+      nodeLine("Filter", params.filter_by && params.filter_by.enabled ? "enabled" : "disabled"),
+      nodeLine("Limit", params.limit && params.limit.enabled ? String(params.limit.size || 10) : "disabled"),
+    ];
+  }
   if (node.type === "code") {
     return [promptPreview("Code", params.code)];
   }

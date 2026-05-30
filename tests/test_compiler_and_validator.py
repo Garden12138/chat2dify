@@ -779,6 +779,157 @@ def test_validator_accepts_parameter_extractor_outputs() -> None:
     assert validate_plan(plan) == []
 
 
+def test_compiler_and_validator_cover_stable_builtin_nodes() -> None:
+    plan = WorkflowPlan.model_validate(
+        {
+            "name": "stable builtins",
+            "nodes": [
+                {
+                    "id": "start",
+                    "type": "start",
+                    "params": {
+                        "variables": [
+                            {"name": "query", "type": "paragraph"},
+                            {"name": "files", "type": "file-list"},
+                            {"name": "items", "type": "json"},
+                        ]
+                    },
+                },
+                {
+                    "id": "doc",
+                    "type": "document-extractor",
+                    "params": {"variable_selector": ["start", "files"], "is_array_file": True},
+                },
+                {
+                    "id": "aggregator",
+                    "type": "variable-aggregator",
+                    "params": {
+                        "variables": [["doc", "text"], ["start", "query"]],
+                        "output_type": "string",
+                        "advanced_settings": {"group_enabled": False, "groups": []},
+                    },
+                },
+                {
+                    "id": "assign",
+                    "type": "assigner",
+                    "params": {
+                        "version": "2",
+                        "items": [
+                            {
+                                "variable_selector": ["start", "query"],
+                                "input_type": "variable",
+                                "operation": "over-write",
+                                "value": ["aggregator", "output"],
+                            }
+                        ],
+                    },
+                },
+                {
+                    "id": "list",
+                    "type": "list-operator",
+                    "params": {
+                        "variable": ["start", "items"],
+                        "var_type": "array[string]",
+                        "item_var_type": "string",
+                        "filter_by": {
+                            "enabled": True,
+                            "conditions": [{"key": "", "comparison_operator": "contains", "value": "投诉"}],
+                        },
+                        "extract_by": {"enabled": True, "serial": "1"},
+                        "order_by": {"enabled": False, "key": "", "value": "asc"},
+                        "limit": {"enabled": True, "size": 3},
+                    },
+                },
+                {
+                    "id": "llm",
+                    "type": "llm",
+                    "params": {"user_prompt": "{{#aggregator.output#}}\n{{#list.first_record#}}"},
+                },
+                {
+                    "id": "end",
+                    "type": "end",
+                    "params": {"outputs": [{"variable": "answer", "value_selector": ["llm", "text"]}]},
+                },
+            ],
+            "edges": [
+                {"source": "start", "target": "doc"},
+                {"source": "doc", "target": "aggregator"},
+                {"source": "aggregator", "target": "assign"},
+                {"source": "assign", "target": "list"},
+                {"source": "list", "target": "llm"},
+                {"source": "llm", "target": "end"},
+            ],
+        }
+    )
+
+    dsl = _compiler().compile(plan)
+    data = yaml.safe_load(dsl)
+    nodes = {node["id"]: node["data"] for node in data["workflow"]["graph"]["nodes"]}
+
+    assert nodes["doc"]["type"] == "document-extractor"
+    assert nodes["doc"]["variable_selector"] == ["start", "files"]
+    assert nodes["aggregator"]["variables"] == [["doc", "text"], ["start", "query"]]
+    assert nodes["assign"]["items"][0]["value"] == ["aggregator", "output"]
+    assert nodes["list"]["filter_by"]["conditions"][0]["value"] == "投诉"
+    assert validate_plan(plan) == []
+    assert validate_dsl(dsl, expected_dsl_version="9.9.9") == []
+
+
+def test_normalizer_repairs_stable_builtin_node_aliases() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "name": "aliases",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}, {"name": "files", "type": "files"}, {"name": "items", "type": "json"}]}},
+                {"id": "doc", "type": "doc-extractor", "params": {"file": "{{start.files}}", "array": True}},
+                {"id": "agg", "type": "aggregator", "params": {"selectors": ["{{doc.text}}", "{{start.query}}"]}},
+                {"id": "list", "type": "list-filter", "params": {"variable_selector": "{{start.items}}", "type": "array_string", "limit": 2}},
+                {"id": "llm", "type": "llm", "params": {"prompt": "{{agg.output}} {{list.first_record}}"}},
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": "{{llm.text}}"}]}},
+            ],
+            "edges": [
+                {"source": "start", "target": "doc"},
+                {"source": "doc", "target": "agg"},
+                {"source": "agg", "target": "list"},
+                {"source": "list", "target": "llm"},
+                {"source": "llm", "target": "end"},
+            ],
+        }
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    node_types = {node.id: node.type for node in plan.nodes}
+
+    assert node_types["doc"] == "document-extractor"
+    assert node_types["agg"] == "variable-aggregator"
+    assert node_types["list"] == "list-operator"
+    assert next(node for node in plan.nodes if node.id == "doc").params["variable_selector"] == ["start", "files"]
+    assert validate_plan(plan) == []
+
+
+def test_validator_rejects_invalid_stable_builtin_nodes() -> None:
+    plan = WorkflowPlan.model_validate(
+        {
+            "name": "bad builtins",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {"id": "list", "type": "list-operator", "params": {"variable": ["start", "query"], "var_type": "string"}},
+                {"id": "assign", "type": "assigner", "params": {"items": [{"input_type": "constant", "operation": "over-write", "value": "x"}]}},
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["start", "query"]}]}},
+            ],
+            "edges": [
+                {"source": "start", "target": "list"},
+                {"source": "list", "target": "assign"},
+                {"source": "assign", "target": "end"},
+            ],
+        }
+    )
+
+    issues = validate_plan(plan)
+
+    assert any(issue.code == "PLAN_LIST_OPERATOR_VAR_TYPE_INVALID" for issue in issues)
+    assert any(issue.code == "PLAN_ASSIGNER_TARGET_INVALID" for issue in issues)
+
+
 def test_validator_rejects_start_incoming_and_end_outgoing() -> None:
     plan = WorkflowPlan.model_validate(
         {

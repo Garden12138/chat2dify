@@ -21,6 +21,10 @@ SUPPORTED_DIFY_NODE_TYPES = {
     "template-transform",
     "question-classifier",
     "parameter-extractor",
+    "variable-aggregator",
+    "document-extractor",
+    "assigner",
+    "list-operator",
 }
 LAYOUT_KEYS = ("position", "positionAbsolute", "width", "height", "sourcePosition", "targetPosition")
 
@@ -169,6 +173,34 @@ def _params_from_dify_node_data(node_type: str, data: dict[str, Any]) -> dict[st
                 "reasoning_mode": data.get("reasoning_mode", "prompt"),
                 "vision": deepcopy(data.get("vision") or {"enabled": False, "configs": {"variable_selector": []}}),
                 "memory": deepcopy(data.get("memory")),
+            }
+        case "variable-aggregator":
+            return {
+                "variables": deepcopy(data.get("variables") or []),
+                "output_type": data.get("output_type", "string"),
+                "advanced_settings": deepcopy(
+                    data.get("advanced_settings") or {"group_enabled": False, "groups": []}
+                ),
+            }
+        case "document-extractor":
+            return {
+                "variable_selector": deepcopy(data.get("variable_selector") or ["start", "files"]),
+                "is_array_file": bool(data.get("is_array_file", False)),
+            }
+        case "assigner":
+            return {
+                "version": str(data.get("version") or "2"),
+                "items": deepcopy(data.get("items") or []),
+            }
+        case "list-operator":
+            return {
+                "variable": deepcopy(data.get("variable") or ["start", "items"]),
+                "var_type": data.get("var_type", "array[string]"),
+                "item_var_type": data.get("item_var_type", "string"),
+                "filter_by": deepcopy(data.get("filter_by") or {"enabled": False, "conditions": []}),
+                "extract_by": deepcopy(data.get("extract_by") or {"enabled": False, "serial": "1"}),
+                "order_by": deepcopy(data.get("order_by") or {"enabled": False, "key": "", "value": "asc"}),
+                "limit": deepcopy(data.get("limit") or {"enabled": False, "size": 10}),
             }
     return {}
 

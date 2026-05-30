@@ -42,6 +42,14 @@ def explain_plan(plan: WorkflowPlan) -> dict[str, list[str] | str]:
         elif node.type == "parameter-extractor":
             names = [str(item.get("name")) for item in node.params.get("parameters", []) if isinstance(item, dict)]
             steps.append(f"{node.id} 提取结构化参数：{', '.join(names) or '未配置'}")
+        elif node.type == "variable-aggregator":
+            steps.append(f"{node.id} 聚合多个候选变量作为统一输出")
+        elif node.type == "document-extractor":
+            steps.append(f"{node.id} 从文件变量中提取文本内容")
+        elif node.type == "assigner":
+            steps.append(f"{node.id} 更新已有变量值")
+        elif node.type == "list-operator":
+            steps.append(f"{node.id} 对数组变量进行筛选、排序或截取")
         elif node.type in {"code", "http-request", "template-transform"}:
             steps.append(f"{node.id} 执行 {node.type} 节点")
 

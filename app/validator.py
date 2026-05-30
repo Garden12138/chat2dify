@@ -19,6 +19,10 @@ SUPPORTED_NODE_TYPES = {
     "template-transform",
     "question-classifier",
     "parameter-extractor",
+    "variable-aggregator",
+    "document-extractor",
+    "assigner",
+    "list-operator",
 }
 TEMPLATE_REF_RE = re.compile(r"\{\{#([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)#\}\}")
 BARE_TEMPLATE_REF_RE = re.compile(r"\{\{\s*(?!#)([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)\s*\}\}")
@@ -46,6 +50,14 @@ GENERIC_TITLES = {
     "classifier",
     "parameterextractor",
     "extractor",
+    "variableaggregator",
+    "aggregator",
+    "variableassigner",
+    "assigner",
+    "documentextractor",
+    "docextractor",
+    "listoperator",
+    "listfilter",
     "开始",
     "开始节点",
     "输入",
@@ -64,6 +76,11 @@ GENERIC_TITLES = {
     "分类器",
     "参数提取",
     "提取器",
+    "变量聚合",
+    "变量赋值",
+    "文档提取",
+    "列表处理",
+    "列表过滤",
 }
 
 PARAMETER_EXTRACTOR_TYPES = {
@@ -101,7 +118,7 @@ def validate_plan(plan: WorkflowPlan) -> list[ValidationIssue]:
                     message=f"Unsupported node type: {node.type}",
                     node_id=node.id,
                     path=f"nodes.{node.id}.type",
-                    suggestion="仅使用当前支持的 start、llm、code、if-else、end、http-request、template-transform、question-classifier、parameter-extractor 节点。",
+                    suggestion="仅使用当前支持的 start、llm、code、if-else、end、http-request、template-transform、question-classifier、parameter-extractor、variable-aggregator、document-extractor、assigner、list-operator 节点。",
                 )
             )
     issues.extend(_validate_graph_semantics(plan))
@@ -456,6 +473,113 @@ def _validate_node_params(plan: WorkflowPlan) -> list[ValidationIssue]:
                                 f"params.parameters.{idx}.type",
                             )
                         )
+            case "variable-aggregator":
+                variables = params.get("variables")
+                advanced = params.get("advanced_settings") if isinstance(params.get("advanced_settings"), dict) else {}
+                groups = advanced.get("groups") if isinstance(advanced.get("groups"), list) else []
+                if not variables and not groups:
+                    issues.append(
+                        _node_issue(
+                            "PLAN_VARIABLE_AGGREGATOR_VARIABLES_MISSING",
+                            "variable-aggregator node requires variables or groups.",
+                            node.id,
+                            "params.variables",
+                        )
+                    )
+                for idx, selector in enumerate(variables or []):
+                    if not _is_selector(selector):
+                        issues.append(
+                            _node_issue(
+                                "PLAN_VARIABLE_AGGREGATOR_VARIABLE_INVALID",
+                                "variable-aggregator variable must be a value selector.",
+                                node.id,
+                                f"params.variables.{idx}",
+                            )
+                        )
+                for group_idx, group in enumerate(groups):
+                    if not isinstance(group, dict) or not group.get("group_name") or not group.get("groupId"):
+                        issues.append(
+                            _node_issue(
+                                "PLAN_VARIABLE_AGGREGATOR_GROUP_INVALID",
+                                "variable-aggregator group requires group_name and groupId.",
+                                node.id,
+                                f"params.advanced_settings.groups.{group_idx}",
+                            )
+                        )
+            case "document-extractor":
+                if not _is_selector(params.get("variable_selector")):
+                    issues.append(
+                        _node_issue(
+                            "PLAN_DOCUMENT_EXTRACTOR_SELECTOR_MISSING",
+                            "document-extractor node requires variable_selector.",
+                            node.id,
+                            "params.variable_selector",
+                        )
+                    )
+            case "assigner":
+                items = params.get("items")
+                if not isinstance(items, list) or not items:
+                    issues.append(_node_issue("PLAN_ASSIGNER_ITEMS_MISSING", "assigner node requires items.", node.id, "params.items"))
+                for idx, item in enumerate(items or []):
+                    if not isinstance(item, dict) or not _is_selector(item.get("variable_selector")):
+                        issues.append(
+                            _node_issue(
+                                "PLAN_ASSIGNER_TARGET_INVALID",
+                                "assigner item requires variable_selector.",
+                                node.id,
+                                f"params.items.{idx}.variable_selector",
+                            )
+                        )
+                    if isinstance(item, dict) and item.get("input_type") == "variable" and not _is_selector(item.get("value")):
+                        issues.append(
+                            _node_issue(
+                                "PLAN_ASSIGNER_VALUE_INVALID",
+                                "assigner variable input requires value selector.",
+                                node.id,
+                                f"params.items.{idx}.value",
+                            )
+                        )
+            case "list-operator":
+                if not _is_selector(params.get("variable")):
+                    issues.append(
+                        _node_issue(
+                            "PLAN_LIST_OPERATOR_VARIABLE_MISSING",
+                            "list-operator node requires variable.",
+                            node.id,
+                            "params.variable",
+                        )
+                    )
+                if not str(params.get("var_type", "")).startswith("array["):
+                    issues.append(
+                        _node_issue(
+                            "PLAN_LIST_OPERATOR_VAR_TYPE_INVALID",
+                            "list-operator var_type must be an array type.",
+                            node.id,
+                            "params.var_type",
+                        )
+                    )
+                filter_by = params.get("filter_by") if isinstance(params.get("filter_by"), dict) else {}
+                if filter_by.get("enabled"):
+                    conditions = filter_by.get("conditions")
+                    if not isinstance(conditions, list) or not conditions:
+                        issues.append(
+                            _node_issue(
+                                "PLAN_LIST_OPERATOR_FILTER_CONDITIONS_MISSING",
+                                "list-operator filter_by.conditions is required when filtering is enabled.",
+                                node.id,
+                                "params.filter_by.conditions",
+                            )
+                        )
+                    for idx, condition in enumerate(conditions or []):
+                        if not isinstance(condition, dict) or not condition.get("comparison_operator"):
+                            issues.append(
+                                _node_issue(
+                                    "PLAN_LIST_OPERATOR_FILTER_CONDITION_INVALID",
+                                    "list-operator filter condition requires comparison_operator.",
+                                    node.id,
+                                    f"params.filter_by.conditions.{idx}",
+                                )
+                            )
     return issues
 
 
@@ -467,6 +591,10 @@ def _node_issue(code: str, message: str, node_id: str, path: str) -> ValidationI
         path=f"nodes.{node_id}.{path}",
         suggestion="让 normalizer 补齐字段，或让 planner 重新生成该节点参数。",
     )
+
+
+def _is_selector(value: Any) -> bool:
+    return isinstance(value, list) and len(value) >= 2 and all(str(item) for item in value)
 
 
 def _validate_node_quality(plan: WorkflowPlan) -> list[ValidationIssue]:
@@ -562,6 +690,14 @@ def _known_outputs(plan: WorkflowPlan) -> dict[str, set[str]]:
                     if isinstance(item, dict) and item.get("name")
                 }
                 outputs[node.id] = {*names, "__is_success", "__reason", "__usage"}
+            case "variable-aggregator":
+                outputs[node.id] = {"output"}
+            case "document-extractor":
+                outputs[node.id] = {"text"}
+            case "list-operator":
+                outputs[node.id] = {"result", "first_record", "last_record"}
+            case "assigner":
+                outputs[node.id] = set()
             case "end" | "if-else":
                 outputs[node.id] = set()
     return outputs
@@ -571,7 +707,15 @@ def _selectors_in_value(value: Any) -> list[list[str]]:
     selectors: list[list[str]] = []
     if isinstance(value, dict):
         for key, child in value.items():
-            if key in {"value_selector", "variable_selector", "query", "query_variable_selector"} and isinstance(child, list) and child:
+            if key in {"value_selector", "variable_selector", "query", "query_variable_selector", "variable"} and _is_selector(child):
+                selectors.append([str(item) for item in child])
+            elif key == "variables" and isinstance(child, list):
+                for item in child:
+                    if _is_selector(item):
+                        selectors.append([str(part) for part in item])
+                    elif isinstance(item, dict):
+                        selectors.extend(_selectors_in_value(item))
+            elif key in {"value", "key"} and _is_selector(child):
                 selectors.append([str(item) for item in child])
             else:
                 selectors.extend(_selectors_in_value(child))

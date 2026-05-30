@@ -17,7 +17,8 @@ from app.validator import has_errors, validate_dsl, validate_plan
 SYSTEM_PROMPT = """You turn a user's workflow request into a compact JSON WorkflowPlan.
 Return only JSON. Supported node types are:
 start, llm, code, if-else, end, http-request, template-transform,
-question-classifier, parameter-extractor.
+question-classifier, parameter-extractor, variable-aggregator,
+document-extractor, list-operator.
 Use exactly one start node and at least one end node. Keep nodes connected.
 For simple requests, use start -> llm -> end.
 Use if-else for explicit string or numeric conditions.
@@ -27,6 +28,13 @@ Each outgoing edge from question-classifier must set source_handle to the matchi
 Use parameter-extractor to extract structured fields from natural language. Its params must include:
 {"query":["start","query"],"reasoning_mode":"prompt","parameters":[{"name":"car_model","type":"string","description":"车辆型号","required":false}],"instruction":"..."}.
 Prefer English variable-safe parameter names such as order_id, car_model, store, issue.
+Use variable-aggregator when multiple upstream variables can supply the same value. Its params must include:
+{"variables":[["extract","issue"],["start","query"]],"output_type":"string","advanced_settings":{"group_enabled":false,"groups":[]}}.
+Use document-extractor only when the request explicitly involves uploaded files/documents/attachments. Its params must include:
+{"variable_selector":["start","files"],"is_array_file":false}. Add a start file or file-list variable named files.
+Use list-operator only when the request explicitly involves filtering/sorting/limiting an array. Its params must include:
+{"variable":["start","items"],"var_type":"array[string]","item_var_type":"string","filter_by":{"enabled":false,"conditions":[]},"extract_by":{"enabled":false,"serial":"1"},"order_by":{"enabled":false,"key":"","value":"asc"},"limit":{"enabled":false,"size":10}}.
+Do not generate assigner in new workflows; it is reserved for editing existing Dify drafts with explicit variable assignment context.
 Every node must have a business-specific title. Do not use generic titles like
 Start, LLM, End, Code, Node, 开始, 大模型, 结束. Good Chinese examples:
 接收售后诉求, 判断售后类型, 生成理发售后回复, 返回处理结果.

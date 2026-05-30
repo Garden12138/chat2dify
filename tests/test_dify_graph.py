@@ -38,6 +38,65 @@ def test_decompile_dify_graph_covers_supported_node_types() -> None:
     assert next(node for node in decompiled.nodes if node.id == "extract").params["parameters"][0]["name"] == "issue"
 
 
+def test_decompile_dify_graph_covers_stable_builtin_nodes() -> None:
+    plan = WorkflowPlan.model_validate(
+        {
+            "name": "stable nodes",
+            "nodes": [
+                {
+                    "id": "start",
+                    "type": "start",
+                    "params": {"variables": [{"name": "query"}, {"name": "files", "type": "file-list"}, {"name": "items", "type": "json"}]},
+                },
+                {"id": "doc", "type": "document-extractor", "params": {"variable_selector": ["start", "files"], "is_array_file": True}},
+                {
+                    "id": "agg",
+                    "type": "variable-aggregator",
+                    "params": {"variables": [["doc", "text"], ["start", "query"]], "output_type": "string"},
+                },
+                {
+                    "id": "assign",
+                    "type": "assigner",
+                    "params": {
+                        "items": [
+                            {
+                                "variable_selector": ["start", "query"],
+                                "input_type": "variable",
+                                "operation": "over-write",
+                                "value": ["agg", "output"],
+                            }
+                        ]
+                    },
+                },
+                {
+                    "id": "list",
+                    "type": "list-operator",
+                    "params": {"variable": ["start", "items"], "var_type": "array[string]", "item_var_type": "string"},
+                },
+                {"id": "llm", "type": "llm", "params": {"user_prompt": "{{#list.first_record#}} {{#agg.output#}}"}},
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["llm", "text"]}]}},
+            ],
+            "edges": [
+                {"source": "start", "target": "doc"},
+                {"source": "doc", "target": "agg"},
+                {"source": "agg", "target": "assign"},
+                {"source": "assign", "target": "list"},
+                {"source": "list", "target": "llm"},
+                {"source": "llm", "target": "end"},
+            ],
+        }
+    )
+    graph = yaml.safe_load(_compiler().compile(plan))["workflow"]["graph"]
+
+    decompiled = decompile_dify_graph(graph, name="Loaded")
+    nodes = {node.id: node for node in decompiled.nodes}
+
+    assert nodes["doc"].params["variable_selector"] == ["start", "files"]
+    assert nodes["agg"].params["variables"] == [["doc", "text"], ["start", "query"]]
+    assert nodes["assign"].params["items"][0]["value"] == ["agg", "output"]
+    assert nodes["list"].params["variable"] == ["start", "items"]
+
+
 def test_compile_plan_to_dify_graph_preserves_existing_layout_and_places_new_nodes() -> None:
     base_plan = WorkflowPlan.model_validate(
         {

@@ -24,12 +24,17 @@ EDIT_SYSTEM_PROMPT = """You revise an existing Dify WorkflowPlan.
 Return only JSON. Return the full revised WorkflowPlan, not a patch.
 Supported node types are only:
 start, llm, code, if-else, end, http-request, template-transform,
-question-classifier, parameter-extractor.
+question-classifier, parameter-extractor, variable-aggregator,
+document-extractor, assigner, list-operator.
 Prefer the smallest safe change that satisfies the request.
 Preserve existing node ids when a node keeps the same purpose.
 Use if-else for explicit string or numeric conditions.
 Use question-classifier for semantic intent/category routing; each class needs an outgoing edge with source_handle equal to classes[].id.
 Use parameter-extractor for structured field extraction; default reasoning_mode is "prompt" and parameter names should be variable-safe English names.
+Use variable-aggregator for fallback/merge of multiple upstream variables.
+Use document-extractor only for file/document/attachment text extraction.
+Use list-operator only for filtering/sorting/limiting arrays.
+Keep existing assigner nodes when present, but do not add assigner unless the request explicitly asks to update an existing variable and the target variable is unambiguous.
 Every node must keep or receive a business-specific title. Do not use generic
 titles like Start, LLM, End, Code, Node, 开始, 大模型, 结束.
 For every llm node, split prompts clearly:

@@ -15,6 +15,10 @@ NodeType = Literal[
     "template-transform",
     "question-classifier",
     "parameter-extractor",
+    "variable-aggregator",
+    "document-extractor",
+    "assigner",
+    "list-operator",
 ]
 InputType = Literal["text", "paragraph", "number", "boolean", "file", "file-list", "json"]
 

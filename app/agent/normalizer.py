@@ -32,6 +32,14 @@ GENERIC_TITLES = {
     "classifier",
     "parameterextractor",
     "extractor",
+    "variableaggregator",
+    "aggregator",
+    "variableassigner",
+    "assigner",
+    "documentextractor",
+    "docextractor",
+    "listoperator",
+    "listfilter",
     "开始",
     "开始节点",
     "输入",
@@ -50,6 +58,11 @@ GENERIC_TITLES = {
     "分类器",
     "参数提取",
     "提取器",
+    "变量聚合",
+    "变量赋值",
+    "文档提取",
+    "列表处理",
+    "列表过滤",
 }
 
 NODE_TYPE_ALIASES = {
@@ -63,6 +76,25 @@ NODE_TYPE_ALIASES = {
     "extractor": "parameter-extractor",
     "param-extractor": "parameter-extractor",
     "param_extractor": "parameter-extractor",
+    "variable_aggregator": "variable-aggregator",
+    "variableaggregator": "variable-aggregator",
+    "aggregator": "variable-aggregator",
+    "variable-assigner": "assigner",
+    "variable_assigner": "assigner",
+    "variableassigner": "assigner",
+    "var-assigner": "assigner",
+    "var_assigner": "assigner",
+    "assigner": "assigner",
+    "doc-extractor": "document-extractor",
+    "doc_extractor": "document-extractor",
+    "docextractor": "document-extractor",
+    "document_extractor": "document-extractor",
+    "documentextractor": "document-extractor",
+    "list-filter": "list-operator",
+    "list_filter": "list-operator",
+    "listfilter": "list-operator",
+    "list_operator": "list-operator",
+    "listoperator": "list-operator",
 }
 
 
@@ -128,6 +160,14 @@ def normalize_plan_payload(payload: dict[str, Any], *, app_name: str | None = No
                 node["params"] = _normalize_question_classifier_params(params)
             case "parameter-extractor":
                 node["params"] = _normalize_parameter_extractor_params(params)
+            case "variable-aggregator":
+                node["params"] = _normalize_variable_aggregator_params(params)
+            case "document-extractor":
+                node["params"] = _normalize_document_extractor_params(params)
+            case "assigner":
+                node["params"] = _normalize_assigner_params(params)
+            case "list-operator":
+                node["params"] = _normalize_list_operator_params(params)
         if before != node.get("params"):
             changes.append(f"normalized {node.get('id', '<unknown>')} params")
 
@@ -383,6 +423,111 @@ def _normalize_parameter_extractor_params(params: dict[str, Any]) -> dict[str, A
     return result
 
 
+def _normalize_variable_aggregator_params(params: dict[str, Any]) -> dict[str, Any]:
+    result = dict(params)
+    variables = _normalize_selector_list(result.get("variables") or result.get("selectors") or result.get("inputs") or [])
+    result["variables"] = variables
+    result["output_type"] = _var_type(str(result.get("output_type") or result.get("var_type") or "string"))
+    advanced = result.get("advanced_settings") if isinstance(result.get("advanced_settings"), dict) else {}
+    groups = []
+    for idx, group in enumerate(advanced.get("groups") or result.get("groups") or []):
+        if not isinstance(group, dict):
+            continue
+        group_name = str(group.get("group_name") or group.get("name") or f"Group{idx + 1}")
+        group_id = str(group.get("groupId") or group.get("group_id") or _safe_branch_id(group_name) or f"group_{idx + 1}")
+        groups.append(
+            {
+                "group_name": group_name,
+                "groupId": group_id,
+                "output_type": _var_type(str(group.get("output_type") or result["output_type"])),
+                "variables": _normalize_selector_list(group.get("variables") or []),
+            }
+        )
+    group_enabled = bool(advanced.get("group_enabled", False) or groups)
+    result["advanced_settings"] = {"group_enabled": group_enabled, "groups": groups if group_enabled else []}
+    result.pop("selectors", None)
+    result.pop("inputs", None)
+    result.pop("groups", None)
+    result.pop("var_type", None)
+    return result
+
+
+def _normalize_document_extractor_params(params: dict[str, Any]) -> dict[str, Any]:
+    result = dict(params)
+    raw_selector = (
+        result.get("variable_selector")
+        or result.get("file_selector")
+        or result.get("input_selector")
+        or result.get("variable")
+        or result.get("file")
+        or ["start", "files"]
+    )
+    result["variable_selector"] = _normalize_selector(raw_selector)
+    result["is_array_file"] = bool(result.get("is_array_file", result.get("array", False)))
+    result.pop("file_selector", None)
+    result.pop("input_selector", None)
+    result.pop("variable", None)
+    result.pop("file", None)
+    result.pop("array", None)
+    return result
+
+
+def _normalize_assigner_params(params: dict[str, Any]) -> dict[str, Any]:
+    result = dict(params)
+    items = result.get("items") or result.get("operations") or []
+    normalized_items = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        variable_selector = _normalize_selector(
+            item.get("variable_selector")
+            or item.get("assigned_variable_selector")
+            or item.get("target")
+            or item.get("variable")
+            or []
+        )
+        input_type = str(item.get("input_type") or ("variable" if _looks_like_selector(item.get("value")) else "constant"))
+        if input_type not in {"variable", "constant"}:
+            input_type = "constant"
+        operation = str(item.get("operation") or item.get("write_mode") or item.get("mode") or "over-write")
+        value = item.get("value")
+        if input_type == "variable":
+            value = _normalize_selector(value)
+        normalized_items.append(
+            {
+                "variable_selector": variable_selector,
+                "input_type": input_type,
+                "operation": operation,
+                "value": value,
+            }
+        )
+    result["version"] = str(result.get("version") or "2")
+    result["items"] = normalized_items
+    result.pop("operations", None)
+    return result
+
+
+def _normalize_list_operator_params(params: dict[str, Any]) -> dict[str, Any]:
+    result = dict(params)
+    raw_variable = result.get("variable") or result.get("variable_selector") or result.get("input_selector") or ["start", "items"]
+    result["variable"] = _normalize_selector(raw_variable)
+    result["var_type"] = _array_var_type(str(result.get("var_type") or result.get("type") or "array[string]"))
+    result["item_var_type"] = _item_var_type(str(result.get("item_var_type") or result.get("item_type") or ""), result["var_type"])
+    result["filter_by"] = _normalize_list_filter(result.get("filter_by") or result.get("filter"))
+    result["extract_by"] = _normalize_extract_by(result.get("extract_by") or result.get("extract"))
+    result["order_by"] = _normalize_order_by(result.get("order_by") or result.get("sort_by") or result.get("sort"))
+    result["limit"] = _normalize_limit(result.get("limit"))
+    result.pop("variable_selector", None)
+    result.pop("input_selector", None)
+    result.pop("type", None)
+    result.pop("item_type", None)
+    result.pop("filter", None)
+    result.pop("extract", None)
+    result.pop("sort_by", None)
+    result.pop("sort", None)
+    return result
+
+
 def _normalize_classifier_classes(value: Any) -> list[dict[str, str]]:
     classes: list[dict[str, str]] = []
     if isinstance(value, dict):
@@ -480,6 +625,29 @@ def _normalize_selector(value: Any) -> list[str]:
     return ["start", "query"]
 
 
+def _normalize_selector_list(value: Any) -> list[list[str]]:
+    selectors: list[list[str]] = []
+    if isinstance(value, dict):
+        value = list(value.values())
+    for item in value or []:
+        if isinstance(item, dict):
+            raw_selector = item.get("value_selector") or item.get("variable_selector") or item.get("selector") or item.get("value")
+        else:
+            raw_selector = item
+        selector = _normalize_selector(raw_selector)
+        if len(selector) >= 2:
+            selectors.append(selector)
+    return selectors
+
+
+def _looks_like_selector(value: Any) -> bool:
+    if isinstance(value, list):
+        return len(value) >= 2 and all(isinstance(item, str | int | float | bool) for item in value)
+    if isinstance(value, str):
+        return bool(DIFY_REF_PATTERN.search(normalize_template_refs(value)) or len([piece for piece in value.split(".") if piece]) >= 2)
+    return False
+
+
 def _normalize_vision(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         enabled = bool(value.get("enabled", False))
@@ -487,6 +655,115 @@ def _normalize_vision(value: Any) -> dict[str, Any]:
         configs.setdefault("variable_selector", [])
         return {"enabled": enabled, "configs": configs}
     return {"enabled": False, "configs": {"variable_selector": []}}
+
+
+def _var_type(value: str) -> str:
+    normalized = str(value or "").strip().lower().replace("_", "-")
+    mapping = {
+        "str": "string",
+        "text": "string",
+        "paragraph": "string",
+        "integer": "number",
+        "int": "number",
+        "float": "number",
+        "bool": "boolean",
+        "boolean": "boolean",
+        "object": "object",
+        "dict": "object",
+        "array-string": "array[string]",
+        "string[]": "array[string]",
+        "array-number": "array[number]",
+        "number[]": "array[number]",
+        "array-object": "array[object]",
+        "object[]": "array[object]",
+        "array-boolean": "array[boolean]",
+        "array-bool": "array[boolean]",
+        "boolean[]": "array[boolean]",
+        "array-file": "array[file]",
+        "file[]": "array[file]",
+        "file-list": "array[file]",
+        "arrayfile": "array[file]",
+    }
+    allowed = {
+        "string",
+        "number",
+        "boolean",
+        "object",
+        "array[string]",
+        "array[number]",
+        "array[object]",
+        "array[boolean]",
+        "array[file]",
+        "file",
+        "any",
+    }
+    return mapping.get(normalized, normalized if normalized in allowed else "string")
+
+
+def _array_var_type(value: str) -> str:
+    var_type = _var_type(value)
+    if var_type.startswith("array["):
+        return var_type
+    return f"array[{var_type if var_type != 'any' else 'string'}]"
+
+
+def _item_var_type(value: str, array_type: str) -> str:
+    explicit = _var_type(value)
+    if value and not explicit.startswith("array["):
+        return explicit
+    if array_type.startswith("array[") and array_type.endswith("]"):
+        return array_type.removeprefix("array[").removesuffix("]")
+    return "string"
+
+
+def _normalize_list_filter(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"enabled": False, "conditions": []}
+    conditions = []
+    for item in value.get("conditions") or []:
+        if not isinstance(item, dict):
+            continue
+        condition = dict(item)
+        condition["key"] = str(condition.get("key", ""))
+        condition["comparison_operator"] = str(condition.get("comparison_operator") or condition.get("operator") or "contains")
+        condition.setdefault("value", "")
+        conditions.append(condition)
+    return {"enabled": bool(value.get("enabled", False)), "conditions": conditions}
+
+
+def _normalize_extract_by(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"enabled": False, "serial": "1"}
+    return {"enabled": bool(value.get("enabled", False)), "serial": str(value.get("serial") or value.get("index") or "1")}
+
+
+def _normalize_order_by(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"enabled": False, "key": "", "value": "asc"}
+    order = str(value.get("value") or value.get("order") or "asc").lower()
+    if order not in {"asc", "desc"}:
+        order = "asc"
+    key = value.get("key", "")
+    if isinstance(key, str):
+        normalized_key: str | list[str] = key
+    elif isinstance(key, list):
+        normalized_key = _normalize_selector(key)
+    else:
+        normalized_key = ""
+    return {"enabled": bool(value.get("enabled", False)), "key": normalized_key, "value": order}
+
+
+def _normalize_limit(value: Any) -> dict[str, Any]:
+    if isinstance(value, int):
+        return {"enabled": True, "size": max(1, value)}
+    if not isinstance(value, dict):
+        return {"enabled": False, "size": 10}
+    size = value.get("size", 10)
+    try:
+        size_int = int(size)
+    except (TypeError, ValueError):
+        size_int = 10
+    return {"enabled": bool(value.get("enabled", False)), "size": max(1, size_int)}
 
 
 def _parameter_type(value: str) -> str:
@@ -698,6 +975,14 @@ def _semantic_title(
             return f"识别{subject}类型"
         case "parameter-extractor":
             return f"提取{subject}信息"
+        case "variable-aggregator":
+            return f"聚合{subject}变量"
+        case "document-extractor":
+            return f"提取{subject}文档文本"
+        case "assigner":
+            return f"更新{subject}变量"
+        case "list-operator":
+            return f"筛选{subject}列表"
         case "end":
             upstream = _first_upstream(node, node_by_id, edges)
             if upstream and upstream.get("type") == "llm":
