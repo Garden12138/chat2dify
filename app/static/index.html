@@ -22,11 +22,21 @@
       <section class="tool-panel" aria-labelledby="knowledge-title">
         <div class="panel-heading">
           <h2 id="knowledge-title">Knowledge</h2>
-          <span class="panel-status status-muted">local</span>
+          <span id="knowledge-status" class="panel-status status-muted">local</span>
         </div>
-        <form class="form-stack">
+        <form id="knowledge-form" class="form-stack">
           <label>
-            Knowledge dataset IDs
+            Search datasets
+            <input id="knowledge-search" autocomplete="off" placeholder="Policy, repair, support">
+          </label>
+          <div class="button-row">
+            <button id="refresh-datasets" type="submit" class="secondary">Refresh</button>
+            <button id="load-more-datasets" type="button" class="secondary" disabled>Load more</button>
+          </div>
+          <div id="knowledge-selected-summary" class="selection-summary"></div>
+          <div id="knowledge-dataset-list" class="dataset-list"></div>
+          <label>
+            Manual dataset IDs
             <textarea id="knowledge-dataset-ids" rows="4" spellcheck="false" placeholder="dataset uuid, one per line or comma-separated"></textarea>
           </label>
         </form>

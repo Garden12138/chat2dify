@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -65,6 +65,27 @@ def health() -> dict:
             "configured_dataset_count": len(settings.dify_default_dataset_ids),
         },
     }
+
+
+@app.get("/api/dify/datasets")
+def list_dify_datasets(
+    keyword: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=50, ge=1, le=100),
+    include_all: bool = Query(default=True),
+) -> dict:
+    settings = load_settings()
+    try:
+        with DifyClient(settings) as client:
+            result = client.list_datasets(
+                keyword=keyword.strip() if keyword else None,
+                page=page,
+                limit=limit,
+                include_all=include_all,
+            )
+    except DifyClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return asdict(result)
 
 
 @app.post("/api/workflows/draft")

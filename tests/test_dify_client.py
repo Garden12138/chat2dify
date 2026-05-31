@@ -4,7 +4,7 @@ import pytest
 import httpx
 
 from app.config import Settings
-from app.dify.client import CSRF_HEADER_NAME, DifyClient, DifyConflictError
+from app.dify.client import CSRF_HEADER_NAME, DifyClient, DifyClientError, DifyConflictError
 
 
 def _settings() -> Settings:
@@ -199,6 +199,96 @@ def test_get_app_detail_returns_console_app_metadata() -> None:
     assert detail.name == "修车售后服务工作流"
     assert detail.mode == "workflow"
     assert detail.description == "Handle repair after-sales requests."
+
+
+def test_list_datasets_sends_query_and_returns_slim_metadata() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/console/api/login":
+            return httpx.Response(200, json={"result": "success"}, headers=[("set-cookie", "csrf_token=csrf123; Path=/")])
+        if request.url.path == "/console/api/datasets":
+            seen["csrf"] = request.headers.get(CSRF_HEADER_NAME, "")
+            seen["page"] = request.url.params.get("page")
+            seen["limit"] = request.url.params.get("limit")
+            seen["keyword"] = request.url.params.get("keyword")
+            seen["include_all"] = request.url.params.get("include_all")
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "dataset-1",
+                            "name": "售后政策",
+                            "description": "门店售后政策",
+                            "document_count": 3,
+                            "total_document_count": 5,
+                            "provider": "vendor",
+                            "runtime_mode": "general",
+                            "indexing_technique": "high_quality",
+                            "embedding_available": True,
+                            "permission": "all_team_members",
+                            "updated_at": 123,
+                            "unused": "ignored",
+                        }
+                    ],
+                    "has_more": True,
+                    "page": 2,
+                    "limit": 10,
+                    "total": 21,
+                },
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+    result = client.list_datasets(keyword="售后", page=2, limit=10, include_all=True)
+
+    assert seen == {"csrf": "csrf123", "page": "2", "limit": "10", "keyword": "售后", "include_all": "true"}
+    assert result.has_more is True
+    assert result.page == 2
+    assert result.limit == 10
+    assert result.total == 21
+    assert result.data[0].id == "dataset-1"
+    assert result.data[0].name == "售后政策"
+    assert result.data[0].document_count == 3
+    assert result.data[0].embedding_available is True
+
+
+def test_list_datasets_refreshes_after_401() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(f"{request.method} {request.url.path}")
+        if request.url.path == "/console/api/login":
+            return httpx.Response(200, json={"result": "success"}, headers=[("set-cookie", "csrf_token=csrf123; Path=/")])
+        if request.url.path == "/console/api/refresh-token":
+            return httpx.Response(200, json={"result": "success"})
+        if request.url.path == "/console/api/datasets":
+            if calls.count("GET /console/api/datasets") == 1:
+                return httpx.Response(401, json={"message": "expired"})
+            return httpx.Response(200, json={"data": [], "has_more": False, "page": 1, "limit": 50, "total": 0})
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+    result = client.list_datasets()
+
+    assert result.data == []
+    assert calls.count("GET /console/api/datasets") == 2
+    assert "POST /console/api/refresh-token" in calls
+
+
+def test_list_datasets_invalid_json_is_wrapped() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/console/api/login":
+            return httpx.Response(200, json={"result": "success"}, headers=[("set-cookie", "csrf_token=csrf123; Path=/")])
+        if request.url.path == "/console/api/datasets":
+            return httpx.Response(200, text="not json")
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+
+    with pytest.raises(DifyClientError, match="Invalid Dify JSON response"):
+        client.list_datasets()
 
 
 def test_sync_draft_workflow_conflict_is_typed() -> None:

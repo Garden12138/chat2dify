@@ -1,6 +1,9 @@
 const HISTORY_KEY = "chat2dify.workbench.history.v1";
 const DATASET_IDS_KEY = "chat2dify.workbench.datasetIds.v1";
+const SELECTED_DATASET_IDS_KEY = "chat2dify.workbench.selectedDatasetIds.v1";
+const DATASET_SEARCH_KEY = "chat2dify.workbench.datasetSearch.v1";
 const MAX_HISTORY_ITEMS = 12;
+const DATASET_PAGE_SIZE = 50;
 const DEFAULT_RUN_INPUTS = '{"query":"我要投诉订单配送太慢"}';
 
 const state = {
@@ -9,6 +12,14 @@ const state = {
   activeTab: "changes",
   modifyPreview: null,
   modifyPreviewDirty: false,
+  datasets: {
+    items: [],
+    selectedIds: [],
+    page: 1,
+    hasMore: false,
+    total: 0,
+    keyword: "",
+  },
 };
 
 const els = {
@@ -20,7 +31,13 @@ const els = {
   tabPanels: Array.from(document.querySelectorAll("[data-tab-panel]")),
   createForm: document.querySelector("#create-form"),
   createStatus: document.querySelector("#create-status"),
+  knowledgeForm: document.querySelector("#knowledge-form"),
+  knowledgeStatus: document.querySelector("#knowledge-status"),
+  knowledgeSearch: document.querySelector("#knowledge-search"),
   knowledgeDatasetIds: document.querySelector("#knowledge-dataset-ids"),
+  knowledgeDatasetList: document.querySelector("#knowledge-dataset-list"),
+  knowledgeSelectedSummary: document.querySelector("#knowledge-selected-summary"),
+  loadMoreDatasets: document.querySelector("#load-more-datasets"),
   modifyForm: document.querySelector("#modify-form"),
   modifyStatus: document.querySelector("#modify-status"),
   runForm: document.querySelector("#run-form"),
@@ -40,15 +57,37 @@ const els = {
 
 document.addEventListener("DOMContentLoaded", () => {
   state.history = loadHistory();
+  state.datasets.selectedIds = loadSelectedDatasetIds();
+  state.datasets.keyword = loadDatasetSearchText();
+  els.knowledgeSearch.value = state.datasets.keyword;
   els.knowledgeDatasetIds.value = loadDatasetIdsText();
   bindEvents();
   renderHistory();
+  renderKnowledgeDatasets();
   refreshHealth();
+  loadDatasets({ reset: true });
   renderResult({});
 });
 
 function bindEvents() {
   els.refreshHealth.addEventListener("click", refreshHealth);
+  els.knowledgeForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    saveDatasetSearchText(els.knowledgeSearch.value);
+    await loadDatasets({ reset: true });
+  });
+  els.loadMoreDatasets.addEventListener("click", async () => {
+    await loadDatasets({ reset: false });
+  });
+  els.knowledgeSearch.addEventListener("input", () => {
+    saveDatasetSearchText(els.knowledgeSearch.value);
+  });
+  els.knowledgeDatasetList.addEventListener("change", (event) => {
+    const checkbox = event.target.closest("[data-dataset-id]");
+    if (checkbox) {
+      toggleDatasetSelection(checkbox.dataset.datasetId, checkbox.checked);
+    }
+  });
   els.knowledgeDatasetIds.addEventListener("input", () => {
     saveDatasetIdsText(els.knowledgeDatasetIds.value);
     markModifyPreviewDirty();
@@ -119,6 +158,126 @@ async function refreshHealth() {
     els.healthStatus.textContent = "Offline";
     els.healthStatus.className = "status-pill status-error";
   }
+}
+
+async function loadDatasets({ reset }) {
+  const nextPage = reset ? 1 : state.datasets.page + 1;
+  const params = new URLSearchParams({
+    page: String(nextPage),
+    limit: String(DATASET_PAGE_SIZE),
+    include_all: "true",
+  });
+  const keyword = els.knowledgeSearch.value.trim();
+  if (keyword) {
+    params.set("keyword", keyword);
+  }
+
+  try {
+    setPanelStatus(els.knowledgeStatus, reset ? "Loading" : "Loading more", "muted");
+    els.loadMoreDatasets.disabled = true;
+    const data = await requestJson(`/api/dify/datasets?${params.toString()}`);
+    const incoming = Array.isArray(data.data) ? data.data : [];
+    state.datasets.items = reset ? incoming : mergeDatasets(state.datasets.items, incoming);
+    state.datasets.page = Number(data.page || nextPage);
+    state.datasets.hasMore = Boolean(data.has_more);
+    state.datasets.total = Number(data.total || state.datasets.items.length);
+    state.datasets.keyword = keyword;
+    renderKnowledgeDatasets();
+    const count = state.datasets.items.length;
+    setPanelStatus(els.knowledgeStatus, `${state.datasets.total || count} found`, "ok");
+  } catch (error) {
+    state.datasets.hasMore = false;
+    renderKnowledgeDatasets(error.message);
+    setPanelStatus(els.knowledgeStatus, "List failed", "error");
+  } finally {
+    els.loadMoreDatasets.disabled = !state.datasets.hasMore;
+  }
+}
+
+function renderKnowledgeDatasets(errorMessage = "") {
+  const selectedCount = currentDatasetIds().length;
+  const loadedCount = state.datasets.items.length;
+  const total = state.datasets.total || loadedCount;
+  els.knowledgeSelectedSummary.textContent = [
+    `${selectedCount} selected`,
+    loadedCount ? `${loadedCount}/${total} loaded` : "",
+  ].filter(Boolean).join(" · ");
+
+  if (errorMessage) {
+    els.knowledgeDatasetList.replaceChildren(renderMessageRow({ tone: "error", text: errorMessage }));
+    return;
+  }
+  if (state.datasets.items.length === 0) {
+    els.knowledgeDatasetList.replaceChildren(emptyState("No datasets loaded."));
+    return;
+  }
+
+  const selected = new Set(state.datasets.selectedIds);
+  els.knowledgeDatasetList.replaceChildren(
+    ...state.datasets.items.map((dataset) => datasetOption(dataset, selected.has(dataset.id)))
+  );
+}
+
+function datasetOption(dataset, checked) {
+  const label = document.createElement("label");
+  label.className = `dataset-option${checked ? " is-selected" : ""}`;
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = checked;
+  checkbox.dataset.datasetId = dataset.id;
+
+  const body = document.createElement("span");
+  body.className = "dataset-option-body";
+  const name = document.createElement("span");
+  name.className = "dataset-name";
+  name.textContent = dataset.name || dataset.id;
+  const meta = document.createElement("span");
+  meta.className = "dataset-meta";
+  meta.textContent = datasetMeta(dataset);
+  const description = document.createElement("span");
+  description.className = "dataset-description";
+  description.textContent = dataset.description || dataset.id;
+  body.append(name, meta, description);
+  label.append(checkbox, body);
+  return label;
+}
+
+function datasetMeta(dataset) {
+  const documents = dataset.document_count ?? dataset.total_document_count;
+  return [
+    documents !== undefined && documents !== null ? `${documents} docs` : "",
+    dataset.provider,
+    dataset.runtime_mode,
+    dataset.indexing_technique,
+    dataset.embedding_available === false ? "embedding unavailable" : "",
+  ].filter(Boolean).join(" · ") || "dataset";
+}
+
+function toggleDatasetSelection(datasetId, selected) {
+  if (!datasetId) {
+    return;
+  }
+  const ids = new Set(state.datasets.selectedIds);
+  if (selected) {
+    ids.add(datasetId);
+  } else {
+    ids.delete(datasetId);
+  }
+  state.datasets.selectedIds = Array.from(ids);
+  saveSelectedDatasetIds();
+  renderKnowledgeDatasets();
+  markModifyPreviewDirty();
+}
+
+function mergeDatasets(current, incoming) {
+  const seen = new Set();
+  return [...current, ...incoming].filter((dataset) => {
+    if (!dataset?.id || seen.has(dataset.id)) {
+      return false;
+    }
+    seen.add(dataset.id);
+    return true;
+  });
 }
 
 async function handleCreate() {
@@ -825,17 +984,58 @@ function loadDatasetIdsText() {
 
 function saveDatasetIdsText(value) {
   localStorage.setItem(DATASET_IDS_KEY, value || "");
+  renderKnowledgeDatasets();
+}
+
+function loadSelectedDatasetIds() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SELECTED_DATASET_IDS_KEY) || "[]");
+    return Array.isArray(parsed) ? uniqueDatasetIds(parsed) : [];
+  } catch (error) {
+    return [];
+  }
+}
+
+function saveSelectedDatasetIds() {
+  localStorage.setItem(SELECTED_DATASET_IDS_KEY, JSON.stringify(uniqueDatasetIds(state.datasets.selectedIds)));
+}
+
+function loadDatasetSearchText() {
+  try {
+    return localStorage.getItem(DATASET_SEARCH_KEY) || "";
+  } catch (error) {
+    return "";
+  }
+}
+
+function saveDatasetSearchText(value) {
+  localStorage.setItem(DATASET_SEARCH_KEY, value || "");
 }
 
 function currentDatasetIds() {
-  return parseDatasetIds(els.knowledgeDatasetIds.value);
+  return uniqueDatasetIds([
+    ...state.datasets.selectedIds,
+    ...parseDatasetIds(els.knowledgeDatasetIds.value),
+  ]);
 }
 
 function parseDatasetIds(value) {
-  return String(value || "")
+  return uniqueDatasetIds(String(value || "")
     .split(/[\n,]/)
     .map((item) => item.trim())
-    .filter(Boolean);
+    .filter(Boolean));
+}
+
+function uniqueDatasetIds(ids) {
+  const seen = new Set();
+  return (ids || []).filter((id) => {
+    const text = String(id || "").trim();
+    if (!text || seen.has(text)) {
+      return false;
+    }
+    seen.add(text);
+    return true;
+  }).map((id) => String(id).trim());
 }
 
 function datasetIdsEqual(left, right) {

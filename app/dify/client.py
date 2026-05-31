@@ -70,6 +70,58 @@ class DifyAppDetail:
 
 
 @dataclass(frozen=True)
+class DifyDatasetListItem:
+    id: str
+    name: str
+    description: str
+    document_count: int | None = None
+    total_document_count: int | None = None
+    provider: str | None = None
+    runtime_mode: str | None = None
+    indexing_technique: str | None = None
+    embedding_available: bool | None = None
+    permission: str | None = None
+    updated_at: int | float | str | None = None
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "DifyDatasetListItem":
+        return cls(
+            id=str(payload.get("id", "")),
+            name=str(payload.get("name", "")),
+            description=str(payload.get("description", "") or ""),
+            document_count=_int_or_none(payload.get("document_count")),
+            total_document_count=_int_or_none(payload.get("total_document_count")),
+            provider=_string_or_none(payload.get("provider")),
+            runtime_mode=_string_or_none(payload.get("runtime_mode")),
+            indexing_technique=_string_or_none(payload.get("indexing_technique")),
+            embedding_available=_bool_or_none(payload.get("embedding_available")),
+            permission=_string_or_none(payload.get("permission")),
+            updated_at=payload.get("updated_at"),
+        )
+
+
+@dataclass(frozen=True)
+class DifyDatasetListResult:
+    data: list[DifyDatasetListItem]
+    has_more: bool
+    page: int
+    limit: int
+    total: int
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "DifyDatasetListResult":
+        raw_items = payload.get("data") if isinstance(payload.get("data"), list) else []
+        items = [DifyDatasetListItem.from_payload(item) for item in raw_items if isinstance(item, dict)]
+        return cls(
+            data=items,
+            has_more=bool(_bool_or_none(payload.get("has_more"))),
+            page=_int_or_none(payload.get("page")) or 1,
+            limit=_int_or_none(payload.get("limit")) or len(items),
+            total=_int_or_none(payload.get("total")) or len(items),
+        )
+
+
+@dataclass(frozen=True)
 class DifyDraftWorkflow:
     id: str
     graph: dict[str, Any]
@@ -223,6 +275,32 @@ class DifyClient:
         if not isinstance(payload, dict):
             raise DifyClientError("Dify app detail response must be a JSON object.")
         return DifyAppDetail.from_payload(payload)
+
+    def list_datasets(
+        self,
+        *,
+        keyword: str | None = None,
+        page: int = 1,
+        limit: int = 50,
+        include_all: bool = True,
+    ) -> DifyDatasetListResult:
+        self._ensure_logged_in()
+        params: dict[str, Any] = {
+            "page": page,
+            "limit": limit,
+            "include_all": str(include_all).lower(),
+        }
+        if keyword:
+            params["keyword"] = keyword
+        response = self._get_with_auth_retry("/datasets", params=params)
+        self._raise_for_response(response)
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise DifyClientError(f"Invalid Dify JSON response: {response.text}") from exc
+        if not isinstance(payload, dict):
+            raise DifyClientError("Dify datasets response must be a JSON object.")
+        return DifyDatasetListResult.from_payload(payload)
 
     def get_draft_workflow(self, app_id: str) -> DifyDraftWorkflow:
         self._ensure_logged_in()
@@ -383,14 +461,14 @@ class DifyClient:
             final_event=final,
         )
 
-    def _get_with_auth_retry(self, path: str) -> httpx.Response:
-        response = self._get(path, headers=self._csrf_headers())
+    def _get_with_auth_retry(self, path: str, **kwargs: Any) -> httpx.Response:
+        response = self._get(path, headers=self._csrf_headers(), **kwargs)
         if response.status_code != 401:
             return response
         if self.refresh_token():
-            return self._get(path, headers=self._csrf_headers())
+            return self._get(path, headers=self._csrf_headers(), **kwargs)
         self.login()
-        return self._get(path, headers=self._csrf_headers())
+        return self._get(path, headers=self._csrf_headers(), **kwargs)
 
     def _get(self, path: str, **kwargs: Any) -> httpx.Response:
         try:
@@ -529,3 +607,13 @@ def _int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)

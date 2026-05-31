@@ -5,7 +5,15 @@ from app.agent.editor import WorkflowEditResult
 from app.agent.planner import PlannerResult, fallback_plan
 from app.compiler.dify import DifyDslCompiler
 from app.config import Settings
-from app.dify.client import DifyAppDetail, DifyClientError, DifyDraftRunResult, DifyDraftSyncResult, DifyDraftWorkflow
+from app.dify.client import (
+    DifyAppDetail,
+    DifyClientError,
+    DifyDatasetListItem,
+    DifyDatasetListResult,
+    DifyDraftRunResult,
+    DifyDraftSyncResult,
+    DifyDraftWorkflow,
+)
 from app.dify.version import DifyVersionInfo
 from app.main import app
 
@@ -26,6 +34,9 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert "chat2dify" in index.text
     assert 'id="create-form"' in index.text
     assert 'id="history-list"' in index.text
+    assert 'id="knowledge-search"' in index.text
+    assert 'id="refresh-datasets"' in index.text
+    assert 'id="knowledge-dataset-list"' in index.text
     assert 'id="knowledge-dataset-ids"' in index.text
     assert 'id="result-tabs"' in index.text
     assert 'id="load-draft"' in index.text
@@ -35,6 +46,8 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert "handleReviewedPreviewApply" in script.text
     assert "modifyPreview" in script.text
     assert "DATASET_IDS_KEY" in script.text
+    assert "SELECTED_DATASET_IDS_KEY" in script.text
+    assert "loadDatasets" in script.text
     assert "currentDatasetIds" in script.text
     assert "Applied reviewed preview" in script.text
     assert "localStorage" in script.text
@@ -61,6 +74,97 @@ def test_health_returns_configured_dataset_count(monkeypatch) -> None:
     data = response.json()
     assert data["configured_dataset_count"] == 2
     assert data["dify"]["configured_dataset_count"] == 2
+
+
+def test_list_dify_datasets_api_returns_slim_dataset_list(monkeypatch) -> None:
+    settings = _test_settings()
+    seen = {}
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def list_datasets(self, *, keyword=None, page=1, limit=50, include_all=True):
+            seen["keyword"] = keyword
+            seen["page"] = page
+            seen["limit"] = limit
+            seen["include_all"] = include_all
+            return DifyDatasetListResult(
+                data=[
+                    DifyDatasetListItem(
+                        id="dataset-1",
+                        name="售后政策",
+                        description="门店售后政策",
+                        document_count=3,
+                        total_document_count=5,
+                        provider="vendor",
+                        runtime_mode="general",
+                        indexing_technique="high_quality",
+                        embedding_available=True,
+                        permission="all_team_members",
+                        updated_at=123,
+                    )
+                ],
+                has_more=True,
+                page=2,
+                limit=10,
+                total=21,
+            )
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+
+    with TestClient(app) as client:
+        response = client.get("/api/dify/datasets?keyword=%E5%94%AE%E5%90%8E&page=2&limit=10&include_all=true")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert seen == {"keyword": "售后", "page": 2, "limit": 10, "include_all": True}
+    assert data["has_more"] is True
+    assert data["total"] == 21
+    assert data["data"][0] == {
+        "id": "dataset-1",
+        "name": "售后政策",
+        "description": "门店售后政策",
+        "document_count": 3,
+        "total_document_count": 5,
+        "provider": "vendor",
+        "runtime_mode": "general",
+        "indexing_technique": "high_quality",
+        "embedding_available": True,
+        "permission": "all_team_members",
+        "updated_at": 123,
+    }
+
+
+def test_list_dify_datasets_api_wraps_dify_errors(monkeypatch) -> None:
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def list_datasets(self, **_kwargs):
+            raise DifyClientError("Dify unavailable")
+
+    monkeypatch.setattr("app.main.load_settings", _test_settings)
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+
+    with TestClient(app) as client:
+        response = client.get("/api/dify/datasets")
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Dify unavailable"
 
 
 def test_draft_response_includes_phase2_fields(monkeypatch) -> None:
