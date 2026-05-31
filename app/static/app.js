@@ -1,4 +1,5 @@
 const HISTORY_KEY = "chat2dify.workbench.history.v1";
+const DATASET_IDS_KEY = "chat2dify.workbench.datasetIds.v1";
 const MAX_HISTORY_ITEMS = 12;
 const DEFAULT_RUN_INPUTS = '{"query":"我要投诉订单配送太慢"}';
 
@@ -19,6 +20,7 @@ const els = {
   tabPanels: Array.from(document.querySelectorAll("[data-tab-panel]")),
   createForm: document.querySelector("#create-form"),
   createStatus: document.querySelector("#create-status"),
+  knowledgeDatasetIds: document.querySelector("#knowledge-dataset-ids"),
   modifyForm: document.querySelector("#modify-form"),
   modifyStatus: document.querySelector("#modify-status"),
   runForm: document.querySelector("#run-form"),
@@ -38,6 +40,7 @@ const els = {
 
 document.addEventListener("DOMContentLoaded", () => {
   state.history = loadHistory();
+  els.knowledgeDatasetIds.value = loadDatasetIdsText();
   bindEvents();
   renderHistory();
   refreshHealth();
@@ -46,6 +49,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
 function bindEvents() {
   els.refreshHealth.addEventListener("click", refreshHealth);
+  els.knowledgeDatasetIds.addEventListener("input", () => {
+    saveDatasetIdsText(els.knowledgeDatasetIds.value);
+    markModifyPreviewDirty();
+  });
 
   els.createForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -104,7 +111,9 @@ async function refreshHealth() {
     const data = await requestJson("/health");
     const version = data?.dify?.app_dsl_version || "unknown";
     const source = data?.dify?.git_describe || "source";
-    els.healthStatus.textContent = `Healthy · DSL ${version} · ${source}`;
+    const datasetCount = data?.configured_dataset_count ?? data?.dify?.configured_dataset_count;
+    const datasetSuffix = datasetCount !== undefined ? ` · datasets ${datasetCount}` : "";
+    els.healthStatus.textContent = `Healthy · DSL ${version} · ${source}${datasetSuffix}`;
     els.healthStatus.className = "status-pill status-ok";
   } catch (error) {
     els.healthStatus.textContent = "Offline";
@@ -117,6 +126,7 @@ async function handleCreate() {
     const payload = {
       message: valueOf("#create-message"),
       app_name: optionalValue("#create-app-name"),
+      dataset_ids: currentDatasetIds(),
     };
     const data = await requestJson("/api/workflows/create", {
       method: "POST",
@@ -143,6 +153,7 @@ async function handleModify(path, mode) {
       message: valueOf("#modify-message"),
       expected_hash: optionalValue("#modify-expected-hash"),
       allow_destructive: document.querySelector("#modify-allow-destructive").checked,
+      dataset_ids: currentDatasetIds(),
     };
     const data = await requestJson(path, {
       method: "POST",
@@ -188,6 +199,7 @@ async function handleReviewedPreviewApply() {
       expected_hash: state.modifyPreview.base_hash,
       allow_destructive: state.modifyPreview.allow_destructive,
       plan: state.modifyPreview.plan,
+      dataset_ids: state.modifyPreview.dataset_ids,
     };
     const data = await requestJson("/api/workflows/modify/apply", {
       method: "POST",
@@ -744,6 +756,7 @@ function currentModifyPayload() {
     message: valueOf("#modify-message"),
     expected_hash: optionalValue("#modify-expected-hash"),
     allow_destructive: document.querySelector("#modify-allow-destructive").checked,
+    dataset_ids: currentDatasetIds(),
   };
 }
 
@@ -759,6 +772,7 @@ function storeModifyPreview(data, payload) {
     base_hash: data.base_hash,
     allow_destructive: payload.allow_destructive,
     plan: data.plan,
+    dataset_ids: payload.dataset_ids || [],
   };
   state.modifyPreviewDirty = false;
 }
@@ -772,7 +786,8 @@ function modifyPreviewMatches(payload) {
     payload.app_id === preview.app_id &&
     payload.message === preview.message &&
     payload.expected_hash === preview.base_hash &&
-    payload.allow_destructive === preview.allow_destructive
+    payload.allow_destructive === preview.allow_destructive &&
+    datasetIdsEqual(payload.dataset_ids || [], preview.dataset_ids || [])
   );
 }
 
@@ -798,6 +813,33 @@ function loadHistory() {
 
 function saveHistory() {
   localStorage.setItem(HISTORY_KEY, JSON.stringify(state.history.slice(0, MAX_HISTORY_ITEMS)));
+}
+
+function loadDatasetIdsText() {
+  try {
+    return localStorage.getItem(DATASET_IDS_KEY) || "";
+  } catch (error) {
+    return "";
+  }
+}
+
+function saveDatasetIdsText(value) {
+  localStorage.setItem(DATASET_IDS_KEY, value || "");
+}
+
+function currentDatasetIds() {
+  return parseDatasetIds(els.knowledgeDatasetIds.value);
+}
+
+function parseDatasetIds(value) {
+  return String(value || "")
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function datasetIdsEqual(left, right) {
+  return JSON.stringify(left || []) === JSON.stringify(right || []);
 }
 
 function rememberApp(data, meta = {}) {

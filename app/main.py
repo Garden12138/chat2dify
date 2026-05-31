@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -12,9 +12,10 @@ from app.agent.diff import diff_plans
 from app.agent.editor import WorkflowEditPlanner
 from app.agent.explainer import explain_plan
 from app.agent.guard import guard_plan_change
+from app.agent.normalizer import normalize_plan_payload
 from app.agent.planner import PlannerError, WorkflowPlanner
 from app.compiler.dify import DifyDslCompiler
-from app.config import ConfigurationError, load_settings
+from app.config import ConfigurationError, Settings, load_settings
 from app.dify.client import DifyAppDetail, DifyClient, DifyClientError, DifyConflictError
 from app.dify.graph import (
     DifyGraphAdapterError,
@@ -55,11 +56,13 @@ def health() -> dict:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return {
         "status": "ok",
+        "configured_dataset_count": len(settings.dify_default_dataset_ids),
         "dify": {
             "source_dir": settings.dify_source_dir,
             "resolved_source_dir": str(settings.dify_source_path),
             "git_describe": version_info.git_describe,
             "app_dsl_version": version_info.app_dsl_version,
+            "configured_dataset_count": len(settings.dify_default_dataset_ids),
         },
     }
 
@@ -67,9 +70,10 @@ def health() -> dict:
 @app.post("/api/workflows/draft")
 def draft_workflow(request: WorkflowRequest) -> dict:
     settings = load_settings()
+    effective_settings = _settings_with_request_dataset_ids(settings, request.dataset_ids)
     version_info = read_dify_version_info(settings.dify_source_path)
     try:
-        planner_result = WorkflowPlanner(settings).generate(
+        planner_result = WorkflowPlanner(effective_settings).generate(
             request.message,
             app_name=request.app_name,
             dsl_version=version_info.app_dsl_version,
@@ -79,9 +83,9 @@ def draft_workflow(request: WorkflowRequest) -> dict:
     plan = planner_result.plan
     compiler = DifyDslCompiler(
         dsl_version=version_info.app_dsl_version,
-        default_model_provider=settings.dify_default_model_provider,
-        default_model_name=settings.dify_default_model_name,
-        default_dataset_ids=settings.dify_default_dataset_ids,
+        default_model_provider=effective_settings.dify_default_model_provider,
+        default_model_name=effective_settings.dify_default_model_name,
+        default_dataset_ids=effective_settings.dify_default_dataset_ids,
     )
     dsl = compiler.compile(plan)
     issues = [*validate_plan(plan), *validate_dsl(dsl, expected_dsl_version=version_info.app_dsl_version)]
@@ -195,12 +199,13 @@ def run_draft_workflow(request: WorkflowRunDraftRequest) -> dict:
 
 def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:
     settings = load_settings()
+    effective_settings = _settings_with_request_dataset_ids(settings, request.dataset_ids)
     version_info = read_dify_version_info(settings.dify_source_path)
     compiler = DifyDslCompiler(
         dsl_version=version_info.app_dsl_version,
-        default_model_provider=settings.dify_default_model_provider,
-        default_model_name=settings.dify_default_model_name,
-        default_dataset_ids=settings.dify_default_dataset_ids,
+        default_model_provider=effective_settings.dify_default_model_provider,
+        default_model_name=effective_settings.dify_default_model_name,
+        default_dataset_ids=effective_settings.dify_default_dataset_ids,
     )
 
     try:
@@ -220,11 +225,16 @@ def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:
 
             before_plan = decompile_dify_graph(draft.graph, name=_draft_plan_name(app_detail, request.app_id))
             if apply and request.plan is not None:
-                plan = request.plan
+                normalized = normalize_plan_payload(
+                    request.plan.model_dump(),
+                    app_name=before_plan.name,
+                    default_dataset_ids=effective_settings.dify_default_dataset_ids,
+                )
+                plan = WorkflowPlan.model_validate(normalized.payload)
                 raw_plan = plan.model_dump()
-                planner_metadata = _preview_plan_planner_metadata()
+                planner_metadata = _preview_plan_planner_metadata(normalized.changes)
             else:
-                edit_result = WorkflowEditPlanner(settings).generate(
+                edit_result = WorkflowEditPlanner(effective_settings).generate(
                     request.message,
                     current_plan=before_plan,
                     dsl_version=version_info.app_dsl_version,
@@ -346,14 +356,21 @@ def _build_modify_response(
     return response, graph
 
 
-def _preview_plan_planner_metadata() -> dict:
+def _settings_with_request_dataset_ids(settings: Settings, dataset_ids: list[str] | None) -> Settings:
+    request_dataset_ids = [str(item).strip() for item in dataset_ids or [] if str(item).strip()]
+    if not request_dataset_ids:
+        return settings
+    return replace(settings, dify_default_dataset_ids=request_dataset_ids)
+
+
+def _preview_plan_planner_metadata(normalizations: list[str] | None = None) -> dict:
     return {
         "mode": "preview-plan",
         "attempts": 0,
         "used_fallback": False,
         "repaired": False,
         "replanned": False,
-        "normalizations": [],
+        "normalizations": normalizations or [],
         "errors": [],
     }
 

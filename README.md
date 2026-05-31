@@ -106,9 +106,9 @@ plan (`start -> llm -> end`) so the MVP can still produce a valid DSL. When it
 is set, the planner tries up to three LLM attempts and feeds validation errors
 back into the model for self-repair.
 
-Knowledge retrieval workflows require real Dify dataset IDs. Configure them as
-a comma-separated list before asking the planner to create knowledge-base/RAG
-workflows:
+Knowledge retrieval workflows require real Dify dataset IDs. Configure a
+comma-separated default in `.env`, or enter dataset IDs in the Web UI Knowledge
+panel to override the default for Create and Modify requests:
 
 ```env
 DIFY_DEFAULT_DATASET_IDS=dataset_id_1,dataset_id_2
@@ -146,7 +146,7 @@ Draft a workflow without importing it:
 ```bash
 curl -X POST http://127.0.0.1:8000/api/workflows/draft \
   -H 'Content-Type: application/json' \
-  -d '{"message":"Summarize the user input","app_name":"Summary MVP"}'
+  -d '{"message":"Summarize the user input","app_name":"Summary MVP","dataset_ids":["OPTIONAL_DATASET_ID"]}'
 ```
 
 Create a workflow in Dify:
@@ -154,7 +154,7 @@ Create a workflow in Dify:
 ```bash
 curl -X POST http://127.0.0.1:8000/api/workflows/create \
   -H 'Content-Type: application/json' \
-  -d '{"message":"Summarize the user input","app_name":"Summary MVP"}'
+  -d '{"message":"Summarize the user input","app_name":"Summary MVP","dataset_ids":["OPTIONAL_DATASET_ID"]}'
 ```
 
 Preview a change to an existing Dify workflow draft:
@@ -162,7 +162,7 @@ Preview a change to an existing Dify workflow draft:
 ```bash
 curl -X POST http://127.0.0.1:8000/api/workflows/modify/draft \
   -H 'Content-Type: application/json' \
-  -d '{"app_id":"YOUR_APP_ID","message":"Make the final answer warmer"}'
+  -d '{"app_id":"YOUR_APP_ID","message":"Make the final answer warmer","dataset_ids":["OPTIONAL_DATASET_ID"]}'
 ```
 
 Inspect the current Dify workflow draft without modifying it:
@@ -187,6 +187,7 @@ value should be the exact `plan` object returned by `modify/draft`:
   "app_id": "YOUR_APP_ID",
   "message": "Make the final answer warmer",
   "expected_hash": "PREVIEW_BASE_HASH",
+  "dataset_ids": ["OPTIONAL_DATASET_ID"],
   "plan": {
     "...": "copy the full preview plan object here"
   }

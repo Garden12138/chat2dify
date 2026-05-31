@@ -2,7 +2,7 @@ from fastapi.testclient import TestClient
 import yaml
 
 from app.agent.editor import WorkflowEditResult
-from app.agent.planner import fallback_plan
+from app.agent.planner import PlannerResult, fallback_plan
 from app.compiler.dify import DifyDslCompiler
 from app.config import Settings
 from app.dify.client import DifyAppDetail, DifyClientError, DifyDraftRunResult, DifyDraftSyncResult, DifyDraftWorkflow
@@ -26,6 +26,7 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert "chat2dify" in index.text
     assert 'id="create-form"' in index.text
     assert 'id="history-list"' in index.text
+    assert 'id="knowledge-dataset-ids"' in index.text
     assert 'id="result-tabs"' in index.text
     assert 'id="load-draft"' in index.text
     assert script.status_code == 200
@@ -33,6 +34,8 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert "handleLoadDraft" in script.text
     assert "handleReviewedPreviewApply" in script.text
     assert "modifyPreview" in script.text
+    assert "DATASET_IDS_KEY" in script.text
+    assert "currentDatasetIds" in script.text
     assert "Applied reviewed preview" in script.text
     assert "localStorage" in script.text
     assert "renderValidationPanel" in script.text
@@ -42,6 +45,22 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert ".history-item" in styles.text
     assert ".tab-button" in styles.text
     assert ".node-card" in styles.text
+
+
+def test_health_returns_configured_dataset_count(monkeypatch) -> None:
+    monkeypatch.setattr("app.main.load_settings", lambda: _test_settings(dataset_ids="dataset-a,dataset-b"))
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["configured_dataset_count"] == 2
+    assert data["dify"]["configured_dataset_count"] == 2
 
 
 def test_draft_response_includes_phase2_fields(monkeypatch) -> None:
@@ -76,6 +95,49 @@ def test_draft_response_includes_phase2_fields(monkeypatch) -> None:
     assert data["planner"]["mode"] == "fallback"
     assert data["planner"]["used_fallback"] is True
     assert data["validation"]["ok"] is True
+
+
+def test_draft_request_dataset_ids_override_env_defaults(monkeypatch) -> None:
+    monkeypatch.setattr("app.main.load_settings", lambda: _test_settings(dataset_ids="env-dataset"))
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+    monkeypatch.setattr("app.main.WorkflowPlanner", _KnowledgePlanner)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/draft",
+            json={
+                "message": "根据知识库回答修车售后问题",
+                "app_name": "知识库问答",
+                "dataset_ids": ["request-dataset"],
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    knowledge = next(node for node in data["plan"]["nodes"] if node["id"] == "knowledge")
+    assert knowledge["params"]["dataset_ids"] == ["request-dataset"]
+    assert data["validation"]["ok"] is True
+
+
+def test_create_knowledge_workflow_without_any_dataset_ids_returns_422(monkeypatch) -> None:
+    monkeypatch.setattr("app.main.load_settings", _test_settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+    monkeypatch.setattr("app.main.WorkflowPlanner", _KnowledgePlanner)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/create",
+            json={"message": "根据知识库回答修车售后问题", "app_name": "知识库问答"},
+        )
+
+    assert response.status_code == 422
+    assert any(issue["code"] == "PLAN_KNOWLEDGE_RETRIEVAL_DATASETS_MISSING" for issue in response.json()["detail"])
 
 
 def test_get_workflow_draft_returns_app_detail_and_plan(monkeypatch) -> None:
@@ -276,6 +338,70 @@ def test_apply_workflow_modification_syncs_dify_draft(monkeypatch) -> None:
     assert seen["sync_graph"]["nodes"]
 
 
+def test_modify_draft_request_dataset_ids_fill_added_knowledge_node(monkeypatch) -> None:
+    settings = _test_settings(dataset_ids="env-dataset")
+    compiler = DifyDslCompiler(
+        dsl_version="9.9.9",
+        default_model_provider="openai",
+        default_model_name="gpt-4o-mini",
+    )
+    graph = yaml.safe_load(compiler.compile(fallback_plan("hello", app_name="Loaded")))["workflow"]["graph"]
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get_draft_workflow(self, _app_id):
+            return DifyDraftWorkflow(
+                id="workflow-1",
+                graph=graph,
+                features={},
+                hash="hash-1",
+                version="draft",
+                environment_variables=[],
+                conversation_variables=[],
+                raw={},
+            )
+
+    class FakeEditPlanner:
+        def __init__(self, planner_settings):
+            self.settings = planner_settings
+
+        def generate(self, _message, *, current_plan, dsl_version):
+            revised = _knowledge_plan(current_plan.name, self.settings.dify_default_dataset_ids)
+            return WorkflowEditResult(plan=revised, raw_plan=revised.model_dump(), attempts=1, repaired=False)
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+    monkeypatch.setattr("app.main.WorkflowEditPlanner", FakeEditPlanner)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/modify/draft",
+            json={
+                "app_id": "app-1",
+                "message": "增加知识库检索",
+                "dataset_ids": ["request-dataset"],
+                "allow_destructive": True,
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    knowledge = next(node for node in data["plan"]["nodes"] if node["id"] == "knowledge")
+    assert knowledge["params"]["dataset_ids"] == ["request-dataset"]
+
+
 def test_apply_workflow_modification_with_preview_plan_does_not_replan(monkeypatch) -> None:
     settings = _test_settings()
     compiler = DifyDslCompiler(
@@ -354,6 +480,81 @@ def test_apply_workflow_modification_with_preview_plan_does_not_replan(monkeypat
     assert data["sync"]["result"] == "success"
     assert seen["sync_hash"] == "hash-1"
     assert seen["sync_graph"]["nodes"]
+
+
+def test_apply_workflow_modification_with_preview_plan_preserves_preview_dataset_ids(monkeypatch) -> None:
+    settings = _test_settings(dataset_ids="env-dataset")
+    compiler = DifyDslCompiler(
+        dsl_version="9.9.9",
+        default_model_provider="openai",
+        default_model_name="gpt-4o-mini",
+    )
+    current_plan = fallback_plan("hello", app_name="Loaded")
+    graph = yaml.safe_load(compiler.compile(current_plan))["workflow"]["graph"]
+    preview_plan = _knowledge_plan("Loaded", ["preview-dataset"])
+    seen = {}
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get_draft_workflow(self, _app_id):
+            return DifyDraftWorkflow(
+                id="workflow-1",
+                graph=graph,
+                features={},
+                hash="hash-1",
+                version="draft",
+                environment_variables=[],
+                conversation_variables=[],
+                raw={},
+            )
+
+        def sync_draft_workflow(self, app_id, **kwargs):
+            seen["sync_graph"] = kwargs["graph"]
+            return DifyDraftSyncResult(
+                result="success",
+                hash="hash-2",
+                updated_at="123",
+                workflow_url=settings.workflow_url(app_id),
+            )
+
+    class FailingEditPlanner:
+        def __init__(self, _settings):
+            raise AssertionError("apply with plan must not instantiate edit planner")
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+    monkeypatch.setattr("app.main.WorkflowEditPlanner", FailingEditPlanner)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/modify/apply",
+            json={
+                "app_id": "app-1",
+                "message": "apply reviewed preview",
+                "expected_hash": "hash-1",
+                "allow_destructive": True,
+                "dataset_ids": ["request-dataset"],
+                "plan": preview_plan.model_dump(),
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["planner"]["mode"] == "preview-plan"
+    knowledge = next(node["data"] for node in seen["sync_graph"]["nodes"] if node["id"] == "knowledge")
+    assert knowledge["dataset_ids"] == ["preview-dataset"]
 
 
 def test_apply_workflow_modification_with_preview_plan_hash_conflict(monkeypatch) -> None:
@@ -860,7 +1061,63 @@ def test_run_draft_workflow_api_can_return_timeout(monkeypatch) -> None:
     assert data["status"] == "timeout"
 
 
-def _test_settings() -> Settings:
+class _KnowledgePlanner:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+
+    def generate(self, message: str, *, app_name: str | None = None, dsl_version: str) -> PlannerResult:
+        plan = _knowledge_plan(app_name or "知识库问答", self.settings.dify_default_dataset_ids)
+        return PlannerResult(
+            plan=plan,
+            raw_plan=plan.model_dump(),
+            mode="llm",
+            attempts=1,
+            used_fallback=False,
+            repaired=False,
+        )
+
+
+def _knowledge_plan(name: str, dataset_ids: list[str]) -> object:
+    from app.models import WorkflowPlan
+
+    return WorkflowPlan.model_validate(
+        {
+            "name": name,
+            "nodes": [
+                {"id": "start", "type": "start", "title": "接收售后问题", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "knowledge",
+                    "type": "knowledge-retrieval",
+                    "title": "检索售后知识库",
+                    "params": {
+                        "query_variable_selector": ["start", "query"],
+                        "dataset_ids": dataset_ids,
+                        "retrieval_mode": "multiple",
+                    },
+                },
+                {
+                    "id": "llm",
+                    "type": "llm",
+                    "title": "生成知识库回复",
+                    "params": {"user_prompt": "资料：{{#knowledge.result#}}\n问题：{{#start.query#}}"},
+                },
+                {
+                    "id": "end",
+                    "type": "end",
+                    "title": "返回回复",
+                    "params": {"outputs": [{"variable": "answer", "value_selector": ["llm", "text"]}]},
+                },
+            ],
+            "edges": [
+                {"source": "start", "target": "knowledge"},
+                {"source": "knowledge", "target": "llm"},
+                {"source": "llm", "target": "end"},
+            ],
+        }
+    )
+
+
+def _test_settings(dataset_ids: str = "") -> Settings:
     return Settings.from_env(
         {
             "DIFY_SOURCE_DIR": "../dify",
@@ -868,6 +1125,7 @@ def _test_settings() -> Settings:
             "DIFY_CONSOLE_WEB_BASE": "http://dify.local",
             "DIFY_DEFAULT_MODEL_PROVIDER": "langgenius/tongyi/tongyi",
             "DIFY_DEFAULT_MODEL_NAME": "qwen3.5-plus",
+            "DIFY_DEFAULT_DATASET_IDS": dataset_ids,
         },
         validate_dify=False,
     )

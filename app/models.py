@@ -104,6 +104,7 @@ class WorkflowRequest(BaseModel):
     message: str = Field(min_length=1)
     app_name: str | None = None
     dry_run: bool = False
+    dataset_ids: list[str] | None = None
 
 
 class WorkflowModifyRequest(BaseModel):
@@ -112,6 +113,7 @@ class WorkflowModifyRequest(BaseModel):
     expected_hash: str | None = None
     allow_destructive: bool = False
     plan: WorkflowPlan | None = None
+    dataset_ids: list[str] | None = None
 
 
 class WorkflowRunDraftRequest(BaseModel):
