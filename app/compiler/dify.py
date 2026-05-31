@@ -27,10 +27,12 @@ class DifyDslCompiler:
         dsl_version: str,
         default_model_provider: str,
         default_model_name: str,
+        default_dataset_ids: list[str] | None = None,
     ) -> None:
         self.dsl_version = dsl_version
         self.default_model_provider = default_model_provider
         self.default_model_name = default_model_name
+        self.default_dataset_ids = default_dataset_ids or []
 
     def compile(self, plan: WorkflowPlan) -> str:
         nodes = [self._compile_node(node, index) for index, node in enumerate(plan.nodes)]
@@ -115,6 +117,8 @@ class DifyDslCompiler:
                 data.update(self._assigner_data(node))
             case "list-operator":
                 data.update(self._list_operator_data(node))
+            case "knowledge-retrieval":
+                data.update(self._knowledge_retrieval_data(node))
 
         return {
             "id": node.id,
@@ -323,6 +327,23 @@ class DifyDslCompiler:
             "limit": _limit(node.params.get("limit")),
         }
 
+    def _knowledge_retrieval_data(self, node: PlanNode) -> dict[str, Any]:
+        return {
+            "query_variable_selector": _selector(node.params.get("query_variable_selector"), ["start", "query"]),
+            "query_attachment_selector": _selector(node.params.get("query_attachment_selector"), []),
+            "dataset_ids": _dataset_ids(node.params.get("dataset_ids"), self.default_dataset_ids),
+            "retrieval_mode": node.params.get("retrieval_mode", "multiple"),
+            "multiple_retrieval_config": _multiple_retrieval_config(node.params.get("multiple_retrieval_config")),
+            "metadata_filtering_mode": node.params.get("metadata_filtering_mode", "disabled"),
+            "metadata_filtering_conditions": deepcopy(node.params.get("metadata_filtering_conditions"))
+            if node.params.get("metadata_filtering_conditions") is not None
+            else None,
+            "metadata_model_config": deepcopy(node.params.get("metadata_model_config"))
+            if node.params.get("metadata_model_config") is not None
+            else None,
+            "vision": _vision(node.params.get("vision")),
+        }
+
     def _model_config(self, node: PlanNode) -> dict[str, Any]:
         model = node.params.get("model") if isinstance(node.params.get("model"), dict) else {}
         return {
@@ -448,6 +469,36 @@ def _limit(value: Any) -> dict[str, Any]:
     except (TypeError, ValueError):
         size = 10
     return {"enabled": bool(value.get("enabled", False)), "size": max(1, size)}
+
+
+def _dataset_ids(value: Any, default: list[str]) -> list[str]:
+    if isinstance(value, str):
+        items = value.split(",")
+    elif isinstance(value, list):
+        items = value
+    else:
+        items = []
+    dataset_ids = [str(item).strip() for item in items if str(item).strip()]
+    return dataset_ids or list(default)
+
+
+def _multiple_retrieval_config(value: Any) -> dict[str, Any]:
+    config = value if isinstance(value, dict) else {}
+    try:
+        top_k = int(config.get("top_k", 4))
+    except (TypeError, ValueError):
+        top_k = 4
+    result = {
+        "top_k": max(1, top_k),
+        "score_threshold": config.get("score_threshold"),
+        "reranking_enable": bool(config.get("reranking_enable", False)),
+        "reranking_mode": str(config.get("reranking_mode") or "reranking_model"),
+    }
+    if isinstance(config.get("reranking_model"), dict):
+        result["reranking_model"] = deepcopy(config["reranking_model"])
+    if isinstance(config.get("weights"), dict):
+        result["weights"] = deepcopy(config["weights"])
+    return result
 
 
 def _vision(value: Any) -> dict[str, Any]:
@@ -579,6 +630,8 @@ def _node_height(node_type: str, data: dict[str, Any]) -> int:
         return 92 + max(0, len(data.get("items", [])) - 1) * 24
     if node_type == "list-operator":
         return 112
+    if node_type == "knowledge-retrieval":
+        return 116
     if node_type == "end":
         return 90 + max(0, len(data.get("outputs", [])) - 1) * 26
     return 90

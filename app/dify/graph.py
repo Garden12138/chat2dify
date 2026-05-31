@@ -25,6 +25,7 @@ SUPPORTED_DIFY_NODE_TYPES = {
     "document-extractor",
     "assigner",
     "list-operator",
+    "knowledge-retrieval",
 }
 LAYOUT_KEYS = ("position", "positionAbsolute", "width", "height", "sourcePosition", "targetPosition")
 
@@ -201,6 +202,28 @@ def _params_from_dify_node_data(node_type: str, data: dict[str, Any]) -> dict[st
                 "extract_by": deepcopy(data.get("extract_by") or {"enabled": False, "serial": "1"}),
                 "order_by": deepcopy(data.get("order_by") or {"enabled": False, "key": "", "value": "asc"}),
                 "limit": deepcopy(data.get("limit") or {"enabled": False, "size": 10}),
+            }
+        case "knowledge-retrieval":
+            return {
+                "query_variable_selector": deepcopy(data.get("query_variable_selector") or ["start", "query"]),
+                "query_attachment_selector": deepcopy(data.get("query_attachment_selector") or []),
+                "dataset_ids": deepcopy(data.get("dataset_ids") or []),
+                "retrieval_mode": data.get("retrieval_mode", "multiple"),
+                "multiple_retrieval_config": deepcopy(
+                    data.get("multiple_retrieval_config")
+                    or {"top_k": 4, "score_threshold": None, "reranking_enable": False}
+                ),
+                "single_retrieval_config": deepcopy(data.get("single_retrieval_config"))
+                if data.get("single_retrieval_config") is not None
+                else None,
+                "metadata_filtering_mode": data.get("metadata_filtering_mode", "disabled"),
+                "metadata_filtering_conditions": deepcopy(data.get("metadata_filtering_conditions"))
+                if data.get("metadata_filtering_conditions") is not None
+                else None,
+                "metadata_model_config": deepcopy(data.get("metadata_model_config"))
+                if data.get("metadata_model_config") is not None
+                else None,
+                "vision": deepcopy(data.get("vision") or {"enabled": False, "configs": {"variable_selector": []}}),
             }
     return {}
 

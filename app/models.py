@@ -19,6 +19,7 @@ NodeType = Literal[
     "document-extractor",
     "assigner",
     "list-operator",
+    "knowledge-retrieval",
 ]
 InputType = Literal["text", "paragraph", "number", "boolean", "file", "file-list", "json"]
 

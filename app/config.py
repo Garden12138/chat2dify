@@ -26,6 +26,7 @@ class Settings:
     dify_login_language: str
     dify_default_model_provider: str
     dify_default_model_name: str
+    dify_default_dataset_ids: list[str]
     openai_api_key: str | None
     openai_base_url: str
     openai_model: str
@@ -57,6 +58,7 @@ class Settings:
             dify_login_language=source.get("DIFY_LOGIN_LANGUAGE", "en-US"),
             dify_default_model_provider=source.get("DIFY_DEFAULT_MODEL_PROVIDER", "langgenius/openai/openai"),
             dify_default_model_name=source.get("DIFY_DEFAULT_MODEL_NAME", "gpt-4o-mini"),
+            dify_default_dataset_ids=_csv_list(source.get("DIFY_DEFAULT_DATASET_IDS", "")),
             openai_api_key=_empty_to_none(source.get("OPENAI_API_KEY")),
             openai_base_url=source.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
             openai_model=source.get("OPENAI_MODEL", "gpt-4o-mini"),
@@ -90,6 +92,12 @@ def _empty_to_none(value: str | None) -> str | None:
         return None
     value = value.strip()
     return value or None
+
+
+def _csv_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 def _load_environment(project_root: Path) -> dict[str, str]:

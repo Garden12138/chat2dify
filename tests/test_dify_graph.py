@@ -97,6 +97,42 @@ def test_decompile_dify_graph_covers_stable_builtin_nodes() -> None:
     assert nodes["list"].params["variable"] == ["start", "items"]
 
 
+def test_decompile_dify_graph_covers_knowledge_retrieval_node() -> None:
+    plan = WorkflowPlan.model_validate(
+        {
+            "name": "knowledge",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "knowledge",
+                    "type": "knowledge-retrieval",
+                    "params": {
+                        "query_variable_selector": ["start", "query"],
+                        "dataset_ids": ["dataset-a"],
+                        "retrieval_mode": "multiple",
+                        "multiple_retrieval_config": {"top_k": 4, "score_threshold": None, "reranking_enable": False},
+                    },
+                },
+                {"id": "llm", "type": "llm", "params": {"user_prompt": "{{#knowledge.result#}}"}},
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["llm", "text"]}]}},
+            ],
+            "edges": [
+                {"source": "start", "target": "knowledge"},
+                {"source": "knowledge", "target": "llm"},
+                {"source": "llm", "target": "end"},
+            ],
+        }
+    )
+    graph = yaml.safe_load(_compiler().compile(plan))["workflow"]["graph"]
+
+    decompiled = decompile_dify_graph(graph, name="Loaded")
+    knowledge = next(node for node in decompiled.nodes if node.id == "knowledge")
+
+    assert knowledge.type == "knowledge-retrieval"
+    assert knowledge.params["dataset_ids"] == ["dataset-a"]
+    assert knowledge.params["query_variable_selector"] == ["start", "query"]
+
+
 def test_compile_plan_to_dify_graph_preserves_existing_layout_and_places_new_nodes() -> None:
     base_plan = WorkflowPlan.model_validate(
         {
@@ -141,7 +177,7 @@ def test_compile_plan_to_dify_graph_preserves_existing_layout_and_places_new_nod
 
 def test_decompile_rejects_unsupported_existing_node_type() -> None:
     graph = {
-        "nodes": [{"id": "knowledge", "data": {"type": "knowledge-retrieval"}}],
+        "nodes": [{"id": "tool", "data": {"type": "tool"}}],
         "edges": [],
     }
 

@@ -25,7 +25,7 @@ Return only JSON. Return the full revised WorkflowPlan, not a patch.
 Supported node types are only:
 start, llm, code, if-else, end, http-request, template-transform,
 question-classifier, parameter-extractor, variable-aggregator,
-document-extractor, assigner, list-operator.
+document-extractor, assigner, list-operator, knowledge-retrieval.
 Prefer the smallest safe change that satisfies the request.
 Preserve existing node ids when a node keeps the same purpose.
 Use if-else for explicit string or numeric conditions.
@@ -34,6 +34,8 @@ Use parameter-extractor for structured field extraction; default reasoning_mode 
 Use variable-aggregator for fallback/merge of multiple upstream variables.
 Use document-extractor only for file/document/attachment text extraction.
 Use list-operator only for filtering/sorting/limiting arrays.
+Use knowledge-retrieval only for explicit knowledge base, document library, RAG, retrieval, or stored-material Q&A requests.
+Do not invent dataset_ids. Keep existing dataset_ids, or omit them so chat2dify can inject DIFY_DEFAULT_DATASET_IDS for newly added knowledge nodes.
 Keep existing assigner nodes when present, but do not add assigner unless the request explicitly asks to update an existing variable and the target variable is unambiguous.
 Every node must keep or receive a business-specific title. Do not use generic
 titles like Start, LLM, End, Code, Node, 开始, 大模型, 结束.
@@ -89,7 +91,11 @@ class WorkflowEditPlanner:
                 payload = json.loads(_strip_json_fences(content))
                 raw_plan = _extract_plan_payload(payload)
                 final_raw_plan = raw_plan
-                normalized = normalize_plan_payload(raw_plan, app_name=current_plan.name)
+                normalized = normalize_plan_payload(
+                    raw_plan,
+                    app_name=current_plan.name,
+                    default_dataset_ids=self.settings.dify_default_dataset_ids,
+                )
                 plan = WorkflowPlan.model_validate(normalized.payload)
                 issues = _validate_compiled_plan(plan, settings=self.settings, dsl_version=dsl_version)
                 if has_errors(issues):

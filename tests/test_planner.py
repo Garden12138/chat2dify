@@ -6,20 +6,22 @@ from app.agent.planner import PlannerError, WorkflowPlanner, fallback_plan
 from app.config import Settings
 
 
-def _settings(openai_api_key: str | None = "token") -> Settings:
+def _settings(openai_api_key: str | None = "token", *, dataset_ids: str = "") -> Settings:
     env = {
         "DIFY_SOURCE_DIR": "../dify",
         "DIFY_DEFAULT_MODEL_PROVIDER": "openai",
         "DIFY_DEFAULT_MODEL_NAME": "gpt-4o-mini",
     }
+    if dataset_ids:
+        env["DIFY_DEFAULT_DATASET_IDS"] = dataset_ids
     if openai_api_key:
         env["OPENAI_API_KEY"] = openai_api_key
     return Settings.from_env(env, validate_dify=False)
 
 
 class FakePlanner(WorkflowPlanner):
-    def __init__(self, responses: list[str]) -> None:
-        super().__init__(_settings())
+    def __init__(self, responses: list[str], *, settings: Settings | None = None) -> None:
+        super().__init__(settings or _settings())
         self.responses = responses
         self.last_errors: list[str] = []
 
@@ -95,6 +97,20 @@ def test_planner_accepts_stable_builtin_nodes() -> None:
     list_node = next(node for node in result.plan.nodes if node.id == "list")
     assert doc.params["variable_selector"] == ["start", "files"]
     assert list_node.params["limit"]["size"] == 1
+
+
+def test_planner_accepts_knowledge_retrieval_node_with_default_dataset_ids() -> None:
+    planner = FakePlanner(
+        [json.dumps(_knowledge_plan())],
+        settings=_settings(dataset_ids="dataset-a,dataset-b"),
+    )
+
+    result = planner.generate("根据知识库回答修车售后政策", app_name="售后知识库问答", dsl_version="9.9.9")
+
+    knowledge = next(node for node in result.plan.nodes if node.id == "knowledge")
+    assert knowledge.type == "knowledge-retrieval"
+    assert knowledge.params["dataset_ids"] == ["dataset-a", "dataset-b"]
+    assert knowledge.params["multiple_retrieval_config"]["top_k"] == 4
 
 
 def test_planner_self_repairs_after_validation_failure() -> None:
@@ -246,6 +262,36 @@ def _stable_builtin_plan() -> dict:
             {"source": "doc", "target": "aggregate"},
             {"source": "aggregate", "target": "list"},
             {"source": "list", "target": "llm"},
+            {"source": "llm", "target": "end"},
+        ],
+    }
+
+
+def _knowledge_plan() -> dict:
+    return {
+        "nodes": [
+            {"id": "start", "type": "start", "title": "接收售后问题", "params": {"variables": [{"name": "query"}]}},
+            {
+                "id": "knowledge",
+                "type": "knowledge_retrieval",
+                "title": "检索售后政策知识库",
+                "params": {
+                    "query_variable_selector": ["start", "query"],
+                    "retrieval_mode": "multiple",
+                    "multiple_retrieval_config": {"top_k": 4, "reranking_enable": False},
+                },
+            },
+            {
+                "id": "llm",
+                "type": "llm",
+                "title": "生成知识库回复",
+                "params": {"user_prompt": "资料：{{#knowledge.result#}}\n问题：{{#start.query#}}"},
+            },
+            {"id": "end", "type": "end", "title": "返回回复", "params": {"outputs": [{"variable": "answer", "value_selector": ["llm", "text"]}]}},
+        ],
+        "edges": [
+            {"source": "start", "target": "knowledge"},
+            {"source": "knowledge", "target": "llm"},
             {"source": "llm", "target": "end"},
         ],
     }

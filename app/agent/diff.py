@@ -131,6 +131,15 @@ def _param_change_type(node_type: str, field: str) -> str:
         return "assigner_changed"
     if node_type == "list-operator" and field in {"variable", "filter_by", "extract_by", "order_by", "limit"}:
         return "list_operator_changed"
+    if node_type == "knowledge-retrieval" and field in {
+        "query_variable_selector",
+        "query_attachment_selector",
+        "dataset_ids",
+        "retrieval_mode",
+        "multiple_retrieval_config",
+        "metadata_filtering_mode",
+    }:
+        return "knowledge_retrieval_changed"
     return "node_params_updated"
 
 
@@ -159,6 +168,8 @@ def _param_change_message(node: PlanNode, field: str) -> str:
             return f"更新变量赋值节点 {title} 的 {field}。"
         case "list_operator_changed":
             return f"更新列表处理节点 {title} 的 {field}。"
+        case "knowledge_retrieval_changed":
+            return f"更新知识库检索节点 {title} 的 {field}。"
     return f"更新 {node.type} 节点 {title} 的 {field}。"
 
 

@@ -577,6 +577,16 @@ function nodeDetails(node) {
       nodeLine("Limit", params.limit && params.limit.enabled ? String(params.limit.size || 10) : "disabled"),
     ];
   }
+  if (node.type === "knowledge-retrieval") {
+    const datasetIds = Array.isArray(params.dataset_ids) ? params.dataset_ids : [];
+    const retrievalConfig = params.multiple_retrieval_config || {};
+    return [
+      nodeLine("Input", selectorLabel(params.query_variable_selector)),
+      nodeLine("Datasets", String(datasetIds.length)),
+      nodeLine("Mode", params.retrieval_mode || "multiple"),
+      nodeLine("Top K", String(retrievalConfig.top_k || 4)),
+    ];
+  }
   if (node.type === "code") {
     return [promptPreview("Code", params.code)];
   }

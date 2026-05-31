@@ -40,6 +40,10 @@ GENERIC_TITLES = {
     "docextractor",
     "listoperator",
     "listfilter",
+    "knowledgeretrieval",
+    "knowledge",
+    "retrieval",
+    "rag",
     "开始",
     "开始节点",
     "输入",
@@ -63,6 +67,9 @@ GENERIC_TITLES = {
     "文档提取",
     "列表处理",
     "列表过滤",
+    "知识库检索",
+    "知识检索",
+    "检索",
 }
 
 NODE_TYPE_ALIASES = {
@@ -95,6 +102,12 @@ NODE_TYPE_ALIASES = {
     "listfilter": "list-operator",
     "list_operator": "list-operator",
     "listoperator": "list-operator",
+    "knowledge-retrieval": "knowledge-retrieval",
+    "knowledge_retrieval": "knowledge-retrieval",
+    "knowledgeretrieval": "knowledge-retrieval",
+    "knowledge": "knowledge-retrieval",
+    "retrieval": "knowledge-retrieval",
+    "rag": "knowledge-retrieval",
 }
 
 
@@ -105,7 +118,12 @@ class NormalizationResult:
     changes: list[str] = field(default_factory=list)
 
 
-def normalize_plan_payload(payload: dict[str, Any], *, app_name: str | None = None) -> NormalizationResult:
+def normalize_plan_payload(
+    payload: dict[str, Any],
+    *,
+    app_name: str | None = None,
+    default_dataset_ids: list[str] | None = None,
+) -> NormalizationResult:
     data = deepcopy(payload)
     changes: list[str] = []
     if not isinstance(data, dict):
@@ -168,6 +186,8 @@ def normalize_plan_payload(payload: dict[str, Any], *, app_name: str | None = No
                 node["params"] = _normalize_assigner_params(params)
             case "list-operator":
                 node["params"] = _normalize_list_operator_params(params)
+            case "knowledge-retrieval":
+                node["params"] = _normalize_knowledge_retrieval_params(params, default_dataset_ids or [])
         if before != node.get("params"):
             changes.append(f"normalized {node.get('id', '<unknown>')} params")
 
@@ -528,6 +548,46 @@ def _normalize_list_operator_params(params: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _normalize_knowledge_retrieval_params(params: dict[str, Any], default_dataset_ids: list[str]) -> dict[str, Any]:
+    result = dict(params)
+    raw_query_selector = (
+        result.get("query_variable_selector")
+        or result.get("query")
+        or result.get("variable_selector")
+        or result.get("input_selector")
+        or ["start", "query"]
+    )
+    result["query_variable_selector"] = _normalize_selector(raw_query_selector)
+    attachment_selector = result.get("query_attachment_selector") or result.get("attachment_selector") or []
+    result["query_attachment_selector"] = _normalize_optional_selector(attachment_selector)
+    dataset_ids = _normalize_dataset_ids(result.get("dataset_ids") or result.get("datasets"))
+    if not dataset_ids:
+        dataset_ids = list(default_dataset_ids)
+    result["dataset_ids"] = dataset_ids
+    result["retrieval_mode"] = _retrieval_mode(str(result.get("retrieval_mode") or result.get("mode") or "multiple"))
+    result["multiple_retrieval_config"] = _normalize_multiple_retrieval_config(
+        result.get("multiple_retrieval_config") or result.get("retrieval_config")
+    )
+    if result["retrieval_mode"] == "single":
+        single = result.get("single_retrieval_config") if isinstance(result.get("single_retrieval_config"), dict) else {}
+        if single:
+            result["single_retrieval_config"] = single
+    else:
+        result.pop("single_retrieval_config", None)
+    result["metadata_filtering_mode"] = str(result.get("metadata_filtering_mode") or "disabled")
+    if result["metadata_filtering_mode"] not in {"disabled", "automatic", "manual"}:
+        result["metadata_filtering_mode"] = "disabled"
+    result["vision"] = _normalize_vision(result.get("vision"))
+    result.pop("query", None)
+    result.pop("variable_selector", None)
+    result.pop("input_selector", None)
+    result.pop("attachment_selector", None)
+    result.pop("datasets", None)
+    result.pop("mode", None)
+    result.pop("retrieval_config", None)
+    return result
+
+
 def _normalize_classifier_classes(value: Any) -> list[dict[str, str]]:
     classes: list[dict[str, str]] = []
     if isinstance(value, dict):
@@ -625,6 +685,13 @@ def _normalize_selector(value: Any) -> list[str]:
     return ["start", "query"]
 
 
+def _normalize_optional_selector(value: Any) -> list[str]:
+    if value in (None, "", [], {}):
+        return []
+    selector = _normalize_selector(value)
+    return selector if len(selector) >= 2 else []
+
+
 def _normalize_selector_list(value: Any) -> list[list[str]]:
     selectors: list[list[str]] = []
     if isinstance(value, dict):
@@ -638,6 +705,52 @@ def _normalize_selector_list(value: Any) -> list[list[str]]:
         if len(selector) >= 2:
             selectors.append(selector)
     return selectors
+
+
+def _normalize_dataset_ids(value: Any) -> list[str]:
+    if isinstance(value, str):
+        raw_items = value.split(",")
+    elif isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = []
+    dataset_ids = []
+    for item in raw_items:
+        if isinstance(item, dict):
+            item = item.get("id") or item.get("dataset_id")
+        text = str(item or "").strip()
+        if text:
+            dataset_ids.append(text)
+    return dataset_ids
+
+
+def _retrieval_mode(value: str) -> str:
+    normalized = str(value or "").strip().lower().replace("_", "-")
+    if normalized in {"single", "one-way", "oneway"}:
+        return "single"
+    return "multiple"
+
+
+def _normalize_multiple_retrieval_config(value: Any) -> dict[str, Any]:
+    config = value if isinstance(value, dict) else {}
+    try:
+        top_k = int(config.get("top_k", 4))
+    except (TypeError, ValueError):
+        top_k = 4
+    score_threshold = config.get("score_threshold")
+    if score_threshold in ("", "none", "None"):
+        score_threshold = None
+    result = {
+        "top_k": max(1, top_k),
+        "score_threshold": score_threshold,
+        "reranking_enable": bool(config.get("reranking_enable", False)),
+        "reranking_mode": str(config.get("reranking_mode") or "reranking_model"),
+    }
+    if isinstance(config.get("reranking_model"), dict):
+        result["reranking_model"] = deepcopy(config["reranking_model"])
+    if isinstance(config.get("weights"), dict):
+        result["weights"] = deepcopy(config["weights"])
+    return result
 
 
 def _looks_like_selector(value: Any) -> bool:
@@ -983,6 +1096,8 @@ def _semantic_title(
             return f"更新{subject}变量"
         case "list-operator":
             return f"筛选{subject}列表"
+        case "knowledge-retrieval":
+            return f"检索{subject}知识库"
         case "end":
             upstream = _first_upstream(node, node_by_id, edges)
             if upstream and upstream.get("type") == "llm":

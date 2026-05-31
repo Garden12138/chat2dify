@@ -16,6 +16,15 @@ def _compiler() -> DifyDslCompiler:
     )
 
 
+def _compiler_with_datasets() -> DifyDslCompiler:
+    return DifyDslCompiler(
+        dsl_version="9.9.9",
+        default_model_provider="openai",
+        default_model_name="gpt-4o-mini",
+        default_dataset_ids=["dataset-a", "dataset-b"],
+    )
+
+
 def test_compiler_outputs_dify_workflow_dsl() -> None:
     plan = fallback_plan("Summarize the input", app_name="Summary")
     dsl = _compiler().compile(plan)
@@ -928,6 +937,77 @@ def test_validator_rejects_invalid_stable_builtin_nodes() -> None:
 
     assert any(issue.code == "PLAN_LIST_OPERATOR_VAR_TYPE_INVALID" for issue in issues)
     assert any(issue.code == "PLAN_ASSIGNER_TARGET_INVALID" for issue in issues)
+
+
+def test_normalizer_compiler_and_validator_cover_knowledge_retrieval_node() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "name": "知识库问答",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "knowledge",
+                    "type": "rag",
+                    "params": {
+                        "query": "{{start.query}}",
+                        "retrieval_config": {"top_k": 3},
+                    },
+                },
+                {
+                    "id": "llm",
+                    "type": "llm",
+                    "params": {"prompt": "根据资料回答：{{knowledge.result}}\n用户问题：{{start.query}}"},
+                },
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["llm", "text"]}]}},
+            ],
+            "edges": [
+                {"source": "start", "target": "knowledge"},
+                {"source": "knowledge", "target": "llm"},
+                {"source": "llm", "target": "end"},
+            ],
+        },
+        default_dataset_ids=["dataset-a", "dataset-b"],
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    dsl = _compiler_with_datasets().compile(plan)
+    data = yaml.safe_load(dsl)
+    knowledge = next(node["data"] for node in data["workflow"]["graph"]["nodes"] if node["id"] == "knowledge")
+
+    assert next(node for node in plan.nodes if node.id == "knowledge").type == "knowledge-retrieval"
+    assert knowledge["type"] == "knowledge-retrieval"
+    assert knowledge["dataset_ids"] == ["dataset-a", "dataset-b"]
+    assert knowledge["query_variable_selector"] == ["start", "query"]
+    assert knowledge["retrieval_mode"] == "multiple"
+    assert knowledge["multiple_retrieval_config"]["top_k"] == 3
+    assert validate_plan(plan) == []
+    assert validate_dsl(dsl, expected_dsl_version="9.9.9") == []
+
+
+def test_validator_rejects_invalid_knowledge_retrieval_node() -> None:
+    plan = WorkflowPlan.model_validate(
+        {
+            "name": "bad knowledge",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "knowledge",
+                    "type": "knowledge-retrieval",
+                    "params": {"dataset_ids": [], "retrieval_mode": "hybrid"},
+                },
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["start", "query"]}]}},
+            ],
+            "edges": [
+                {"source": "start", "target": "knowledge"},
+                {"source": "knowledge", "target": "end"},
+            ],
+        }
+    )
+
+    issues = validate_plan(plan)
+
+    assert any(issue.code == "PLAN_KNOWLEDGE_RETRIEVAL_DATASETS_MISSING" for issue in issues)
+    assert any(issue.code == "PLAN_KNOWLEDGE_RETRIEVAL_QUERY_MISSING" for issue in issues)
+    assert any(issue.code == "PLAN_KNOWLEDGE_RETRIEVAL_MODE_INVALID" for issue in issues)
 
 
 def test_validator_rejects_start_incoming_and_end_outgoing() -> None:

@@ -50,6 +50,9 @@ def explain_plan(plan: WorkflowPlan) -> dict[str, list[str] | str]:
             steps.append(f"{node.id} 更新已有变量值")
         elif node.type == "list-operator":
             steps.append(f"{node.id} 对数组变量进行筛选、排序或截取")
+        elif node.type == "knowledge-retrieval":
+            datasets = node.params.get("dataset_ids", [])
+            steps.append(f"{node.id} 从知识库检索相关资料：{len(datasets) if isinstance(datasets, list) else 0} 个数据集")
         elif node.type in {"code", "http-request", "template-transform"}:
             steps.append(f"{node.id} 执行 {node.type} 节点")
 

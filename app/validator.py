@@ -23,6 +23,7 @@ SUPPORTED_NODE_TYPES = {
     "document-extractor",
     "assigner",
     "list-operator",
+    "knowledge-retrieval",
 }
 TEMPLATE_REF_RE = re.compile(r"\{\{#([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)#\}\}")
 BARE_TEMPLATE_REF_RE = re.compile(r"\{\{\s*(?!#)([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)\s*\}\}")
@@ -58,6 +59,10 @@ GENERIC_TITLES = {
     "docextractor",
     "listoperator",
     "listfilter",
+    "knowledgeretrieval",
+    "knowledge",
+    "retrieval",
+    "rag",
     "开始",
     "开始节点",
     "输入",
@@ -81,6 +86,9 @@ GENERIC_TITLES = {
     "文档提取",
     "列表处理",
     "列表过滤",
+    "知识库检索",
+    "知识检索",
+    "检索",
 }
 
 PARAMETER_EXTRACTOR_TYPES = {
@@ -118,7 +126,7 @@ def validate_plan(plan: WorkflowPlan) -> list[ValidationIssue]:
                     message=f"Unsupported node type: {node.type}",
                     node_id=node.id,
                     path=f"nodes.{node.id}.type",
-                    suggestion="仅使用当前支持的 start、llm、code、if-else、end、http-request、template-transform、question-classifier、parameter-extractor、variable-aggregator、document-extractor、assigner、list-operator 节点。",
+                    suggestion="仅使用当前支持的 start、llm、code、if-else、end、http-request、template-transform、question-classifier、parameter-extractor、variable-aggregator、document-extractor、assigner、list-operator、knowledge-retrieval 节点。",
                 )
             )
     issues.extend(_validate_graph_semantics(plan))
@@ -580,6 +588,37 @@ def _validate_node_params(plan: WorkflowPlan) -> list[ValidationIssue]:
                                     f"params.filter_by.conditions.{idx}",
                                 )
                             )
+            case "knowledge-retrieval":
+                dataset_ids = params.get("dataset_ids")
+                if not isinstance(dataset_ids, list) or not [item for item in dataset_ids if str(item).strip()]:
+                    issues.append(
+                        _node_issue(
+                            "PLAN_KNOWLEDGE_RETRIEVAL_DATASETS_MISSING",
+                            "knowledge-retrieval node requires dataset_ids.",
+                            node.id,
+                            "params.dataset_ids",
+                        )
+                    )
+                query_selector = params.get("query_variable_selector")
+                attachment_selector = params.get("query_attachment_selector")
+                if not _is_selector(query_selector) and not _is_selector(attachment_selector):
+                    issues.append(
+                        _node_issue(
+                            "PLAN_KNOWLEDGE_RETRIEVAL_QUERY_MISSING",
+                            "knowledge-retrieval node requires query_variable_selector or query_attachment_selector.",
+                            node.id,
+                            "params.query_variable_selector",
+                        )
+                    )
+                if str(params.get("retrieval_mode", "multiple")) not in {"multiple", "single"}:
+                    issues.append(
+                        _node_issue(
+                            "PLAN_KNOWLEDGE_RETRIEVAL_MODE_INVALID",
+                            "knowledge-retrieval retrieval_mode must be multiple or single.",
+                            node.id,
+                            "params.retrieval_mode",
+                        )
+                    )
     return issues
 
 
@@ -696,6 +735,8 @@ def _known_outputs(plan: WorkflowPlan) -> dict[str, set[str]]:
                 outputs[node.id] = {"text"}
             case "list-operator":
                 outputs[node.id] = {"result", "first_record", "last_record"}
+            case "knowledge-retrieval":
+                outputs[node.id] = {"result"}
             case "assigner":
                 outputs[node.id] = set()
             case "end" | "if-else":
@@ -707,7 +748,18 @@ def _selectors_in_value(value: Any) -> list[list[str]]:
     selectors: list[list[str]] = []
     if isinstance(value, dict):
         for key, child in value.items():
-            if key in {"value_selector", "variable_selector", "query", "query_variable_selector", "variable"} and _is_selector(child):
+            if (
+                key
+                in {
+                    "value_selector",
+                    "variable_selector",
+                    "query",
+                    "query_variable_selector",
+                    "query_attachment_selector",
+                    "variable",
+                }
+                and _is_selector(child)
+            ):
                 selectors.append([str(item) for item in child])
             elif key == "variables" and isinstance(child, list):
                 for item in child:

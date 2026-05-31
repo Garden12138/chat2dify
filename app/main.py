@@ -81,6 +81,7 @@ def draft_workflow(request: WorkflowRequest) -> dict:
         dsl_version=version_info.app_dsl_version,
         default_model_provider=settings.dify_default_model_provider,
         default_model_name=settings.dify_default_model_name,
+        default_dataset_ids=settings.dify_default_dataset_ids,
     )
     dsl = compiler.compile(plan)
     issues = [*validate_plan(plan), *validate_dsl(dsl, expected_dsl_version=version_info.app_dsl_version)]
@@ -199,6 +200,7 @@ def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:
         dsl_version=version_info.app_dsl_version,
         default_model_provider=settings.dify_default_model_provider,
         default_model_name=settings.dify_default_model_name,
+        default_dataset_ids=settings.dify_default_dataset_ids,
     )
 
     try:

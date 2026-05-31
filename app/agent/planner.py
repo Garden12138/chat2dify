@@ -18,7 +18,7 @@ SYSTEM_PROMPT = """You turn a user's workflow request into a compact JSON Workfl
 Return only JSON. Supported node types are:
 start, llm, code, if-else, end, http-request, template-transform,
 question-classifier, parameter-extractor, variable-aggregator,
-document-extractor, list-operator.
+document-extractor, list-operator, knowledge-retrieval.
 Use exactly one start node and at least one end node. Keep nodes connected.
 For simple requests, use start -> llm -> end.
 Use if-else for explicit string or numeric conditions.
@@ -34,6 +34,10 @@ Use document-extractor only when the request explicitly involves uploaded files/
 {"variable_selector":["start","files"],"is_array_file":false}. Add a start file or file-list variable named files.
 Use list-operator only when the request explicitly involves filtering/sorting/limiting an array. Its params must include:
 {"variable":["start","items"],"var_type":"array[string]","item_var_type":"string","filter_by":{"enabled":false,"conditions":[]},"extract_by":{"enabled":false,"serial":"1"},"order_by":{"enabled":false,"key":"","value":"asc"},"limit":{"enabled":false,"size":10}}.
+Use knowledge-retrieval only when the request explicitly asks for knowledge base, document library, RAG, retrieval, or answering from stored materials. Its params must include:
+{"query_variable_selector":["start","query"],"retrieval_mode":"multiple","multiple_retrieval_config":{"top_k":4,"score_threshold":null,"reranking_enable":false},"metadata_filtering_mode":"disabled"}.
+Do not invent dataset_ids. If dataset_ids are not known, omit them and let chat2dify inject DIFY_DEFAULT_DATASET_IDS.
+After knowledge-retrieval, pass {{#knowledge.result#}} or the actual knowledge node id result into an llm node, then end.
 Do not generate assigner in new workflows; it is reserved for editing existing Dify drafts with explicit variable assignment context.
 Every node must have a business-specific title. Do not use generic titles like
 Start, LLM, End, Code, Node, 开始, 大模型, 结束. Good Chinese examples:
@@ -108,7 +112,11 @@ class WorkflowPlanner:
                 payload = json.loads(_strip_json_fences(content))
                 raw_plan = _extract_plan_payload(payload)
                 final_raw_plan = raw_plan
-                normalized = normalize_plan_payload(raw_plan, app_name=app_name)
+                normalized = normalize_plan_payload(
+                    raw_plan,
+                    app_name=app_name,
+                    default_dataset_ids=self.settings.dify_default_dataset_ids,
+                )
                 plan = WorkflowPlan.model_validate(normalized.payload)
                 issues = _validate_compiled_plan(plan, settings=self.settings, dsl_version=dsl_version)
                 if has_errors(issues):
@@ -220,6 +228,7 @@ def _validate_compiled_plan(plan: WorkflowPlan, *, settings: Settings, dsl_versi
         dsl_version=dsl_version,
         default_model_provider=settings.dify_default_model_provider,
         default_model_name=settings.dify_default_model_name,
+        default_dataset_ids=settings.dify_default_dataset_ids,
     )
     dsl = compiler.compile(plan)
     return [
