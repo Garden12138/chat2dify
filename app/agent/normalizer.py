@@ -5,6 +5,8 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.input_variables import file_upload_settings, is_file_input_type
+
 
 SOURCE_HANDLE = "source"
 FALSE_HANDLE = "false"
@@ -256,14 +258,20 @@ def _normalize_start_params(params: dict[str, Any]) -> dict[str, Any]:
         name = item.get("name") or item.get("variable")
         if not name:
             continue
-        variables.append(
-            {
-                "name": str(name),
-                "type": _input_type(str(item.get("type", "paragraph"))),
-                "required": bool(item.get("required", True)),
-                "label": item.get("label") or str(name),
-            }
-        )
+        input_type = _input_type(str(item.get("type", "paragraph")))
+        variable = {
+            "name": str(name),
+            "type": input_type,
+            "required": bool(item.get("required", True)),
+            "label": item.get("label") or str(name),
+        }
+        if item.get("max_length") is not None:
+            variable["max_length"] = item.get("max_length")
+        if isinstance(item.get("options"), list):
+            variable["options"] = deepcopy(item.get("options"))
+        if is_file_input_type(input_type):
+            variable.update(file_upload_settings(item, input_type=input_type))
+        variables.append(variable)
     if not variables:
         variables.append({"name": "query", "type": "paragraph", "required": True, "label": "Query"})
     return {"variables": variables}

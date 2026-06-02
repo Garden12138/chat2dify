@@ -874,9 +874,15 @@ def test_compiler_and_validator_cover_stable_builtin_nodes() -> None:
     dsl = _compiler().compile(plan)
     data = yaml.safe_load(dsl)
     nodes = {node["id"]: node["data"] for node in data["workflow"]["graph"]["nodes"]}
+    files_input = next(item for item in nodes["start"]["variables"] if item["variable"] == "files")
 
     assert nodes["doc"]["type"] == "document-extractor"
     assert nodes["doc"]["variable_selector"] == ["start", "files"]
+    assert files_input["type"] == "file-list"
+    assert files_input["allowed_file_upload_methods"] == ["local_file", "remote_url"]
+    assert files_input["allowed_file_types"] == ["document", "image"]
+    assert files_input["allowed_file_extensions"] == []
+    assert files_input["max_length"] == 5
     assert nodes["aggregator"]["variables"] == [["doc", "text"], ["start", "query"]]
     assert nodes["assign"]["items"][0]["value"] == ["aggregator", "output"]
     assert nodes["list"]["filter_by"]["conditions"][0]["value"] == "投诉"
@@ -907,10 +913,15 @@ def test_normalizer_repairs_stable_builtin_node_aliases() -> None:
     )
     plan = WorkflowPlan.model_validate(normalized.payload)
     node_types = {node.id: node.type for node in plan.nodes}
+    start = next(node for node in plan.nodes if node.id == "start")
+    files_input = next(item for item in start.params["variables"] if item["name"] == "files")
 
     assert node_types["doc"] == "document-extractor"
     assert node_types["agg"] == "variable-aggregator"
     assert node_types["list"] == "list-operator"
+    assert files_input["allowed_file_upload_methods"] == ["local_file", "remote_url"]
+    assert files_input["allowed_file_types"] == ["document", "image"]
+    assert files_input["allowed_file_extensions"] == []
     assert next(node for node in plan.nodes if node.id == "doc").params["variable_selector"] == ["start", "files"]
     assert validate_plan(plan) == []
 

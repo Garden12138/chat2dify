@@ -8,6 +8,7 @@ import yaml
 
 from app.agent.normalizer import normalize_plan_payload
 from app.compiler.dify import DifyDslCompiler
+from app.input_variables import file_upload_settings, is_file_input_type
 from app.models import WorkflowPlan
 
 
@@ -229,12 +230,20 @@ def _params_from_dify_node_data(node_type: str, data: dict[str, Any]) -> dict[st
 
 
 def _start_variable(item: dict[str, Any]) -> dict[str, Any]:
-    return {
+    input_type = item.get("type", "paragraph")
+    variable = {
         "name": item.get("name") or item.get("variable"),
-        "type": item.get("type", "paragraph"),
+        "type": input_type,
         "required": bool(item.get("required", True)),
         "label": item.get("label") or item.get("variable") or item.get("name"),
     }
+    if item.get("max_length") is not None:
+        variable["max_length"] = item.get("max_length")
+    if isinstance(item.get("options"), list):
+        variable["options"] = deepcopy(item.get("options"))
+    if is_file_input_type(str(input_type)):
+        variable.update(file_upload_settings(item, input_type=str(input_type)))
+    return variable
 
 
 def _prompt_texts(prompt_template: Any) -> tuple[str, str]:

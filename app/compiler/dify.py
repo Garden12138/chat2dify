@@ -9,6 +9,7 @@ import yaml
 
 from app.models import PlanNode, WorkflowPlan
 from app.agent.normalizer import normalize_template_refs
+from app.input_variables import file_upload_settings, is_file_input_type
 
 
 CUSTOM_NODE_TYPE = "custom"
@@ -139,15 +140,19 @@ class DifyDslCompiler:
             name = item.get("name") or item.get("variable")
             if not name:
                 continue
+            input_type = _input_type(item.get("type", "paragraph"))
+            variable = {
+                "variable": name,
+                "label": item.get("label") or name,
+                "type": input_type,
+                "required": bool(item.get("required", True)),
+                "max_length": item.get("max_length", 1000),
+                "options": item.get("options", []),
+            }
+            if is_file_input_type(input_type):
+                variable.update(file_upload_settings(item, input_type=input_type))
             variables.append(
-                {
-                    "variable": name,
-                    "label": item.get("label") or name,
-                    "type": _input_type(item.get("type", "paragraph")),
-                    "required": bool(item.get("required", True)),
-                    "max_length": item.get("max_length", 1000),
-                    "options": item.get("options", []),
-                }
+                variable
             )
         if not variables:
             variables.append(

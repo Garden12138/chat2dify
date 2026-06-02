@@ -87,10 +87,19 @@ def test_decompile_dify_graph_covers_stable_builtin_nodes() -> None:
         }
     )
     graph = yaml.safe_load(_compiler().compile(plan))["workflow"]["graph"]
+    start_node = next(node for node in graph["nodes"] if node["id"] == "start")
+    files_input = next(item for item in start_node["data"]["variables"] if item["variable"] == "files")
+    for key in ("allowed_file_upload_methods", "allowed_file_types", "allowed_file_extensions", "max_length"):
+        files_input.pop(key, None)
 
     decompiled = decompile_dify_graph(graph, name="Loaded")
     nodes = {node.id: node for node in decompiled.nodes}
+    start_input = next(item for item in nodes["start"].params["variables"] if item["name"] == "files")
 
+    assert start_input["allowed_file_upload_methods"] == ["local_file", "remote_url"]
+    assert start_input["allowed_file_types"] == ["document", "image"]
+    assert start_input["allowed_file_extensions"] == []
+    assert start_input["max_length"] == 5
     assert nodes["doc"].params["variable_selector"] == ["start", "files"]
     assert nodes["agg"].params["variables"] == [["doc", "text"], ["start", "query"]]
     assert nodes["assign"].params["items"][0]["value"] == ["agg", "output"]
