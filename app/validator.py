@@ -25,6 +25,7 @@ SUPPORTED_NODE_TYPES = {
     "assigner",
     "list-operator",
     "knowledge-retrieval",
+    "human-input",
 }
 TEMPLATE_REF_RE = re.compile(r"\{\{#([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)#\}\}")
 BARE_TEMPLATE_REF_RE = re.compile(r"\{\{\s*(?!#)([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)\s*\}\}")
@@ -64,6 +65,10 @@ GENERIC_TITLES = {
     "knowledge",
     "retrieval",
     "rag",
+    "humaninput",
+    "human",
+    "manualinput",
+    "approval",
     "开始",
     "开始节点",
     "输入",
@@ -90,6 +95,10 @@ GENERIC_TITLES = {
     "知识库检索",
     "知识检索",
     "检索",
+    "人工介入",
+    "人工输入",
+    "人工审核",
+    "人工审批",
 }
 
 PARAMETER_EXTRACTOR_TYPES = {
@@ -127,7 +136,7 @@ def validate_plan(plan: WorkflowPlan) -> list[ValidationIssue]:
                     message=f"Unsupported node type: {node.type}",
                     node_id=node.id,
                     path=f"nodes.{node.id}.type",
-                    suggestion="仅使用当前支持的 start、llm、code、if-else、end、http-request、template-transform、question-classifier、parameter-extractor、variable-aggregator、document-extractor、assigner、list-operator、knowledge-retrieval 节点。",
+                    suggestion="仅使用当前支持的 start、llm、code、if-else、end、http-request、template-transform、question-classifier、parameter-extractor、variable-aggregator、document-extractor、assigner、list-operator、knowledge-retrieval、human-input 节点。",
                 )
             )
     issues.extend(_validate_graph_semantics(plan))
@@ -338,6 +347,48 @@ def _validate_graph_semantics(plan: WorkflowPlan) -> list[ValidationIssue]:
                         node_id=node.id,
                         path=f"edges.{edge.source}.{edge.target}.source_handle",
                         suggestion="source_handle 必须匹配 classes[].id。",
+                    )
+                )
+    for node in plan.nodes:
+        if node.type != "human-input":
+            continue
+        source_edges = [edge for edge in plan.edges if edge.source == node.id]
+        handles = [edge.source_handle for edge in source_edges]
+        duplicate_handles = sorted({handle for handle in handles if handles.count(handle) > 1})
+        for handle in duplicate_handles:
+            issues.append(
+                ValidationIssue(
+                    code="PLAN_HUMAN_INPUT_DUPLICATE_BRANCH",
+                    message=f"human-input action branch handle is duplicated: {handle}",
+                    node_id=node.id,
+                    path=f"edges.{node.id}.{handle}",
+                    suggestion="每个人工动作分支只保留一条出边。",
+                )
+            )
+
+        actions = [item for item in node.params.get("user_actions", []) if isinstance(item, dict)]
+        action_ids = [str(item.get("id")) for item in actions if item.get("id")]
+        for action_id in action_ids:
+            if action_id not in handles:
+                issues.append(
+                    ValidationIssue(
+                        code="PLAN_HUMAN_INPUT_ACTION_EDGE_MISSING",
+                        message=f"human-input action has no outgoing edge: {action_id}",
+                        node_id=node.id,
+                        path=f"nodes.{node.id}.params.user_actions",
+                        suggestion=f"添加 source_handle 为 {action_id} 的出边。",
+                    )
+                )
+        valid_handles = set(action_ids)
+        for edge in source_edges:
+            if edge.source_handle not in valid_handles:
+                issues.append(
+                    ValidationIssue(
+                        code="PLAN_HUMAN_INPUT_BRANCH_INVALID",
+                        message=f"human-input edge uses invalid source_handle: {edge.source_handle}",
+                        node_id=node.id,
+                        path=f"edges.{edge.source}.{edge.target}.source_handle",
+                        suggestion="source_handle 必须匹配 user_actions[].id。",
                     )
                 )
     return issues
@@ -630,6 +681,91 @@ def _validate_node_params(plan: WorkflowPlan) -> list[ValidationIssue]:
                             "params.retrieval_mode",
                         )
                     )
+            case "human-input":
+                delivery_methods = params.get("delivery_methods")
+                if not isinstance(delivery_methods, list) or not delivery_methods:
+                    issues.append(
+                        _node_issue(
+                            "PLAN_HUMAN_INPUT_DELIVERY_METHODS_MISSING",
+                            "human-input node requires delivery_methods.",
+                            node.id,
+                            "params.delivery_methods",
+                        )
+                    )
+                elif not any(isinstance(item, dict) and item.get("enabled") for item in delivery_methods):
+                    issues.append(
+                        _node_issue(
+                            "PLAN_HUMAN_INPUT_DELIVERY_METHOD_ENABLED_MISSING",
+                            "human-input node requires at least one enabled delivery method.",
+                            node.id,
+                            "params.delivery_methods",
+                        )
+                    )
+                actions = params.get("user_actions")
+                if not isinstance(actions, list) or not actions:
+                    issues.append(
+                        _node_issue(
+                            "PLAN_HUMAN_INPUT_ACTIONS_MISSING",
+                            "human-input node requires user_actions.",
+                            node.id,
+                            "params.user_actions",
+                        )
+                    )
+                seen_action_ids: set[str] = set()
+                for idx, action in enumerate(actions or []):
+                    if not isinstance(action, dict) or not action.get("id") or not action.get("title"):
+                        issues.append(
+                            _node_issue(
+                                "PLAN_HUMAN_INPUT_ACTION_INVALID",
+                                "human-input action requires id and title.",
+                                node.id,
+                                f"params.user_actions.{idx}",
+                            )
+                        )
+                        continue
+                    action_id = str(action.get("id"))
+                    if action_id in seen_action_ids:
+                        issues.append(
+                            _node_issue(
+                                "PLAN_HUMAN_INPUT_ACTION_DUPLICATE",
+                                f"human-input action id is duplicated: {action_id}",
+                                node.id,
+                                f"params.user_actions.{idx}.id",
+                            )
+                        )
+                    seen_action_ids.add(action_id)
+                for idx, item in enumerate(params.get("inputs") or []):
+                    if not isinstance(item, dict) or not item.get("output_variable_name"):
+                        issues.append(
+                            _node_issue(
+                                "PLAN_HUMAN_INPUT_INPUT_INVALID",
+                                "human-input form input requires output_variable_name.",
+                                node.id,
+                                f"params.inputs.{idx}",
+                            )
+                        )
+                if str(params.get("timeout_unit", "day")) not in {"hour", "day"}:
+                    issues.append(
+                        _node_issue(
+                            "PLAN_HUMAN_INPUT_TIMEOUT_UNIT_INVALID",
+                            "human-input timeout_unit must be hour or day.",
+                            node.id,
+                            "params.timeout_unit",
+                        )
+                    )
+                try:
+                    timeout = int(params.get("timeout", 0))
+                except (TypeError, ValueError):
+                    timeout = 0
+                if timeout < 1:
+                    issues.append(
+                        _node_issue(
+                            "PLAN_HUMAN_INPUT_TIMEOUT_INVALID",
+                            "human-input timeout must be a positive integer.",
+                            node.id,
+                            "params.timeout",
+                        )
+                    )
     return issues
 
 
@@ -755,6 +891,13 @@ def _known_outputs(plan: WorkflowPlan) -> dict[str, set[str]]:
                 outputs[node.id] = {"result", "first_record", "last_record"}
             case "knowledge-retrieval":
                 outputs[node.id] = {"result"}
+            case "human-input":
+                names = {
+                    str(item.get("output_variable_name"))
+                    for item in node.params.get("inputs", [])
+                    if isinstance(item, dict) and item.get("output_variable_name")
+                }
+                outputs[node.id] = {*names, "__action_id", "__action_value", "__rendered_content"}
             case "assigner":
                 outputs[node.id] = set()
             case "end" | "if-else":

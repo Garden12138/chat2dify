@@ -82,9 +82,11 @@ class DifyDatasetListItem:
     embedding_available: bool | None = None
     permission: str | None = None
     updated_at: int | float | str | None = None
+    retrieval_model_dict: dict[str, Any] | None = None
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "DifyDatasetListItem":
+        retrieval_model_dict = payload.get("retrieval_model_dict")
         return cls(
             id=str(payload.get("id", "")),
             name=str(payload.get("name", "")),
@@ -97,6 +99,7 @@ class DifyDatasetListItem:
             embedding_available=_bool_or_none(payload.get("embedding_available")),
             permission=_string_or_none(payload.get("permission")),
             updated_at=payload.get("updated_at"),
+            retrieval_model_dict=retrieval_model_dict if isinstance(retrieval_model_dict, dict) else None,
         )
 
 
@@ -283,15 +286,18 @@ class DifyClient:
         page: int = 1,
         limit: int = 50,
         include_all: bool = True,
+        ids: list[str] | None = None,
     ) -> DifyDatasetListResult:
         self._ensure_logged_in()
-        params: dict[str, Any] = {
-            "page": page,
-            "limit": limit,
-            "include_all": str(include_all).lower(),
-        }
+        params: list[tuple[str, Any]] = [
+            ("page", page),
+            ("limit", limit),
+            ("include_all", str(include_all).lower()),
+        ]
         if keyword:
-            params["keyword"] = keyword
+            params.append(("keyword", keyword))
+        for dataset_id in ids or []:
+            params.append(("ids", dataset_id))
         response = self._get_with_auth_retry("/datasets", params=params)
         self._raise_for_response(response)
         try:
@@ -301,6 +307,12 @@ class DifyClient:
         if not isinstance(payload, dict):
             raise DifyClientError("Dify datasets response must be a JSON object.")
         return DifyDatasetListResult.from_payload(payload)
+
+    def get_datasets_by_ids(self, dataset_ids: list[str]) -> DifyDatasetListResult:
+        ids = [str(item).strip() for item in dataset_ids if str(item).strip()]
+        if not ids:
+            return DifyDatasetListResult(data=[], has_more=False, page=1, limit=0, total=0)
+        return self.list_datasets(page=1, limit=max(len(ids), 50), include_all=True, ids=ids)
 
     def get_draft_workflow(self, app_id: str) -> DifyDraftWorkflow:
         self._ensure_logged_in()

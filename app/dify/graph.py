@@ -27,6 +27,7 @@ SUPPORTED_DIFY_NODE_TYPES = {
     "assigner",
     "list-operator",
     "knowledge-retrieval",
+    "human-input",
 }
 LAYOUT_KEYS = ("position", "positionAbsolute", "width", "height", "sourcePosition", "targetPosition")
 
@@ -225,6 +226,15 @@ def _params_from_dify_node_data(node_type: str, data: dict[str, Any]) -> dict[st
                 if data.get("metadata_model_config") is not None
                 else None,
                 "vision": deepcopy(data.get("vision") or {"enabled": False, "configs": {"variable_selector": []}}),
+            }
+        case "human-input":
+            return {
+                "delivery_methods": deepcopy(data.get("delivery_methods") or []),
+                "form_content": data.get("form_content", ""),
+                "inputs": deepcopy(data.get("inputs") or []),
+                "user_actions": deepcopy(data.get("user_actions") or []),
+                "timeout": data.get("timeout", 3),
+                "timeout_unit": data.get("timeout_unit", "day"),
             }
     return {}
 

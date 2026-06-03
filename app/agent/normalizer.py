@@ -47,6 +47,10 @@ GENERIC_TITLES = {
     "knowledge",
     "retrieval",
     "rag",
+    "humaninput",
+    "human",
+    "manualinput",
+    "approval",
     "开始",
     "开始节点",
     "输入",
@@ -73,6 +77,10 @@ GENERIC_TITLES = {
     "知识库检索",
     "知识检索",
     "检索",
+    "人工介入",
+    "人工输入",
+    "人工审核",
+    "人工审批",
 }
 
 NODE_TYPE_ALIASES = {
@@ -111,6 +119,15 @@ NODE_TYPE_ALIASES = {
     "knowledge": "knowledge-retrieval",
     "retrieval": "knowledge-retrieval",
     "rag": "knowledge-retrieval",
+    "human-input": "human-input",
+    "human_input": "human-input",
+    "humaninput": "human-input",
+    "human": "human-input",
+    "manual-input": "human-input",
+    "manual_input": "human-input",
+    "manualinput": "human-input",
+    "approval": "human-input",
+    "review": "human-input",
 }
 
 
@@ -196,6 +213,8 @@ def normalize_plan_payload(
                     node["params"] = list_params
             case "knowledge-retrieval":
                 node["params"] = _normalize_knowledge_retrieval_params(params, default_dataset_ids or [])
+            case "human-input":
+                node["params"] = _normalize_human_input_params(params)
         if before != node.get("params"):
             changes.append(f"normalized {node.get('id', '<unknown>')} params")
 
@@ -211,6 +230,7 @@ def normalize_plan_payload(
 
     edge_positions = _branch_edge_positions(edges, node_by_id, "if-else")
     classifier_edge_positions = _branch_edge_positions(edges, node_by_id, "question-classifier")
+    human_input_edge_positions = _branch_edge_positions(edges, node_by_id, "human-input")
     for edge in edges:
         if not isinstance(edge, dict):
             raise ValueError("plan.edges items must be objects")
@@ -236,6 +256,12 @@ def normalize_plan_payload(
                 changes.append(
                     f"normalized question-classifier edge handle for {edge.get('source')} -> {edge.get('target')}"
                 )
+        elif source and source.get("type") == "human-input":
+            old_handle = edge.get("source_handle")
+            new_handle = _infer_human_input_source_handle(source, edge, node_by_id, human_input_edge_positions)
+            if old_handle != new_handle:
+                edge["source_handle"] = new_handle
+                changes.append(f"normalized human-input edge handle for {edge.get('source')} -> {edge.get('target')}")
 
     return NormalizationResult(payload=data, changed=bool(changes), changes=changes)
 
@@ -602,6 +628,166 @@ def _normalize_knowledge_retrieval_params(params: dict[str, Any], default_datase
     return result
 
 
+def _normalize_human_input_params(params: dict[str, Any]) -> dict[str, Any]:
+    result = dict(params)
+    result["delivery_methods"] = _normalize_human_delivery_methods(
+        result.get("delivery_methods") or result.get("delivery") or result.get("methods") or []
+    )
+    result["form_content"] = normalize_template_refs(
+        str(
+            result.get("form_content")
+            or result.get("content")
+            or result.get("form")
+            or "请审核以下 workflow 中间结果，并选择处理动作。"
+        )
+    )
+    result["inputs"] = _normalize_human_form_inputs(result.get("inputs") or result.get("fields") or result.get("form_inputs") or [])
+    result["user_actions"] = _normalize_human_actions(
+        result.get("user_actions") or result.get("actions") or result.get("buttons") or []
+    )
+    result["timeout"] = _positive_int(result.get("timeout"), default=3)
+    result["timeout_unit"] = _timeout_unit(str(result.get("timeout_unit") or result.get("timeoutUnit") or "day"))
+    result.pop("delivery", None)
+    result.pop("methods", None)
+    result.pop("content", None)
+    result.pop("form", None)
+    result.pop("fields", None)
+    result.pop("form_inputs", None)
+    result.pop("actions", None)
+    result.pop("buttons", None)
+    result.pop("timeoutUnit", None)
+    return result
+
+
+def _normalize_human_delivery_methods(value: Any) -> list[dict[str, Any]]:
+    methods: list[dict[str, Any]] = []
+    if isinstance(value, str):
+        value = [{"type": value}]
+    for idx, item in enumerate(value or []):
+        if isinstance(item, str):
+            item = {"type": item}
+        if not isinstance(item, dict):
+            continue
+        method_type = str(item.get("type") or "webapp").strip().lower()
+        if method_type not in {"webapp", "email", "slack", "teams", "discord"}:
+            method_type = "webapp"
+        method = {
+            "id": str(item.get("id") or f"{method_type}-{idx + 1}"),
+            "type": method_type,
+            "enabled": bool(item.get("enabled", True)),
+        }
+        if isinstance(item.get("config"), dict):
+            method["config"] = deepcopy(item["config"])
+        elif method_type == "webapp":
+            method["config"] = {}
+        methods.append(method)
+    if not methods:
+        methods.append({"id": "webapp-1", "type": "webapp", "enabled": True, "config": {}})
+    if not any(method.get("enabled") for method in methods):
+        methods[0]["enabled"] = True
+    return methods
+
+
+def _normalize_human_form_inputs(value: Any) -> list[dict[str, Any]]:
+    inputs: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        value = [{"output_variable_name": key, **(item if isinstance(item, dict) else {"type": item})} for key, item in value.items()]
+    used_names: set[str] = set()
+    for idx, item in enumerate(value or []):
+        if isinstance(item, str):
+            item = {"output_variable_name": item, "type": "paragraph"}
+        if not isinstance(item, dict):
+            continue
+        raw_name = str(item.get("output_variable_name") or item.get("name") or item.get("variable") or f"input_{idx + 1}")
+        output_name = _unique_parameter_name(raw_name, used_names)
+        default = item.get("default") if isinstance(item.get("default"), dict) else {}
+        default_type = str(default.get("type") or item.get("default_type") or "constant")
+        if default_type not in {"constant", "variable"}:
+            default_type = "constant"
+        default_value = default.get("value", item.get("default_value", ""))
+        default_selector = default.get("selector") or item.get("selector") or []
+        normalized_default: dict[str, Any] = {"type": default_type}
+        if default_type == "variable":
+            normalized_default["selector"] = _normalize_optional_selector(default_selector)
+            normalized_default["value"] = ""
+        else:
+            normalized_default["selector"] = _normalize_optional_selector(default_selector)
+            normalized_default["value"] = str(default_value or "")
+        inputs.append(
+            {
+                "type": _human_input_type(str(item.get("type") or item.get("input_type") or "paragraph")),
+                "output_variable_name": output_name,
+                "default": normalized_default,
+            }
+        )
+    return inputs
+
+
+def _normalize_human_actions(value: Any) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        value = [{"id": key, "title": item} for key, item in value.items()]
+    used_ids: set[str] = set()
+    for idx, item in enumerate(value or []):
+        if isinstance(item, str):
+            item = {"id": item, "title": item}
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or item.get("name") or item.get("label") or "").strip()
+        raw_id = str(item.get("id") or item.get("value") or title or f"action_{idx + 1}")
+        action_id = _safe_branch_id(raw_id) or f"action_{idx + 1}"
+        preferred = action_id
+        duplicate_index = 2
+        while action_id in used_ids:
+            action_id = f"{preferred}_{duplicate_index}"
+            duplicate_index += 1
+        used_ids.add(action_id)
+        if not title:
+            title = action_id
+        style = str(item.get("button_style") or item.get("style") or ("primary" if idx == 0 else "default"))
+        if style not in {"primary", "default", "accent", "ghost"}:
+            style = "default"
+        actions.append({"id": action_id, "title": title, "button_style": style})
+    if not actions:
+        actions = [
+            {"id": "approve", "title": "通过", "button_style": "primary"},
+            {"id": "reject", "title": "驳回", "button_style": "default"},
+        ]
+    return actions
+
+
+def _human_input_type(value: str) -> str:
+    normalized = str(value or "").strip().lower().replace("_", "-")
+    mapping = {
+        "text": "text-input",
+        "string": "text-input",
+        "text-input": "text-input",
+        "paragraph": "paragraph",
+        "textarea": "paragraph",
+        "number": "number",
+        "boolean": "checkbox",
+        "bool": "checkbox",
+        "checkbox": "checkbox",
+        "select": "select",
+    }
+    return mapping.get(normalized, "paragraph")
+
+
+def _timeout_unit(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"hour", "hours", "h", "小时"}:
+        return "hour"
+    return "day"
+
+
+def _positive_int(value: Any, *, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(1, parsed)
+
+
 def _normalize_classifier_classes(value: Any) -> list[dict[str, str]]:
     classes: list[dict[str, str]] = []
     if isinstance(value, dict):
@@ -760,11 +946,22 @@ def _normalize_multiple_retrieval_config(value: Any) -> dict[str, Any]:
         "reranking_enable": bool(config.get("reranking_enable", False)),
         "reranking_mode": str(config.get("reranking_mode") or "reranking_model"),
     }
-    if isinstance(config.get("reranking_model"), dict):
-        result["reranking_model"] = deepcopy(config["reranking_model"])
+    reranking_model = _normalize_reranking_model(config.get("reranking_model"))
+    if result["reranking_enable"] and reranking_model:
+        result["reranking_model"] = reranking_model
     if isinstance(config.get("weights"), dict):
         result["weights"] = deepcopy(config["weights"])
     return result
+
+
+def _normalize_reranking_model(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    provider = str(value.get("provider") or value.get("reranking_provider_name") or "").strip()
+    model = str(value.get("model") or value.get("reranking_model_name") or "").strip()
+    if not provider or not model:
+        return None
+    return {"provider": provider, "model": model}
 
 
 def _looks_like_selector(value: Any) -> bool:
@@ -1217,6 +1414,8 @@ def _semantic_title(
             return f"筛选{subject}列表"
         case "knowledge-retrieval":
             return f"检索{subject}知识库"
+        case "human-input":
+            return f"人工审核{subject}"
         case "end":
             upstream = _first_upstream(node, node_by_id, edges)
             if upstream and upstream.get("type") == "llm":
@@ -1513,6 +1712,32 @@ def _infer_question_classifier_source_handle(
             return class_id
     position = positions.get((str(edge.get("source")), str(edge.get("target"))), 0)
     return class_ids[position] if position < len(class_ids) else current
+
+
+def _infer_human_input_source_handle(
+    source: dict[str, Any],
+    edge: dict[str, Any],
+    node_by_id: dict[str, dict[str, Any]],
+    positions: dict[tuple[str, str], int],
+) -> str:
+    actions = source.get("params", {}).get("user_actions", [])
+    action_ids = [str(item.get("id")) for item in actions if isinstance(item, dict) and item.get("id")]
+    valid = set(action_ids)
+    current = str(edge.get("source_handle", SOURCE_HANDLE))
+    if current in valid:
+        return current
+
+    target = node_by_id.get(str(edge.get("target")), {})
+    target_text = f"{edge.get('target')} {target.get('title') or ''}".lower()
+    for item in actions:
+        if not isinstance(item, dict):
+            continue
+        action_id = str(item.get("id") or "")
+        title = str(item.get("title") or "")
+        if action_id and (action_id.lower() in target_text or title.lower() in target_text or title in target_text):
+            return action_id
+    position = positions.get((str(edge.get("source")), str(edge.get("target"))), 0)
+    return action_ids[position] if position < len(action_ids) else current
 
 
 def _input_type(value: str) -> str:

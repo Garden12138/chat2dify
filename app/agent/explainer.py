@@ -53,6 +53,9 @@ def explain_plan(plan: WorkflowPlan) -> dict[str, list[str] | str]:
         elif node.type == "knowledge-retrieval":
             datasets = node.params.get("dataset_ids", [])
             steps.append(f"{node.id} 从知识库检索相关资料：{len(datasets) if isinstance(datasets, list) else 0} 个数据集")
+        elif node.type == "human-input":
+            actions = [str(item.get("title") or item.get("id")) for item in node.params.get("user_actions", []) if isinstance(item, dict)]
+            steps.append(f"{node.id} 等待人工介入：{', '.join(actions) or '未配置动作'}")
         elif node.type in {"code", "http-request", "template-transform"}:
             steps.append(f"{node.id} 执行 {node.type} 节点")
 

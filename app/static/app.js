@@ -417,7 +417,7 @@ async function handleRun() {
       appId: payload.app_id,
       lastRunStatus: data.status,
     });
-    setPanelStatus(els.runStatus, data.status || "Done", data.ok ? "ok" : "error");
+    setPanelStatus(els.runStatus, data.status || "Done", runStatusTone(data));
     renderResult(data, "outputs");
   });
 }
@@ -590,6 +590,9 @@ function renderOutputsPanel(data) {
   if (data.events_summary) {
     sections.push(keyValueGroup("Run summary", data.events_summary));
   }
+  if (data.status === "paused") {
+    sections.push(renderMessageRow({ tone: "warning", text: "Workflow paused at a human-input node. Complete the human action in Dify UI; chat2dify does not submit or resume forms in this stage." }));
+  }
   if (data.final_event) {
     sections.push(jsonBlock("Final event", data.final_event));
   }
@@ -756,6 +759,18 @@ function nodeDetails(node) {
       nodeLine("Datasets", String(datasetIds.length)),
       nodeLine("Mode", params.retrieval_mode || "multiple"),
       nodeLine("Top K", String(retrievalConfig.top_k || 4)),
+    ];
+  }
+  if (node.type === "human-input") {
+    const actions = Array.isArray(params.user_actions) ? params.user_actions : [];
+    const inputs = Array.isArray(params.inputs) ? params.inputs : [];
+    const methods = Array.isArray(params.delivery_methods) ? params.delivery_methods : [];
+    return [
+      nodeLine("Actions", actions.map((item) => `${item.title || item.id} (${item.id})`).filter(Boolean).join(", ") || "none"),
+      nodeLine("Inputs", inputs.map((item) => `${item.output_variable_name}:${item.type || "paragraph"}`).filter(Boolean).join(", ") || "none"),
+      nodeLine("Delivery", methods.map((item) => `${item.type || "webapp"}${item.enabled === false ? " off" : ""}`).join(", ") || "none"),
+      nodeLine("Timeout", `${params.timeout || 3} ${params.timeout_unit || "day"}`),
+      promptPreview("Form", params.form_content),
     ];
   }
   if (node.type === "code") {
@@ -1254,6 +1269,16 @@ function toneClass(tone) {
     return "status-warning";
   }
   return "status-muted";
+}
+
+function runStatusTone(data) {
+  if (data?.ok) {
+    return "ok";
+  }
+  if (data?.status === "paused") {
+    return "warning";
+  }
+  return "error";
 }
 
 function guardClass(guard) {

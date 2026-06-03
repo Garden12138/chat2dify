@@ -140,6 +140,15 @@ def _param_change_type(node_type: str, field: str) -> str:
         "metadata_filtering_mode",
     }:
         return "knowledge_retrieval_changed"
+    if node_type == "human-input" and field in {
+        "delivery_methods",
+        "form_content",
+        "inputs",
+        "user_actions",
+        "timeout",
+        "timeout_unit",
+    }:
+        return "human_input_changed"
     return "node_params_updated"
 
 
@@ -170,6 +179,8 @@ def _param_change_message(node: PlanNode, field: str) -> str:
             return f"更新列表处理节点 {title} 的 {field}。"
         case "knowledge_retrieval_changed":
             return f"更新知识库检索节点 {title} 的 {field}。"
+        case "human_input_changed":
+            return f"更新人工介入节点 {title} 的 {field}。"
     return f"更新 {node.type} 节点 {title} 的 {field}。"
 
 

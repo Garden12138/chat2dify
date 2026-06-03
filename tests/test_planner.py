@@ -114,6 +114,18 @@ def test_planner_accepts_knowledge_retrieval_node_with_default_dataset_ids() -> 
     assert knowledge.params["multiple_retrieval_config"]["top_k"] == 4
 
 
+def test_planner_accepts_human_input_node() -> None:
+    planner = FakePlanner([json.dumps(_human_input_plan())])
+
+    result = planner.generate("需要经理人工审核后再回复客户", app_name="售后人工审核", dsl_version="9.9.9")
+
+    review = next(node for node in result.plan.nodes if node.id == "review")
+    assert review.type == "human-input"
+    assert review.params["delivery_methods"][0]["type"] == "webapp"
+    assert [action["id"] for action in review.params["user_actions"]] == ["approve", "reject"]
+    assert sorted(edge.source_handle for edge in result.plan.edges if edge.source == "review") == ["approve", "reject"]
+
+
 def test_planner_self_repairs_after_validation_failure() -> None:
     bad = {
         "name": "bad",
@@ -264,6 +276,47 @@ def _stable_builtin_plan() -> dict:
             {"source": "aggregate", "target": "list"},
             {"source": "list", "target": "llm"},
             {"source": "llm", "target": "end"},
+        ],
+    }
+
+
+def _human_input_plan() -> dict:
+    return {
+        "nodes": [
+            {"id": "start", "type": "start", "title": "接收售后诉求", "params": {"variables": [{"name": "query"}]}},
+            {
+                "id": "llm",
+                "type": "llm",
+                "title": "生成待审核回复",
+                "params": {
+                    "system_prompt": "你是售后客服专员，先生成待人工审核的回复草稿。",
+                    "user_prompt": "请根据用户诉求生成回复草稿：{{#start.query#}}",
+                },
+            },
+            {
+                "id": "review",
+                "type": "human-input",
+                "title": "经理审核售后回复",
+                "params": {
+                    "delivery_methods": [{"id": "webapp-1", "type": "webapp", "enabled": True, "config": {}}],
+                    "form_content": "请审核以下回复草稿：{{#llm.text#}}",
+                    "inputs": [{"type": "paragraph", "output_variable_name": "review_comment", "default": {"type": "constant", "selector": [], "value": ""}}],
+                    "user_actions": [
+                        {"id": "approve", "title": "通过", "button_style": "primary"},
+                        {"id": "reject", "title": "驳回", "button_style": "default"},
+                    ],
+                    "timeout": 3,
+                    "timeout_unit": "day",
+                },
+            },
+            {"id": "approved", "type": "end", "title": "返回审核通过结果", "params": {"outputs": [{"variable": "answer", "value_selector": ["llm", "text"]}]}},
+            {"id": "rejected", "type": "end", "title": "返回审核驳回结果", "params": {"outputs": [{"variable": "comment", "value_selector": ["review", "review_comment"]}]}},
+        ],
+        "edges": [
+            {"source": "start", "target": "llm"},
+            {"source": "llm", "target": "review"},
+            {"source": "review", "target": "approved", "source_handle": "approve"},
+            {"source": "review", "target": "rejected", "source_handle": "reject"},
         ],
     }
 

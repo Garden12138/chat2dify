@@ -4,6 +4,7 @@ from pydantic import ValidationError
 from app.agent.planner import fallback_plan
 from app.agent.normalizer import normalize_plan_payload
 from app.compiler.dify import DifyDslCompiler
+from app.dify.knowledge_retrieval import apply_dataset_retrieval_settings
 from app.models import WorkflowPlan
 from app.validator import validate_dsl, validate_plan
 
@@ -1060,6 +1061,194 @@ def test_normalizer_compiler_and_validator_cover_knowledge_retrieval_node() -> N
     assert validate_dsl(dsl, expected_dsl_version="9.9.9") == []
 
 
+def test_normalizer_compiler_and_validator_cover_human_input_node() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "name": "售后人工审核",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "review",
+                    "type": "human",
+                    "params": {
+                        "content": "请审核售后处理建议：{{start.query}}",
+                        "fields": [{"name": "review_comment", "type": "paragraph"}],
+                        "actions": ["approve", "reject"],
+                        "timeout": "2",
+                        "timeoutUnit": "day",
+                    },
+                },
+                {"id": "approved", "type": "end", "params": {"outputs": [{"variable": "comment", "value_selector": ["review", "review_comment"]}]}},
+                {"id": "rejected", "type": "end", "params": {"outputs": [{"variable": "action", "value_selector": ["review", "__action_id"]}]}},
+            ],
+            "edges": [
+                {"source": "start", "target": "review"},
+                {"source": "review", "target": "approved"},
+                {"source": "review", "target": "rejected"},
+            ],
+        }
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    dsl = _compiler().compile(plan)
+    data = yaml.safe_load(dsl)
+    review = next(node["data"] for node in data["workflow"]["graph"]["nodes"] if node["id"] == "review")
+    review_edges = [edge for edge in data["workflow"]["graph"]["edges"] if edge["source"] == "review"]
+
+    assert next(node for node in plan.nodes if node.id == "review").type == "human-input"
+    assert review["type"] == "human-input"
+    assert review["delivery_methods"][0]["type"] == "webapp"
+    assert review["delivery_methods"][0]["enabled"] is True
+    assert review["user_actions"] == [
+        {"id": "approve", "title": "approve", "button_style": "primary"},
+        {"id": "reject", "title": "reject", "button_style": "default"},
+    ]
+    assert review["inputs"][0]["output_variable_name"] == "review_comment"
+    assert "{{#start.query#}}" in review["form_content"]
+    assert sorted(edge["sourceHandle"] for edge in review_edges) == ["approve", "reject"]
+    assert validate_plan(plan) == []
+    assert validate_dsl(dsl, expected_dsl_version="9.9.9") == []
+
+
+def test_knowledge_retrieval_strips_disabled_or_incomplete_rerank_model() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "name": "知识库问答",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "knowledge",
+                    "type": "knowledge-retrieval",
+                    "params": {
+                        "query_variable_selector": ["start", "query"],
+                        "dataset_ids": ["dataset-a"],
+                        "multiple_retrieval_config": {
+                            "top_k": 4,
+                            "score_threshold": None,
+                            "reranking_enable": False,
+                            "reranking_mode": "reranking_model",
+                            "reranking_model": {"provider": "openai", "model": "gpt-4o-mini"},
+                        },
+                    },
+                },
+                {"id": "llm", "type": "llm", "params": {"user_prompt": "{{#knowledge.result#}}"}},
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["llm", "text"]}]}},
+            ],
+            "edges": [
+                {"source": "start", "target": "knowledge"},
+                {"source": "knowledge", "target": "llm"},
+                {"source": "llm", "target": "end"},
+            ],
+        }
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    dsl = _compiler().compile(plan)
+    knowledge = next(node["data"] for node in yaml.safe_load(dsl)["workflow"]["graph"]["nodes"] if node["id"] == "knowledge")
+
+    assert "reranking_model" not in next(node for node in plan.nodes if node.id == "knowledge").params["multiple_retrieval_config"]
+    assert knowledge["multiple_retrieval_config"] == {
+        "top_k": 4,
+        "score_threshold": None,
+        "reranking_enable": False,
+        "reranking_mode": "reranking_model",
+    }
+
+
+def test_knowledge_retrieval_keeps_enabled_rerank_model() -> None:
+    plan = WorkflowPlan.model_validate(
+        {
+            "name": "rerank",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "knowledge",
+                    "type": "knowledge-retrieval",
+                    "params": {
+                        "query_variable_selector": ["start", "query"],
+                        "dataset_ids": ["dataset-a"],
+                        "multiple_retrieval_config": {
+                            "top_k": 4,
+                            "reranking_enable": True,
+                            "reranking_model": {"reranking_provider_name": "cohere", "reranking_model_name": "rerank-v2"},
+                        },
+                    },
+                },
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["knowledge", "result"]}]}},
+            ],
+            "edges": [
+                {"source": "start", "target": "knowledge"},
+                {"source": "knowledge", "target": "end"},
+            ],
+        }
+    )
+
+    dsl = _compiler().compile(plan)
+    knowledge = next(node["data"] for node in yaml.safe_load(dsl)["workflow"]["graph"]["nodes"] if node["id"] == "knowledge")
+
+    assert knowledge["multiple_retrieval_config"]["reranking_model"] == {"provider": "cohere", "model": "rerank-v2"}
+
+
+def test_knowledge_retrieval_uses_dataset_rerank_model_setting() -> None:
+    plan = WorkflowPlan.model_validate(
+        {
+            "name": "dataset rerank",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "knowledge",
+                    "type": "knowledge-retrieval",
+                    "params": {
+                        "query_variable_selector": ["start", "query"],
+                        "dataset_ids": ["dataset-a"],
+                        "retrieval_mode": "multiple",
+                        "multiple_retrieval_config": {
+                            "top_k": 4,
+                            "score_threshold": None,
+                            "reranking_enable": False,
+                        },
+                    },
+                },
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["knowledge", "result"]}]}},
+            ],
+            "edges": [
+                {"source": "start", "target": "knowledge"},
+                {"source": "knowledge", "target": "end"},
+            ],
+        }
+    )
+
+    enriched = apply_dataset_retrieval_settings(
+        plan,
+        {
+            "dataset-a": {
+                "id": "dataset-a",
+                "retrieval_model_dict": {
+                    "search_method": "semantic_search",
+                    "reranking_enable": True,
+                    "reranking_mode": None,
+                    "reranking_model": {
+                        "reranking_provider_name": "langgenius/tongyi/tongyi",
+                        "reranking_model_name": "qwen3-rerank",
+                    },
+                    "top_k": 3,
+                    "score_threshold_enabled": False,
+                    "score_threshold": 0,
+                },
+            }
+        },
+    )
+
+    dsl = _compiler().compile(enriched)
+    knowledge = next(node["data"] for node in yaml.safe_load(dsl)["workflow"]["graph"]["nodes"] if node["id"] == "knowledge")
+
+    assert knowledge["multiple_retrieval_config"] == {
+        "top_k": 4,
+        "score_threshold": None,
+        "reranking_enable": True,
+        "reranking_mode": "reranking_model",
+        "reranking_model": {"provider": "langgenius/tongyi/tongyi", "model": "qwen3-rerank"},
+    }
+
+
 def test_validator_rejects_invalid_knowledge_retrieval_node() -> None:
     plan = WorkflowPlan.model_validate(
         {
@@ -1085,6 +1274,44 @@ def test_validator_rejects_invalid_knowledge_retrieval_node() -> None:
     assert any(issue.code == "PLAN_KNOWLEDGE_RETRIEVAL_DATASETS_MISSING" for issue in issues)
     assert any(issue.code == "PLAN_KNOWLEDGE_RETRIEVAL_QUERY_MISSING" for issue in issues)
     assert any(issue.code == "PLAN_KNOWLEDGE_RETRIEVAL_MODE_INVALID" for issue in issues)
+
+
+def test_validator_rejects_invalid_human_input_node() -> None:
+    plan = WorkflowPlan.model_validate(
+        {
+            "name": "bad human input",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "review",
+                    "type": "human-input",
+                    "params": {
+                        "delivery_methods": [{"id": "webapp-1", "type": "webapp", "enabled": False}],
+                        "user_actions": [
+                            {"id": "approve", "title": "通过"},
+                            {"id": "approve", "title": "再次通过"},
+                        ],
+                        "timeout": 0,
+                        "timeout_unit": "minute",
+                    },
+                },
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["start", "query"]}]}},
+            ],
+            "edges": [
+                {"source": "start", "target": "review"},
+                {"source": "review", "target": "end", "source_handle": "source"},
+            ],
+        }
+    )
+
+    issues = validate_plan(plan)
+
+    assert any(issue.code == "PLAN_HUMAN_INPUT_DELIVERY_METHOD_ENABLED_MISSING" for issue in issues)
+    assert any(issue.code == "PLAN_HUMAN_INPUT_ACTION_DUPLICATE" for issue in issues)
+    assert any(issue.code == "PLAN_HUMAN_INPUT_BRANCH_INVALID" for issue in issues)
+    assert any(issue.code == "PLAN_HUMAN_INPUT_ACTION_EDGE_MISSING" for issue in issues)
+    assert any(issue.code == "PLAN_HUMAN_INPUT_TIMEOUT_INVALID" for issue in issues)
+    assert any(issue.code == "PLAN_HUMAN_INPUT_TIMEOUT_UNIT_INVALID" for issue in issues)
 
 
 def test_validator_rejects_start_incoming_and_end_outgoing() -> None:

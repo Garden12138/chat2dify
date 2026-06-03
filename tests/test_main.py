@@ -140,6 +140,7 @@ def test_list_dify_datasets_api_returns_slim_dataset_list(monkeypatch) -> None:
         "embedding_available": True,
         "permission": "all_team_members",
         "updated_at": 123,
+        "retrieval_model_dict": None,
     }
 
 

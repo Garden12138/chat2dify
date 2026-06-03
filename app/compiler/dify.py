@@ -121,6 +121,8 @@ class DifyDslCompiler:
                 data.update(self._list_operator_data(node))
             case "knowledge-retrieval":
                 data.update(self._knowledge_retrieval_data(node))
+            case "human-input":
+                data.update(self._human_input_data(node))
 
         return {
             "id": node.id,
@@ -352,6 +354,18 @@ class DifyDslCompiler:
             "vision": _vision(node.params.get("vision")),
         }
 
+    def _human_input_data(self, node: PlanNode) -> dict[str, Any]:
+        return {
+            "delivery_methods": _human_delivery_methods(node.params.get("delivery_methods")),
+            "form_content": normalize_template_refs(
+                str(node.params.get("form_content") or "请审核以下内容，并选择处理动作。")
+            ),
+            "inputs": _human_inputs(node.params.get("inputs")),
+            "user_actions": _human_actions(node.params.get("user_actions")),
+            "timeout": _positive_int(node.params.get("timeout"), default=3),
+            "timeout_unit": _timeout_unit(node.params.get("timeout_unit")),
+        }
+
     def _model_config(self, node: PlanNode) -> dict[str, Any]:
         model = node.params.get("model") if isinstance(node.params.get("model"), dict) else {}
         return {
@@ -501,6 +515,85 @@ def _dataset_ids(value: Any, default: list[str]) -> list[str]:
     return dataset_ids or list(default)
 
 
+def _human_delivery_methods(value: Any) -> list[dict[str, Any]]:
+    methods = []
+    for idx, item in enumerate(value or []):
+        if not isinstance(item, dict):
+            continue
+        method_type = str(item.get("type") or "webapp")
+        method = {
+            "id": str(item.get("id") or f"{method_type}-{idx + 1}"),
+            "type": method_type,
+            "enabled": bool(item.get("enabled", True)),
+        }
+        config = item.get("config")
+        if isinstance(config, dict):
+            method["config"] = deepcopy(config)
+        elif method_type == "webapp":
+            method["config"] = {}
+        methods.append(method)
+    if not methods:
+        methods.append({"id": "webapp-1", "type": "webapp", "enabled": True, "config": {}})
+    if not any(method.get("enabled") for method in methods):
+        methods[0]["enabled"] = True
+    return methods
+
+
+def _human_inputs(value: Any) -> list[dict[str, Any]]:
+    inputs = []
+    for item in value or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("output_variable_name") or item.get("name") or item.get("variable") or "")
+        if not name:
+            continue
+        default = item.get("default") if isinstance(item.get("default"), dict) else {}
+        default_type = str(default.get("type") or "constant")
+        normalized_default = {
+            "type": default_type if default_type in {"constant", "variable"} else "constant",
+            "selector": _selector(default.get("selector"), []),
+            "value": str(default.get("value") or ""),
+        }
+        inputs.append(
+            {
+                "type": str(item.get("type") or "paragraph"),
+                "output_variable_name": name,
+                "default": normalized_default,
+            }
+        )
+    return inputs
+
+
+def _human_actions(value: Any) -> list[dict[str, Any]]:
+    actions = []
+    for idx, item in enumerate(value or []):
+        if not isinstance(item, dict):
+            continue
+        action_id = str(item.get("id") or f"action_{idx + 1}")
+        title = str(item.get("title") or action_id)
+        style = str(item.get("button_style") or ("primary" if idx == 0 else "default"))
+        if style not in {"primary", "default", "accent", "ghost"}:
+            style = "default"
+        actions.append({"id": action_id, "title": title, "button_style": style})
+    return actions or [
+        {"id": "approve", "title": "通过", "button_style": "primary"},
+        {"id": "reject", "title": "驳回", "button_style": "default"},
+    ]
+
+
+def _timeout_unit(value: Any) -> str:
+    normalized = str(value or "day").strip().lower()
+    return "hour" if normalized in {"hour", "hours", "h", "小时"} else "day"
+
+
+def _positive_int(value: Any, *, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(1, parsed)
+
+
 def _multiple_retrieval_config(value: Any) -> dict[str, Any]:
     config = value if isinstance(value, dict) else {}
     try:
@@ -513,11 +606,22 @@ def _multiple_retrieval_config(value: Any) -> dict[str, Any]:
         "reranking_enable": bool(config.get("reranking_enable", False)),
         "reranking_mode": str(config.get("reranking_mode") or "reranking_model"),
     }
-    if isinstance(config.get("reranking_model"), dict):
-        result["reranking_model"] = deepcopy(config["reranking_model"])
+    reranking_model = _reranking_model(config.get("reranking_model"))
+    if result["reranking_enable"] and reranking_model:
+        result["reranking_model"] = reranking_model
     if isinstance(config.get("weights"), dict):
         result["weights"] = deepcopy(config["weights"])
     return result
+
+
+def _reranking_model(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    provider = str(value.get("provider") or value.get("reranking_provider_name") or "").strip()
+    model = str(value.get("model") or value.get("reranking_model_name") or "").strip()
+    if not provider or not model:
+        return None
+    return {"provider": provider, "model": model}
 
 
 def _vision(value: Any) -> dict[str, Any]:
@@ -652,6 +756,8 @@ def _node_height(node_type: str, data: dict[str, Any]) -> int:
         return 112
     if node_type == "knowledge-retrieval":
         return 116
+    if node_type == "human-input":
+        return 116 + max(0, len(data.get("user_actions", [])) - 2) * 24
     if node_type == "end":
         return 90 + max(0, len(data.get("outputs", [])) - 1) * 26
     return 90

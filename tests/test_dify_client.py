@@ -229,6 +229,13 @@ def test_list_datasets_sends_query_and_returns_slim_metadata() -> None:
                             "embedding_available": True,
                             "permission": "all_team_members",
                             "updated_at": 123,
+                            "retrieval_model_dict": {
+                                "reranking_enable": True,
+                                "reranking_model": {
+                                    "reranking_provider_name": "langgenius/tongyi/tongyi",
+                                    "reranking_model_name": "qwen3-rerank",
+                                },
+                            },
                             "unused": "ignored",
                         }
                     ],
@@ -252,6 +259,61 @@ def test_list_datasets_sends_query_and_returns_slim_metadata() -> None:
     assert result.data[0].name == "售后政策"
     assert result.data[0].document_count == 3
     assert result.data[0].embedding_available is True
+    assert result.data[0].retrieval_model_dict == {
+        "reranking_enable": True,
+        "reranking_model": {
+            "reranking_provider_name": "langgenius/tongyi/tongyi",
+            "reranking_model_name": "qwen3-rerank",
+        },
+    }
+
+
+def test_get_datasets_by_ids_sends_repeated_ids_and_returns_retrieval_model() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/console/api/login":
+            return httpx.Response(200, json={"result": "success"}, headers=[("set-cookie", "csrf_token=csrf123; Path=/")])
+        if request.url.path == "/console/api/datasets":
+            seen["ids"] = request.url.params.get_list("ids")
+            seen["page"] = request.url.params.get("page")
+            seen["limit"] = request.url.params.get("limit")
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "dataset-1",
+                            "name": "售后政策",
+                            "description": "",
+                            "retrieval_model_dict": {
+                                "reranking_enable": True,
+                                "reranking_model": {
+                                    "reranking_provider_name": "langgenius/tongyi/tongyi",
+                                    "reranking_model_name": "qwen3-rerank",
+                                },
+                            },
+                        }
+                    ],
+                    "has_more": False,
+                    "page": 1,
+                    "limit": 50,
+                    "total": 1,
+                },
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+    result = client.get_datasets_by_ids(["dataset-1", "dataset-2"])
+
+    assert seen == {"ids": ["dataset-1", "dataset-2"], "page": "1", "limit": "50"}
+    assert result.data[0].retrieval_model_dict == {
+        "reranking_enable": True,
+        "reranking_model": {
+            "reranking_provider_name": "langgenius/tongyi/tongyi",
+            "reranking_model_name": "qwen3-rerank",
+        },
+    }
 
 
 def test_list_datasets_refreshes_after_401() -> None:
@@ -373,6 +435,32 @@ def test_run_draft_workflow_failed_status_is_not_ok() -> None:
     assert result.ok is False
     assert result.status == "failed"
     assert result.error == "bad input"
+
+
+def test_run_draft_workflow_paused_status_is_not_ok() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/console/api/login":
+            return httpx.Response(200, json={"result": "success"}, headers=[("set-cookie", "csrf_token=csrf123; Path=/")])
+        if request.url.path == "/console/api/apps/app-1/workflows/draft/run":
+            return httpx.Response(
+                200,
+                content=(
+                    'data: {"event":"workflow_paused","workflow_run_id":"run-1","task_id":"task-1",'
+                    '"data":{"reason":{"node_id":"review","node_type":"human-input","form_content":"Approve?"}}}\n\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+    result = client.run_draft_workflow("app-1", inputs={"query": "hi"})
+
+    assert result.ok is False
+    assert result.status == "paused"
+    assert result.workflow_run_id == "run-1"
+    assert result.task_id == "task-1"
+    assert result.final_event and result.final_event["event"] == "workflow_paused"
+    assert result.events_summary and result.events_summary["event_counts"]["workflow_paused"] == 1
 
 
 def test_run_draft_workflow_refreshes_after_401() -> None:

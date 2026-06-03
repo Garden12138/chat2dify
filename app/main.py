@@ -23,6 +23,7 @@ from app.dify.graph import (
     compile_plan_to_dify_graph,
     decompile_dify_graph,
 )
+from app.dify.knowledge_retrieval import apply_dataset_retrieval_settings, knowledge_dataset_ids
 from app.dify.version import read_dify_version_info
 from app.models import WorkflowModifyRequest, WorkflowPlan, WorkflowRequest, WorkflowRunDraftRequest
 from app.validator import has_errors, validate_dsl, validate_plan
@@ -101,7 +102,7 @@ def draft_workflow(request: WorkflowRequest) -> dict:
         )
     except PlannerError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    plan = planner_result.plan
+    plan = _plan_with_dataset_retrieval_settings(planner_result.plan, effective_settings)
     compiler = DifyDslCompiler(
         dsl_version=version_info.app_dsl_version,
         default_model_provider=effective_settings.dify_default_model_provider,
@@ -264,6 +265,7 @@ def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:
                 raw_plan = edit_result.raw_plan
                 planner_metadata = edit_result.metadata()
 
+            plan = _plan_with_dataset_retrieval_settings(plan, effective_settings, client=client)
             response, graph = _build_modify_response(
                 settings=settings,
                 version_info=version_info,
@@ -382,6 +384,46 @@ def _settings_with_request_dataset_ids(settings: Settings, dataset_ids: list[str
     if not request_dataset_ids:
         return settings
     return replace(settings, dify_default_dataset_ids=request_dataset_ids)
+
+
+def _plan_with_dataset_retrieval_settings(
+    plan: WorkflowPlan,
+    settings: Settings,
+    *,
+    client: DifyClient | None = None,
+) -> WorkflowPlan:
+    dataset_ids = knowledge_dataset_ids(plan, settings.dify_default_dataset_ids)
+    if not dataset_ids or not (settings.dify_email and settings.dify_password):
+        return plan
+
+    try:
+        if client is not None:
+            dataset_result = client.get_datasets_by_ids(dataset_ids)
+        else:
+            with DifyClient(settings) as dataset_client:
+                dataset_result = dataset_client.get_datasets_by_ids(dataset_ids)
+    except (AttributeError, DifyClientError):
+        return plan
+
+    datasets_by_id = _datasets_by_id(dataset_result)
+    return apply_dataset_retrieval_settings(
+        plan,
+        datasets_by_id,
+        default_dataset_ids=settings.dify_default_dataset_ids,
+    )
+
+
+def _datasets_by_id(dataset_result) -> dict[str, object]:
+    data = getattr(dataset_result, "data", dataset_result if isinstance(dataset_result, list) else [])
+    result: dict[str, object] = {}
+    for item in data or []:
+        if isinstance(item, dict):
+            dataset_id = str(item.get("id", "")).strip()
+        else:
+            dataset_id = str(getattr(item, "id", "")).strip()
+        if dataset_id:
+            result[dataset_id] = item
+    return result
 
 
 def _preview_plan_planner_metadata(normalizations: list[str] | None = None) -> dict:

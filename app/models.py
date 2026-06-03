@@ -20,6 +20,7 @@ NodeType = Literal[
     "assigner",
     "list-operator",
     "knowledge-retrieval",
+    "human-input",
 ]
 InputType = Literal["text", "paragraph", "number", "boolean", "file", "file-list", "json"]
 

@@ -146,6 +146,49 @@ def test_decompile_dify_graph_covers_knowledge_retrieval_node() -> None:
     assert knowledge.params["query_variable_selector"] == ["start", "query"]
 
 
+def test_decompile_dify_graph_covers_human_input_node() -> None:
+    plan = WorkflowPlan.model_validate(
+        {
+            "name": "human input",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "review",
+                    "type": "human-input",
+                    "params": {
+                        "delivery_methods": [{"id": "webapp-1", "type": "webapp", "enabled": True, "config": {}}],
+                        "form_content": "请审核：{{#start.query#}}",
+                        "inputs": [{"type": "paragraph", "output_variable_name": "review_comment", "default": {"type": "constant", "selector": [], "value": ""}}],
+                        "user_actions": [
+                            {"id": "approve", "title": "通过", "button_style": "primary"},
+                            {"id": "reject", "title": "驳回", "button_style": "default"},
+                        ],
+                        "timeout": 3,
+                        "timeout_unit": "day",
+                    },
+                },
+                {"id": "approved", "type": "end", "params": {"outputs": [{"variable": "comment", "value_selector": ["review", "review_comment"]}]}},
+                {"id": "rejected", "type": "end", "params": {"outputs": [{"variable": "action", "value_selector": ["review", "selected_action"]}]}},
+            ],
+            "edges": [
+                {"source": "start", "target": "review"},
+                {"source": "review", "target": "approved", "source_handle": "approve"},
+                {"source": "review", "target": "rejected", "source_handle": "reject"},
+            ],
+        }
+    )
+    graph = yaml.safe_load(_compiler().compile(plan))["workflow"]["graph"]
+
+    decompiled = decompile_dify_graph(graph, name="Loaded")
+    review = next(node for node in decompiled.nodes if node.id == "review")
+
+    assert review.type == "human-input"
+    assert review.params["delivery_methods"][0]["type"] == "webapp"
+    assert review.params["user_actions"][0]["id"] == "approve"
+    assert review.params["inputs"][0]["output_variable_name"] == "review_comment"
+    assert review.params["timeout_unit"] == "day"
+
+
 def test_compile_plan_to_dify_graph_preserves_existing_layout_and_places_new_nodes() -> None:
     base_plan = WorkflowPlan.model_validate(
         {
