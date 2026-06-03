@@ -248,7 +248,7 @@ Example file workflow request:
 Example list workflow request:
 
 ```text
-创建售后记录筛选工作流。输入 items 是售后记录数组，筛选投诉类记录并取第一条，然后生成客服回复，最后返回 answer。
+创建售后记录筛选工作流。输入 items 是包含 records 数组的 JSON 对象，筛选投诉类记录并取第一条，然后生成客服回复，最后返回 answer。
 ```
 
 Example knowledge workflow request:

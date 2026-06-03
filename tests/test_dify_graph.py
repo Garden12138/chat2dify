@@ -71,7 +71,7 @@ def test_decompile_dify_graph_covers_stable_builtin_nodes() -> None:
                 {
                     "id": "list",
                     "type": "list-operator",
-                    "params": {"variable": ["start", "items"], "var_type": "array[string]", "item_var_type": "string"},
+                    "params": {"variable": ["start", "items", "records"], "var_type": "array[string]", "item_var_type": "string"},
                 },
                 {"id": "llm", "type": "llm", "params": {"user_prompt": "{{#list.first_record#}} {{#agg.output#}}"}},
                 {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["llm", "text"]}]}},
@@ -89,13 +89,16 @@ def test_decompile_dify_graph_covers_stable_builtin_nodes() -> None:
     graph = yaml.safe_load(_compiler().compile(plan))["workflow"]["graph"]
     start_node = next(node for node in graph["nodes"] if node["id"] == "start")
     files_input = next(item for item in start_node["data"]["variables"] if item["variable"] == "files")
+    items_input = next(item for item in start_node["data"]["variables"] if item["variable"] == "items")
     for key in ("allowed_file_upload_methods", "allowed_file_types", "allowed_file_extensions", "max_length"):
         files_input.pop(key, None)
 
     decompiled = decompile_dify_graph(graph, name="Loaded")
     nodes = {node.id: node for node in decompiled.nodes}
     start_input = next(item for item in nodes["start"].params["variables"] if item["name"] == "files")
+    items_start_input = next(item for item in nodes["start"].params["variables"] if item["name"] == "items")
 
+    assert items_input["type"] == "json_object"
     assert start_input["allowed_file_upload_methods"] == ["local_file", "remote_url"]
     assert start_input["allowed_file_types"] == ["document", "image"]
     assert start_input["allowed_file_extensions"] == []
@@ -103,7 +106,8 @@ def test_decompile_dify_graph_covers_stable_builtin_nodes() -> None:
     assert nodes["doc"].params["variable_selector"] == ["start", "files"]
     assert nodes["agg"].params["variables"] == [["doc", "text"], ["start", "query"]]
     assert nodes["assign"].params["items"][0]["value"] == ["agg", "output"]
-    assert nodes["list"].params["variable"] == ["start", "items"]
+    assert items_start_input["type"] == "json"
+    assert nodes["list"].params["variable"] == ["start", "items", "records"]
 
 
 def test_decompile_dify_graph_covers_knowledge_retrieval_node() -> None:

@@ -10,6 +10,7 @@ import yaml
 from app.models import PlanNode, WorkflowPlan
 from app.agent.normalizer import normalize_template_refs
 from app.input_variables import file_upload_settings, is_file_input_type
+from app.list_operator import normalize_list_comparison_operator, normalize_list_variable_selector
 
 
 CUSTOM_NODE_TYPE = "custom"
@@ -149,6 +150,8 @@ class DifyDslCompiler:
                 "max_length": item.get("max_length", 1000),
                 "options": item.get("options", []),
             }
+            if input_type == "json_object" and item.get("json_schema") is not None:
+                variable["json_schema"] = item.get("json_schema")
             if is_file_input_type(input_type):
                 variable.update(file_upload_settings(item, input_type=input_type))
             variables.append(
@@ -323,7 +326,7 @@ class DifyDslCompiler:
 
     def _list_operator_data(self, node: PlanNode) -> dict[str, Any]:
         return {
-            "variable": _selector(node.params.get("variable"), ["start", "items"]),
+            "variable": normalize_list_variable_selector(_selector(node.params.get("variable"), ["start", "items"])),
             "var_type": node.params.get("var_type", "array[string]"),
             "item_var_type": node.params.get("item_var_type", "string"),
             "filter_by": _list_filter(node.params.get("filter_by")),
@@ -378,7 +381,7 @@ def _selector(value: Any, default: list[str]) -> list[str]:
         normalized = normalize_template_refs(value)
         match = DIFY_REF_PATTERN.search(normalized)
         if match:
-            return [match.group(1), match.group(2)]
+            return [match.group(1), *[piece for piece in match.group(2).split(".") if piece]]
         pieces = [piece for piece in value.split(".") if piece]
         return pieces if len(pieces) >= 2 else default
     return default
@@ -444,9 +447,20 @@ def _assigner_items(items: Any) -> list[dict[str, Any]]:
 def _list_filter(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {"enabled": False, "conditions": []}
+    conditions = []
+    for item in value.get("conditions") if isinstance(value.get("conditions"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        condition = deepcopy(item)
+        condition["comparison_operator"] = normalize_list_comparison_operator(
+            condition.get("comparison_operator") or condition.get("operator") or "contains"
+        )
+        condition.setdefault("key", "")
+        condition.setdefault("value", "")
+        conditions.append(condition)
     return {
         "enabled": bool(value.get("enabled", False)),
-        "conditions": deepcopy(value.get("conditions") if isinstance(value.get("conditions"), list) else []),
+        "conditions": conditions,
     }
 
 
@@ -580,7 +594,7 @@ def _jinja_template(template: Any, variables: list[dict[str, Any]]) -> str:
     }
 
     def replace(match: re.Match[str]) -> str:
-        selector = (match.group(1), match.group(2))
+        selector = (match.group(1), *[piece for piece in match.group(2).split(".") if piece])
         variable = variable_by_selector.get(selector) or _safe_variable_name(selector[-1])
         return "{{ " + variable + " }}"
 
@@ -609,7 +623,8 @@ def _input_type(value: str) -> str:
         "image": "file",
         "file-list": "file-list",
         "files": "file-list",
-        "json": "json",
+        "json": "json_object",
+        "json-object": "json_object",
     }
     return mapping.get(normalized, "paragraph")
 

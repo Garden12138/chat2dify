@@ -32,8 +32,9 @@ Use variable-aggregator when multiple upstream variables can supply the same val
 {"variables":[["extract","issue"],["start","query"]],"output_type":"string","advanced_settings":{"group_enabled":false,"groups":[]}}.
 Use document-extractor only when the request explicitly involves uploaded files/documents/attachments. Its params must include:
 {"variable_selector":["start","files"],"is_array_file":false}. Add a start file or file-list variable named files.
-Use list-operator only when the request explicitly involves filtering/sorting/limiting an array. Its params must include:
-{"variable":["start","items"],"var_type":"array[string]","item_var_type":"string","filter_by":{"enabled":false,"conditions":[]},"extract_by":{"enabled":false,"serial":"1"},"order_by":{"enabled":false,"key":"","value":"asc"},"limit":{"enabled":false,"size":10}}.
+Use list-operator only when the request explicitly involves filtering/sorting/limiting a string, number, or file array. For arrays of objects, use a code node instead because Dify's list-operator runtime does not handle array[object]. Dify workflow start inputs cannot accept a top-level JSON array; for user-provided arrays, create a start json variable such as items and treat it as an object wrapper whose records field is the array. List-operator params must include:
+{"variable":["start","items","records"],"var_type":"array[string]","item_var_type":"string","filter_by":{"enabled":false,"conditions":[]},"extract_by":{"enabled":false,"serial":"1"},"order_by":{"enabled":false,"key":"","value":"asc"},"limit":{"enabled":false,"size":10}}.
+When using code for object-array filtering, output result as array[object], first_record as object, and last_record as object.
 Use knowledge-retrieval only when the request explicitly asks for knowledge base, document library, RAG, retrieval, or answering from stored materials. Its params must include:
 {"query_variable_selector":["start","query"],"retrieval_mode":"multiple","multiple_retrieval_config":{"top_k":4,"score_threshold":null,"reranking_enable":false},"metadata_filtering_mode":"disabled"}.
 Do not invent dataset_ids. If dataset_ids are not known, omit them and let chat2dify inject DIFY_DEFAULT_DATASET_IDS.

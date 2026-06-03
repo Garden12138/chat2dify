@@ -6,6 +6,7 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
+from app.list_operator import DIFY_LIST_COMPARISON_OPERATORS
 from app.models import ValidationIssue, WorkflowPlan
 
 
@@ -588,6 +589,16 @@ def _validate_node_params(plan: WorkflowPlan) -> list[ValidationIssue]:
                                     f"params.filter_by.conditions.{idx}",
                                 )
                             )
+                        elif str(condition.get("comparison_operator")) not in DIFY_LIST_COMPARISON_OPERATORS:
+                            issues.append(
+                                _node_issue(
+                                    "PLAN_LIST_OPERATOR_FILTER_OPERATOR_INVALID",
+                                    "list-operator filter condition uses an unsupported comparison_operator.",
+                                    node.id,
+                                    f"params.filter_by.conditions.{idx}.comparison_operator",
+                                    suggestion="使用 Dify 支持的操作符，例如 contains、not contains、=、≠、>、<、≥、≤、in。",
+                                )
+                            )
             case "knowledge-retrieval":
                 dataset_ids = params.get("dataset_ids")
                 if not isinstance(dataset_ids, list) or not [item for item in dataset_ids if str(item).strip()]:
@@ -622,13 +633,20 @@ def _validate_node_params(plan: WorkflowPlan) -> list[ValidationIssue]:
     return issues
 
 
-def _node_issue(code: str, message: str, node_id: str, path: str) -> ValidationIssue:
+def _node_issue(
+    code: str,
+    message: str,
+    node_id: str,
+    path: str,
+    *,
+    suggestion: str = "让 normalizer 补齐字段，或让 planner 重新生成该节点参数。",
+) -> ValidationIssue:
     return ValidationIssue(
         code=code,
         message=message,
         node_id=node_id,
         path=f"nodes.{node_id}.{path}",
-        suggestion="让 normalizer 补齐字段，或让 planner 重新生成该节点参数。",
+        suggestion=suggestion,
     )
 
 

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.input_variables import file_upload_settings, is_file_input_type
+from app.list_operator import normalize_list_comparison_operator, normalize_list_variable_selector
 
 
 SOURCE_HANDLE = "source"
@@ -187,7 +188,12 @@ def normalize_plan_payload(
             case "assigner":
                 node["params"] = _normalize_assigner_params(params)
             case "list-operator":
-                node["params"] = _normalize_list_operator_params(params)
+                list_params = _normalize_list_operator_params(params)
+                if _list_operator_needs_code_fallback(list_params):
+                    node["type"] = "code"
+                    node["params"] = _normalize_code_params(_object_list_operator_code_params(list_params))
+                else:
+                    node["params"] = list_params
             case "knowledge-retrieval":
                 node["params"] = _normalize_knowledge_retrieval_params(params, default_dataset_ids or [])
         if before != node.get("params"):
@@ -538,7 +544,7 @@ def _normalize_assigner_params(params: dict[str, Any]) -> dict[str, Any]:
 def _normalize_list_operator_params(params: dict[str, Any]) -> dict[str, Any]:
     result = dict(params)
     raw_variable = result.get("variable") or result.get("variable_selector") or result.get("input_selector") or ["start", "items"]
-    result["variable"] = _normalize_selector(raw_variable)
+    result["variable"] = normalize_list_variable_selector(_normalize_selector(raw_variable))
     result["var_type"] = _array_var_type(str(result.get("var_type") or result.get("type") or "array[string]"))
     result["item_var_type"] = _item_var_type(str(result.get("item_var_type") or result.get("item_type") or ""), result["var_type"])
     result["filter_by"] = _normalize_list_filter(result.get("filter_by") or result.get("filter"))
@@ -846,7 +852,9 @@ def _normalize_list_filter(value: Any) -> dict[str, Any]:
             continue
         condition = dict(item)
         condition["key"] = str(condition.get("key", ""))
-        condition["comparison_operator"] = str(condition.get("comparison_operator") or condition.get("operator") or "contains")
+        condition["comparison_operator"] = normalize_list_comparison_operator(
+            condition.get("comparison_operator") or condition.get("operator") or "contains"
+        )
         condition.setdefault("value", "")
         conditions.append(condition)
     return {"enabled": bool(value.get("enabled", False)), "conditions": conditions}
@@ -885,6 +893,109 @@ def _normalize_limit(value: Any) -> dict[str, Any]:
     except (TypeError, ValueError):
         size_int = 10
     return {"enabled": bool(value.get("enabled", False)), "size": max(1, size_int)}
+
+
+def _list_operator_needs_code_fallback(params: dict[str, Any]) -> bool:
+    return params.get("var_type") == "array[object]" or params.get("item_var_type") == "object"
+
+
+def _object_list_operator_code_params(params: dict[str, Any]) -> dict[str, Any]:
+    filter_by = params.get("filter_by") if isinstance(params.get("filter_by"), dict) else {}
+    order_by = params.get("order_by") if isinstance(params.get("order_by"), dict) else {}
+    limit = params.get("limit") if isinstance(params.get("limit"), dict) else {}
+    code = f"""def main(records: list) -> dict:
+    conditions = {repr(filter_by.get("conditions") if filter_by.get("enabled") else [])}
+    order_enabled = {repr(bool(order_by.get("enabled")))}
+    order_key = {repr(order_by.get("key", ""))}
+    order_desc = {repr(str(order_by.get("value") or "asc").lower() == "desc")}
+    limit_enabled = {repr(bool(limit.get("enabled")))}
+    limit_size = {repr(max(1, int(limit.get("size", 10))))}
+
+    def get_value(item, key):
+        current = item
+        for part in str(key or "").split("."):
+            if not part:
+                continue
+            if not isinstance(current, dict):
+                return None
+            current = current.get(part)
+        return current
+
+    def as_number(value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def compare(actual, operator, expected):
+        if operator in ("empty", "is null", "null"):
+            return actual in (None, "", [], {{}})
+        if operator in ("not empty", "is not null", "not null"):
+            return actual not in (None, "", [], {{}})
+        if operator == "contains":
+            return str(expected) in str(actual or "")
+        if operator == "not contains":
+            return str(expected) not in str(actual or "")
+        if operator == "start with":
+            return str(actual or "").startswith(str(expected))
+        if operator == "end with":
+            return str(actual or "").endswith(str(expected))
+        if operator in ("=", "is"):
+            return actual == expected or str(actual) == str(expected)
+        if operator in ("≠", "is not"):
+            return not (actual == expected or str(actual) == str(expected))
+        if operator in (">", "<", "≥", "≤"):
+            left = as_number(actual)
+            right = as_number(expected)
+            if left is None or right is None:
+                return False
+            if operator == ">":
+                return left > right
+            if operator == "<":
+                return left < right
+            if operator == "≥":
+                return left >= right
+            return left <= right
+        if operator in ("in", "not in"):
+            values = expected if isinstance(expected, list) else [part.strip() for part in str(expected).split(",")]
+            matched = actual in values or str(actual) in [str(value) for value in values]
+            return matched if operator == "in" else not matched
+        return True
+
+    def matches(item):
+        if not conditions:
+            return True
+        for condition in conditions:
+            key = condition.get("key", "")
+            actual = get_value(item, key) if key else item
+            operator = condition.get("comparison_operator") or "contains"
+            expected = condition.get("value", "")
+            if not compare(actual, operator, expected):
+                return False
+        return True
+
+    source = records if isinstance(records, list) else []
+    result = [item for item in source if isinstance(item, dict) and matches(item)]
+    if order_enabled and order_key:
+        result.sort(key=lambda item: get_value(item, order_key) or "", reverse=order_desc)
+    if limit_enabled:
+        result = result[:limit_size]
+    return {{
+        "result": result,
+        "first_record": result[0] if result else {{}},
+        "last_record": result[-1] if result else {{}},
+    }}
+"""
+    return {
+        "code_language": "python3",
+        "code": code,
+        "variables": [{"variable": "records", "value_selector": params.get("variable"), "value_type": "array[object]"}],
+        "outputs": {
+            "result": {"type": "array[object]", "children": None},
+            "first_record": {"type": "object", "children": None},
+            "last_record": {"type": "object", "children": None},
+        },
+    }
 
 
 def _parameter_type(value: str) -> str:
@@ -1326,7 +1437,7 @@ def _selector_from_ref(value: str) -> list[str]:
     normalized = normalize_template_refs(value)
     match = re.search(r"\{\{#([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)#\}\}", normalized)
     if match:
-        return [match.group(1), match.group(2)]
+        return [match.group(1), *[piece for piece in match.group(2).split(".") if piece]]
     pieces = [piece for piece in value.split(".") if piece]
     return pieces if len(pieces) >= 2 else [value]
 
@@ -1418,6 +1529,7 @@ def _input_type(value: str) -> str:
         "file-list": "file-list",
         "files": "file-list",
         "json": "json",
+        "json-object": "json",
     }
     return mapping.get(normalized, "paragraph")
 

@@ -233,7 +233,7 @@ def _start_variable(item: dict[str, Any]) -> dict[str, Any]:
     input_type = item.get("type", "paragraph")
     variable = {
         "name": item.get("name") or item.get("variable"),
-        "type": input_type,
+        "type": "json" if input_type == "json_object" else input_type,
         "required": bool(item.get("required", True)),
         "label": item.get("label") or item.get("variable") or item.get("name"),
     }
@@ -241,6 +241,8 @@ def _start_variable(item: dict[str, Any]) -> dict[str, Any]:
         variable["max_length"] = item.get("max_length")
     if isinstance(item.get("options"), list):
         variable["options"] = deepcopy(item.get("options"))
+    if item.get("json_schema") is not None:
+        variable["json_schema"] = deepcopy(item.get("json_schema"))
     if is_file_input_type(str(input_type)):
         variable.update(file_upload_settings(item, input_type=str(input_type)))
     return variable

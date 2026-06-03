@@ -96,6 +96,7 @@ def test_planner_accepts_stable_builtin_nodes() -> None:
     doc = next(node for node in result.plan.nodes if node.id == "doc")
     list_node = next(node for node in result.plan.nodes if node.id == "list")
     assert doc.params["variable_selector"] == ["start", "files"]
+    assert list_node.params["variable"] == ["start", "items", "records"]
     assert list_node.params["limit"]["size"] == 1
 
 
@@ -247,7 +248,7 @@ def _stable_builtin_plan() -> dict:
                 "type": "list-operator",
                 "title": "筛选投诉记录",
                 "params": {
-                    "variable": ["start", "items"],
+                    "variable": ["start", "items", "records"],
                     "var_type": "array[string]",
                     "item_var_type": "string",
                     "filter_by": {"enabled": True, "conditions": [{"comparison_operator": "contains", "value": "投诉"}]},

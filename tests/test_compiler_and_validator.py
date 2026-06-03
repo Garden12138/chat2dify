@@ -837,7 +837,7 @@ def test_compiler_and_validator_cover_stable_builtin_nodes() -> None:
                     "id": "list",
                     "type": "list-operator",
                     "params": {
-                        "variable": ["start", "items"],
+                        "variable": ["start", "items", "records"],
                         "var_type": "array[string]",
                         "item_var_type": "string",
                         "filter_by": {
@@ -875,6 +875,7 @@ def test_compiler_and_validator_cover_stable_builtin_nodes() -> None:
     data = yaml.safe_load(dsl)
     nodes = {node["id"]: node["data"] for node in data["workflow"]["graph"]["nodes"]}
     files_input = next(item for item in nodes["start"]["variables"] if item["variable"] == "files")
+    items_input = next(item for item in nodes["start"]["variables"] if item["variable"] == "items")
 
     assert nodes["doc"]["type"] == "document-extractor"
     assert nodes["doc"]["variable_selector"] == ["start", "files"]
@@ -883,8 +884,10 @@ def test_compiler_and_validator_cover_stable_builtin_nodes() -> None:
     assert files_input["allowed_file_types"] == ["document", "image"]
     assert files_input["allowed_file_extensions"] == []
     assert files_input["max_length"] == 5
+    assert items_input["type"] == "json_object"
     assert nodes["aggregator"]["variables"] == [["doc", "text"], ["start", "query"]]
     assert nodes["assign"]["items"][0]["value"] == ["aggregator", "output"]
+    assert nodes["list"]["variable"] == ["start", "items", "records"]
     assert nodes["list"]["filter_by"]["conditions"][0]["value"] == "投诉"
     assert validate_plan(plan) == []
     assert validate_dsl(dsl, expected_dsl_version="9.9.9") == []
@@ -898,7 +901,7 @@ def test_normalizer_repairs_stable_builtin_node_aliases() -> None:
                 {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}, {"name": "files", "type": "files"}, {"name": "items", "type": "json"}]}},
                 {"id": "doc", "type": "doc-extractor", "params": {"file": "{{start.files}}", "array": True}},
                 {"id": "agg", "type": "aggregator", "params": {"selectors": ["{{doc.text}}", "{{start.query}}"]}},
-                {"id": "list", "type": "list-filter", "params": {"variable_selector": "{{start.items}}", "type": "array_string", "limit": 2}},
+                {"id": "list", "type": "list-filter", "params": {"variable_selector": "{{start.items.records}}", "type": "array_string", "limit": 2}},
                 {"id": "llm", "type": "llm", "params": {"prompt": "{{agg.output}} {{list.first_record}}"}},
                 {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": "{{llm.text}}"}]}},
             ],
@@ -926,13 +929,75 @@ def test_normalizer_repairs_stable_builtin_node_aliases() -> None:
     assert validate_plan(plan) == []
 
 
+def test_normalizer_repairs_list_operator_filter_aliases_and_nested_array_selector() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "name": "售后记录筛选工作流",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "items", "type": "json"}]}},
+                {
+                    "id": "list",
+                    "type": "list-filter",
+                    "params": {
+                        "variable": ["start", "items", "records"],
+                        "type": "array_object",
+                        "item_type": "object",
+                        "filter": {
+                            "enabled": True,
+                            "conditions": [{"key": "category", "comparison_operator": "eq", "value": "complaint"}],
+                        },
+                        "sort": {"enabled": True, "key": "created_at", "value": "desc"},
+                        "limit": 1,
+                    },
+                },
+                {"id": "llm", "type": "llm", "params": {"user_prompt": "请处理 {{list.first_record}}"}},
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["llm", "text"]}]}},
+            ],
+            "edges": [
+                {"source": "start", "target": "list"},
+                {"source": "list", "target": "llm"},
+                {"source": "llm", "target": "end"},
+            ],
+        }
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    code_node = next(node for node in plan.nodes if node.id == "list")
+
+    assert code_node.type == "code"
+    assert code_node.params["variables"][0]["value_selector"] == ["start", "items", "records"]
+    assert code_node.params["outputs"]["first_record"]["type"] == "object"
+    assert "'category', 'comparison_operator': '=', 'value': 'complaint'" in code_node.params["code"]
+    assert validate_plan(plan) == []
+
+    data = yaml.safe_load(_compiler().compile(plan))
+    compiled_start = next(node["data"] for node in data["workflow"]["graph"]["nodes"] if node["id"] == "start")
+    compiled_code = next(node["data"] for node in data["workflow"]["graph"]["nodes"] if node["id"] == "list")
+    compiled_items = next(item for item in compiled_start["variables"] if item["variable"] == "items")
+
+    assert compiled_items["type"] == "json_object"
+    assert compiled_code["type"] == "code"
+    assert compiled_code["variables"][0]["value_selector"] == ["start", "items", "records"]
+    assert compiled_code["outputs"]["result"]["type"] == "array[object]"
+
+
 def test_validator_rejects_invalid_stable_builtin_nodes() -> None:
     plan = WorkflowPlan.model_validate(
         {
             "name": "bad builtins",
             "nodes": [
                 {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
-                {"id": "list", "type": "list-operator", "params": {"variable": ["start", "query"], "var_type": "string"}},
+                {
+                    "id": "list",
+                    "type": "list-operator",
+                    "params": {
+                        "variable": ["start", "query"],
+                        "var_type": "string",
+                        "filter_by": {
+                            "enabled": True,
+                            "conditions": [{"comparison_operator": "eq", "value": "complaint"}],
+                        },
+                    },
+                },
                 {"id": "assign", "type": "assigner", "params": {"items": [{"input_type": "constant", "operation": "over-write", "value": "x"}]}},
                 {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["start", "query"]}]}},
             ],
@@ -947,6 +1012,7 @@ def test_validator_rejects_invalid_stable_builtin_nodes() -> None:
     issues = validate_plan(plan)
 
     assert any(issue.code == "PLAN_LIST_OPERATOR_VAR_TYPE_INVALID" for issue in issues)
+    assert any(issue.code == "PLAN_LIST_OPERATOR_FILTER_OPERATOR_INVALID" for issue in issues)
     assert any(issue.code == "PLAN_ASSIGNER_TARGET_INVALID" for issue in issues)
 
 
