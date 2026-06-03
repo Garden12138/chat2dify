@@ -7,7 +7,7 @@ import yaml
 from pydantic import ValidationError
 
 from app.list_operator import DIFY_LIST_COMPARISON_OPERATORS
-from app.models import ValidationIssue, WorkflowPlan
+from app.models import PlanNode, ValidationIssue, WorkflowPlan
 
 
 SUPPORTED_NODE_TYPES = {
@@ -26,6 +26,11 @@ SUPPORTED_NODE_TYPES = {
     "list-operator",
     "knowledge-retrieval",
     "human-input",
+    "iteration",
+    "iteration-start",
+    "loop",
+    "loop-start",
+    "loop-end",
 }
 TEMPLATE_REF_RE = re.compile(r"\{\{#([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)#\}\}")
 BARE_TEMPLATE_REF_RE = re.compile(r"\{\{\s*(?!#)([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)\s*\}\}")
@@ -69,6 +74,11 @@ GENERIC_TITLES = {
     "human",
     "manualinput",
     "approval",
+    "iteration",
+    "iterationstart",
+    "loop",
+    "loopstart",
+    "loopend",
     "开始",
     "开始节点",
     "输入",
@@ -99,6 +109,11 @@ GENERIC_TITLES = {
     "人工输入",
     "人工审核",
     "人工审批",
+    "循环",
+    "遍历",
+    "批量处理",
+    "循环开始",
+    "循环结束",
 }
 
 PARAMETER_EXTRACTOR_TYPES = {
@@ -136,7 +151,7 @@ def validate_plan(plan: WorkflowPlan) -> list[ValidationIssue]:
                     message=f"Unsupported node type: {node.type}",
                     node_id=node.id,
                     path=f"nodes.{node.id}.type",
-                    suggestion="仅使用当前支持的 start、llm、code、if-else、end、http-request、template-transform、question-classifier、parameter-extractor、variable-aggregator、document-extractor、assigner、list-operator、knowledge-retrieval、human-input 节点。",
+                    suggestion="仅使用当前支持的 start、llm、code、if-else、end、http-request、template-transform、question-classifier、parameter-extractor、variable-aggregator、document-extractor、assigner、list-operator、knowledge-retrieval、human-input、iteration、loop 节点。",
                 )
             )
     issues.extend(_validate_graph_semantics(plan))
@@ -681,6 +696,20 @@ def _validate_node_params(plan: WorkflowPlan) -> list[ValidationIssue]:
                             "params.retrieval_mode",
                         )
                     )
+            case "iteration":
+                issues.extend(_validate_iteration_node(node))
+            case "loop":
+                issues.extend(_validate_loop_node(node))
+            case "iteration-start" | "loop-start" | "loop-end":
+                issues.append(
+                    _node_issue(
+                        "PLAN_INTERNAL_NODE_TOP_LEVEL",
+                        f"{node.type} is an internal container node and cannot be used as a top-level node.",
+                        node.id,
+                        "type",
+                        suggestion="将内部 start/end 放到 iteration/loop 的 params.children 中。",
+                    )
+                )
             case "human-input":
                 delivery_methods = params.get("delivery_methods")
                 if not isinstance(delivery_methods, list) or not delivery_methods:
@@ -784,6 +813,202 @@ def _node_issue(
         path=f"nodes.{node_id}.{path}",
         suggestion=suggestion,
     )
+
+
+def _validate_iteration_node(node: PlanNode) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    params = node.params
+    if not _is_selector(params.get("iterator_selector")):
+        issues.append(_node_issue("PLAN_ITERATION_ITERATOR_MISSING", "iteration node requires iterator_selector.", node.id, "params.iterator_selector"))
+    if not _is_selector(params.get("output_selector")):
+        issues.append(_node_issue("PLAN_ITERATION_OUTPUT_SELECTOR_MISSING", "iteration node requires output_selector.", node.id, "params.output_selector"))
+    try:
+        parallel_nums = int(params.get("parallel_nums", 10))
+    except (TypeError, ValueError):
+        parallel_nums = 0
+    if parallel_nums < 1:
+        issues.append(_node_issue("PLAN_ITERATION_PARALLEL_NUMS_INVALID", "iteration parallel_nums must be positive.", node.id, "params.parallel_nums"))
+    if str(params.get("error_handle_mode", "terminated")) not in {"terminated", "continue-on-error", "remove-abnormal-output"}:
+        issues.append(_node_issue("PLAN_ITERATION_ERROR_HANDLE_MODE_INVALID", "iteration error_handle_mode is invalid.", node.id, "params.error_handle_mode"))
+    issues.extend(
+        _validate_container_graph(
+            node,
+            start_type="iteration-start",
+            output_selector=params.get("output_selector"),
+        )
+    )
+    return issues
+
+
+def _validate_loop_node(node: PlanNode) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    params = node.params
+    children = params.get("children") if isinstance(params.get("children"), list) else []
+    child_ids = {
+        str(child.get("id"))
+        for child in children
+        if isinstance(child, dict) and child.get("id")
+    }
+    try:
+        loop_count = int(params.get("loop_count", 0))
+    except (TypeError, ValueError):
+        loop_count = 0
+    if loop_count < 1:
+        issues.append(_node_issue("PLAN_LOOP_COUNT_INVALID", "loop node requires a positive loop_count.", node.id, "params.loop_count"))
+    if str(params.get("logical_operator", "and")) not in {"and", "or"}:
+        issues.append(_node_issue("PLAN_LOOP_LOGICAL_OPERATOR_INVALID", "loop logical_operator must be and or or.", node.id, "params.logical_operator"))
+    if str(params.get("error_handle_mode", "terminated")) not in {"terminated", "continue-on-error", "remove-abnormal-output"}:
+        issues.append(_node_issue("PLAN_LOOP_ERROR_HANDLE_MODE_INVALID", "loop error_handle_mode is invalid.", node.id, "params.error_handle_mode"))
+    for idx, condition in enumerate(params.get("break_conditions") or []):
+        if not isinstance(condition, dict):
+            issues.append(_node_issue("PLAN_LOOP_BREAK_CONDITION_INVALID", "loop break condition must be an object.", node.id, f"params.break_conditions.{idx}"))
+            continue
+        if condition.get("variable_selector") and not _is_selector(condition.get("variable_selector")):
+            issues.append(_node_issue("PLAN_LOOP_BREAK_CONDITION_SELECTOR_INVALID", "loop break condition variable_selector is invalid.", node.id, f"params.break_conditions.{idx}.variable_selector"))
+        selector = condition.get("variable_selector")
+        if _is_selector(selector) and str(selector[0]) in child_ids:
+            issues.append(
+                _node_issue(
+                    "PLAN_LOOP_BREAK_CONDITION_INTERNAL_SELECTOR_INVALID",
+                    "loop break_conditions must reference loop variables, not internal child outputs.",
+                    node.id,
+                    f"params.break_conditions.{idx}.variable_selector",
+                    suggestion="先用 assigner 将内部节点输出写入 loop_variables，再让 break_conditions 引用 [loop_node_id, variable_label]。",
+                )
+            )
+    seen_labels: set[str] = set()
+    for idx, variable in enumerate(params.get("loop_variables") or []):
+        if not isinstance(variable, dict) or not variable.get("label"):
+            issues.append(_node_issue("PLAN_LOOP_VARIABLE_INVALID", "loop variable requires label.", node.id, f"params.loop_variables.{idx}"))
+            continue
+        label = str(variable.get("label"))
+        if label in seen_labels:
+            issues.append(_node_issue("PLAN_LOOP_VARIABLE_DUPLICATE", f"loop variable label is duplicated: {label}", node.id, f"params.loop_variables.{idx}.label"))
+        seen_labels.add(label)
+        if variable.get("value_type") == "variable" and not _is_selector(variable.get("value")):
+            issues.append(_node_issue("PLAN_LOOP_VARIABLE_VALUE_INVALID", "loop variable value requires selector when value_type is variable.", node.id, f"params.loop_variables.{idx}.value"))
+    issues.extend(_validate_container_graph(node, start_type="loop-start", output_selector=None))
+    return issues
+
+
+def _validate_container_graph(
+    node: PlanNode,
+    *,
+    start_type: str,
+    output_selector: Any,
+) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    children = node.params.get("children")
+    if not isinstance(children, list) or not children:
+        return [
+            _node_issue(
+                "PLAN_CONTAINER_CHILDREN_MISSING",
+                f"{node.type} node requires params.children.",
+                node.id,
+                "params.children",
+            )
+        ]
+    child_by_id = {str(child.get("id")): child for child in children if isinstance(child, dict) and child.get("id")}
+    start_node_id = str(node.params.get("start_node_id") or "")
+    start_child = child_by_id.get(start_node_id)
+    if not start_node_id or not isinstance(start_child, dict) or start_child.get("type") != start_type:
+        issues.append(
+            _node_issue(
+                "PLAN_CONTAINER_START_MISSING",
+                f"{node.type} node requires a {start_type} child matching start_node_id.",
+                node.id,
+                "params.start_node_id",
+            )
+        )
+    processing_children = [
+        child
+        for child in children
+        if isinstance(child, dict) and child.get("type") not in {"iteration-start", "loop-start", "loop-end"}
+    ]
+    if not processing_children:
+        issues.append(
+            _node_issue(
+                "PLAN_CONTAINER_PROCESSING_CHILD_MISSING",
+                f"{node.type} node requires at least one internal processing node.",
+                node.id,
+                "params.children",
+            )
+        )
+    for idx, child in enumerate(children):
+        if not isinstance(child, dict) or not child.get("id") or not child.get("type"):
+            issues.append(_node_issue("PLAN_CONTAINER_CHILD_INVALID", "container child requires id and type.", node.id, f"params.children.{idx}"))
+            continue
+        child_type = str(child.get("type"))
+        if child_type not in SUPPORTED_NODE_TYPES:
+            issues.append(_node_issue("PLAN_CONTAINER_CHILD_TYPE_UNSUPPORTED", f"unsupported container child type: {child_type}", node.id, f"params.children.{idx}.type"))
+        if child_type in {"start", "end", "iteration", "loop"}:
+            issues.append(
+                _node_issue(
+                    "PLAN_CONTAINER_CHILD_TYPE_INVALID",
+                    f"{child_type} cannot be used as an internal child in this stage.",
+                    node.id,
+                    f"params.children.{idx}.type",
+                    suggestion="循环内部使用非插件处理节点；start/end 由容器自身表达。",
+                )
+            )
+
+    edges = node.params.get("edges") if isinstance(node.params.get("edges"), list) else []
+    adjacency: dict[str, list[str]] = {child_id: [] for child_id in child_by_id}
+    for idx, edge in enumerate(edges):
+        if not isinstance(edge, dict):
+            issues.append(_node_issue("PLAN_CONTAINER_EDGE_INVALID", "container edge must be an object.", node.id, f"params.edges.{idx}"))
+            continue
+        source = str(edge.get("source") or "")
+        target = str(edge.get("target") or "")
+        if source not in child_by_id or target not in child_by_id:
+            issues.append(_node_issue("PLAN_CONTAINER_EDGE_NODE_UNKNOWN", "container edge references unknown child node.", node.id, f"params.edges.{idx}"))
+            continue
+        adjacency.setdefault(source, []).append(target)
+
+    if start_node_id in child_by_id:
+        reachable = _reachable_from(start_node_id, adjacency)
+        for child in processing_children:
+            child_id = str(child.get("id"))
+            if child_id not in reachable:
+                issues.append(
+                    _node_issue(
+                        "PLAN_CONTAINER_CHILD_UNREACHABLE",
+                        f"container child is not reachable from internal start: {child_id}",
+                        node.id,
+                        "params.edges",
+                    )
+                )
+
+    if _is_selector(output_selector):
+        output_node_id = str(output_selector[0])
+        output_name = str(output_selector[1]) if len(output_selector) > 1 else ""
+        child = child_by_id.get(output_node_id)
+        if not child:
+            issues.append(_node_issue("PLAN_CONTAINER_OUTPUT_NODE_UNKNOWN", "container output_selector references unknown child.", node.id, "params.output_selector"))
+        elif output_name:
+            available_outputs = _outputs_for_node(str(child.get("type")), child.get("params") if isinstance(child.get("params"), dict) else {})
+            if available_outputs and output_name not in available_outputs:
+                issues.append(
+                    _node_issue(
+                        "PLAN_CONTAINER_OUTPUT_UNKNOWN",
+                        f"container output_selector references unknown output: {output_node_id}.{output_name}",
+                        node.id,
+                        "params.output_selector",
+                    )
+                )
+    return issues
+
+
+def _reachable_from(start_node_id: str, adjacency: dict[str, list[str]]) -> set[str]:
+    reachable: set[str] = set()
+    stack = [start_node_id]
+    while stack:
+        node_id = stack.pop()
+        if node_id in reachable:
+            continue
+        reachable.add(node_id)
+        stack.extend(adjacency.get(node_id, []))
+    return reachable
 
 
 def _is_selector(value: Any) -> bool:
@@ -897,12 +1122,76 @@ def _known_outputs(plan: WorkflowPlan) -> dict[str, set[str]]:
                     for item in node.params.get("inputs", [])
                     if isinstance(item, dict) and item.get("output_variable_name")
                 }
-                outputs[node.id] = {*names, "__action_id", "__action_value", "__rendered_content"}
+                outputs[node.id] = {*names, "selected_action", "submitted_at", "__action_id", "__action_value", "__rendered_content"}
+            case "iteration":
+                outputs[node.id] = {"output", "item", "index"}
+            case "loop":
+                labels = {
+                    str(item.get("label"))
+                    for item in node.params.get("loop_variables", [])
+                    if isinstance(item, dict) and item.get("label")
+                }
+                outputs[node.id] = {*labels, "loop_round"}
+            case "iteration-start" | "loop-start" | "loop-end":
+                outputs[node.id] = set()
             case "assigner":
                 outputs[node.id] = set()
             case "end" | "if-else":
                 outputs[node.id] = set()
+        children = node.params.get("children") if isinstance(node.params.get("children"), list) else []
+        for child in children:
+            if not isinstance(child, dict) or not child.get("id") or not child.get("type"):
+                continue
+            outputs[str(child["id"])] = _outputs_for_node(
+                str(child["type"]),
+                child.get("params") if isinstance(child.get("params"), dict) else {},
+            )
     return outputs
+
+
+def _outputs_for_node(node_type: str, params: dict[str, Any]) -> set[str]:
+    match node_type:
+        case "llm":
+            return {"text"}
+        case "code":
+            declared = params.get("outputs") or {"result": {"type": "string", "children": None}}
+            return set(declared.keys()) if isinstance(declared, dict) else set()
+        case "http-request":
+            return {"body", "status_code", "headers"}
+        case "template-transform":
+            return {"output"}
+        case "parameter-extractor":
+            names = {
+                str(item.get("name"))
+                for item in params.get("parameters", [])
+                if isinstance(item, dict) and item.get("name")
+            }
+            return {*names, "__is_success", "__reason", "__usage"}
+        case "variable-aggregator":
+            return {"output"}
+        case "document-extractor":
+            return {"text"}
+        case "list-operator":
+            return {"result", "first_record", "last_record"}
+        case "knowledge-retrieval":
+            return {"result"}
+        case "human-input":
+            names = {
+                str(item.get("output_variable_name"))
+                for item in params.get("inputs", [])
+                if isinstance(item, dict) and item.get("output_variable_name")
+            }
+            return {*names, "selected_action", "submitted_at", "__action_id", "__action_value", "__rendered_content"}
+        case "iteration":
+            return {"output", "item", "index"}
+        case "loop":
+            labels = {
+                str(item.get("label"))
+                for item in params.get("loop_variables", [])
+                if isinstance(item, dict) and item.get("label")
+            }
+            return {*labels, "loop_round"}
+    return set()
 
 
 def _selectors_in_value(value: Any) -> list[list[str]]:
@@ -917,6 +1206,8 @@ def _selectors_in_value(value: Any) -> list[list[str]]:
                     "query",
                     "query_variable_selector",
                     "query_attachment_selector",
+                    "iterator_selector",
+                    "output_selector",
                     "variable",
                 }
                 and _is_selector(child)

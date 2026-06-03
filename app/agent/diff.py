@@ -149,6 +149,27 @@ def _param_change_type(node_type: str, field: str) -> str:
         "timeout_unit",
     }:
         return "human_input_changed"
+    if node_type == "iteration" and field in {
+        "iterator_selector",
+        "output_selector",
+        "is_parallel",
+        "parallel_nums",
+        "error_handle_mode",
+        "flatten_output",
+        "children",
+        "edges",
+    }:
+        return "iteration_changed"
+    if node_type == "loop" and field in {
+        "loop_count",
+        "break_conditions",
+        "logical_operator",
+        "loop_variables",
+        "error_handle_mode",
+        "children",
+        "edges",
+    }:
+        return "loop_changed"
     return "node_params_updated"
 
 
@@ -181,6 +202,10 @@ def _param_change_message(node: PlanNode, field: str) -> str:
             return f"更新知识库检索节点 {title} 的 {field}。"
         case "human_input_changed":
             return f"更新人工介入节点 {title} 的 {field}。"
+        case "iteration_changed":
+            return f"更新批量遍历节点 {title} 的 {field}。"
+        case "loop_changed":
+            return f"更新循环节点 {title} 的 {field}。"
     return f"更新 {node.type} 节点 {title} 的 {field}。"
 
 

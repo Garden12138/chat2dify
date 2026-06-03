@@ -28,8 +28,25 @@ SUPPORTED_DIFY_NODE_TYPES = {
     "list-operator",
     "knowledge-retrieval",
     "human-input",
+    "iteration",
+    "iteration-start",
+    "loop",
+    "loop-start",
+    "loop-end",
 }
-LAYOUT_KEYS = ("position", "positionAbsolute", "width", "height", "sourcePosition", "targetPosition")
+LAYOUT_KEYS = (
+    "position",
+    "positionAbsolute",
+    "width",
+    "height",
+    "sourcePosition",
+    "targetPosition",
+    "parentId",
+    "extent",
+    "zIndex",
+    "selectable",
+    "draggable",
+)
 
 
 class DifyGraphAdapterError(RuntimeError):
@@ -51,7 +68,17 @@ def decompile_dify_graph(graph: dict[str, Any], *, name: str = "Existing Workflo
     if not isinstance(nodes, list) or not isinstance(edges, list):
         raise DifyGraphAdapterError("Dify workflow graph must contain nodes and edges lists.")
 
-    plan_nodes = []
+    raw_nodes_by_id = {
+        str(node.get("id")): node
+        for node in nodes
+        if isinstance(node, dict) and node.get("id")
+    }
+    parent_by_child = {
+        node_id: str(node.get("parentId"))
+        for node_id, node in raw_nodes_by_id.items()
+        if node.get("parentId")
+    }
+    children_by_parent: dict[str, list[dict[str, Any]]] = {}
     for node in nodes:
         if not isinstance(node, dict):
             continue
@@ -60,24 +87,35 @@ def decompile_dify_graph(graph: dict[str, Any], *, name: str = "Existing Workflo
         node_id = str(node.get("id", ""))
         if node_type not in SUPPORTED_DIFY_NODE_TYPES:
             raise UnsupportedExistingNodeType(node_id=node_id, node_type=node_type or "<missing>")
-        plan_nodes.append(
-            {
-                "id": node_id,
-                "type": node_type,
-                "title": data.get("title") or node_type.replace("-", " ").title(),
-                "desc": data.get("desc") or "",
-                "params": _params_from_dify_node_data(node_type, data),
-            }
-        )
+        parent_id = parent_by_child.get(node_id)
+        if parent_id:
+            children_by_parent.setdefault(parent_id, []).append(node)
+
+    plan_nodes = []
+    child_ids = set(parent_by_child)
+    for node in nodes:
+        if not isinstance(node, dict) or str(node.get("id", "")) in child_ids:
+            continue
+        plan_node = _plan_node_from_dify_node(node)
+        node_type = plan_node["type"]
+        if node_type in {"iteration", "loop"}:
+            children = [_plan_node_from_dify_node(child, include_position=True) for child in children_by_parent.get(plan_node["id"], [])]
+            plan_node["params"]["children"] = children
+            plan_node["params"]["edges"] = _container_edges_from_dify_edges(edges, parent_by_child, plan_node["id"])
+        plan_nodes.append(plan_node)
 
     plan_edges = []
     for edge in edges:
         if not isinstance(edge, dict):
             continue
+        source = str(edge.get("source", ""))
+        target = str(edge.get("target", ""))
+        if source in child_ids or target in child_ids:
+            continue
         plan_edges.append(
             {
-                "source": str(edge.get("source", "")),
-                "target": str(edge.get("target", "")),
+                "source": source,
+                "target": target,
                 "source_handle": str(edge.get("sourceHandle") or edge.get("source_handle") or "source"),
                 "target_handle": str(edge.get("targetHandle") or edge.get("target_handle") or "target"),
             }
@@ -105,6 +143,46 @@ def compile_plan_to_dify_graph(
     if base_graph:
         _merge_existing_layout(graph, base_graph)
     return graph
+
+
+def _plan_node_from_dify_node(node: dict[str, Any], *, include_position: bool = False) -> dict[str, Any]:
+    data = node.get("data") if isinstance(node.get("data"), dict) else {}
+    node_type = str(data.get("type", ""))
+    params = _params_from_dify_node_data(node_type, data)
+    if include_position and isinstance(node.get("position"), dict):
+        params["_position"] = deepcopy(node["position"])
+    return {
+        "id": str(node.get("id", "")),
+        "type": node_type,
+        "title": data.get("title") or node_type.replace("-", " ").title(),
+        "desc": data.get("desc") or "",
+        "params": params,
+    }
+
+
+def _container_edges_from_dify_edges(
+    edges: list[Any],
+    parent_by_child: dict[str, str],
+    parent_id: str,
+) -> list[dict[str, str]]:
+    plan_edges = []
+    child_ids = {child_id for child_id, item_parent_id in parent_by_child.items() if item_parent_id == parent_id}
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        source = str(edge.get("source", ""))
+        target = str(edge.get("target", ""))
+        if source not in child_ids or target not in child_ids:
+            continue
+        plan_edges.append(
+            {
+                "source": source,
+                "target": target,
+                "source_handle": str(edge.get("sourceHandle") or edge.get("source_handle") or "source"),
+                "target_handle": str(edge.get("targetHandle") or edge.get("target_handle") or "target"),
+            }
+        )
+    return plan_edges
 
 
 def _params_from_dify_node_data(node_type: str, data: dict[str, Any]) -> dict[str, Any]:
@@ -236,6 +314,30 @@ def _params_from_dify_node_data(node_type: str, data: dict[str, Any]) -> dict[st
                 "timeout": data.get("timeout", 3),
                 "timeout_unit": data.get("timeout_unit", "day"),
             }
+        case "iteration":
+            return {
+                "start_node_id": data.get("start_node_id", ""),
+                "iterator_selector": deepcopy(data.get("iterator_selector") or []),
+                "iterator_input_type": data.get("iterator_input_type", "array[string]"),
+                "output_selector": deepcopy(data.get("output_selector") or []),
+                "output_type": data.get("output_type", "array[string]"),
+                "is_parallel": bool(data.get("is_parallel", False)),
+                "parallel_nums": data.get("parallel_nums", 10),
+                "error_handle_mode": data.get("error_handle_mode", "terminated"),
+                "flatten_output": bool(data.get("flatten_output", True)),
+                "_isShowTips": bool(data.get("_isShowTips", False)),
+            }
+        case "loop":
+            return {
+                "start_node_id": data.get("start_node_id", ""),
+                "break_conditions": deepcopy(data.get("break_conditions") or []),
+                "loop_count": data.get("loop_count", 3),
+                "logical_operator": data.get("logical_operator", "and"),
+                "loop_variables": deepcopy(data.get("loop_variables") or []),
+                "error_handle_mode": data.get("error_handle_mode", "terminated"),
+            }
+        case "iteration-start" | "loop-start" | "loop-end":
+            return {}
     return {}
 
 
@@ -291,6 +393,9 @@ def _merge_existing_layout(graph: dict[str, Any], base_graph: dict[str, Any]) ->
             for key in LAYOUT_KEYS:
                 if key in base_node:
                     node[key] = deepcopy(base_node[key])
+        elif node.get("parentId"):
+            node.setdefault("position", {"x": 24, "y": 68})
+            node.setdefault("positionAbsolute", deepcopy(node["position"]))
         else:
             node["position"] = _new_node_position(node_id, graph, positions, base_nodes)
             node["positionAbsolute"] = deepcopy(node["position"])

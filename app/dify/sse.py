@@ -42,6 +42,8 @@ def summarize_events(events: list[dict[str, Any]], parse_errors: list[SseParseIs
     event_counts: dict[str, int] = {}
     node_started = 0
     node_finished = 0
+    iteration_events = 0
+    loop_events = 0
     for event in events:
         event_type = str(event.get("event", "unknown"))
         event_counts[event_type] = event_counts.get(event_type, 0) + 1
@@ -49,11 +51,17 @@ def summarize_events(events: list[dict[str, Any]], parse_errors: list[SseParseIs
             node_started += 1
         elif event_type == "node_finished":
             node_finished += 1
+        elif event_type in {"iteration_started", "iteration_next", "iteration_completed"}:
+            iteration_events += 1
+        elif event_type in {"loop_started", "loop_next", "loop_completed"}:
+            loop_events += 1
     return {
         "events": len(events),
         "event_counts": event_counts,
         "node_started": node_started,
         "node_finished": node_finished,
+        "iteration_events": iteration_events,
+        "loop_events": loop_events,
         "parse_errors": len(parse_errors),
     }
 

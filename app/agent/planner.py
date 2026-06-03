@@ -18,7 +18,9 @@ SYSTEM_PROMPT = """You turn a user's workflow request into a compact JSON Workfl
 Return only JSON. Supported node types are:
 start, llm, code, if-else, end, http-request, template-transform,
 question-classifier, parameter-extractor, variable-aggregator,
-document-extractor, list-operator, knowledge-retrieval, human-input.
+document-extractor, list-operator, knowledge-retrieval, human-input,
+iteration, loop. iteration-start, loop-start, and loop-end are internal
+container children only; never place them in top-level nodes.
 Use exactly one start node and at least one end node. Keep nodes connected.
 For simple requests, use start -> llm -> end.
 Use if-else for explicit string or numeric conditions.
@@ -44,7 +46,13 @@ Use human-input only when the request explicitly asks for human review, manual a
 human-input delivery_methods[].id must be a valid UUID.
 Each outgoing edge from human-input must set source_handle to the matching user_actions[].id.
 human-input outputs include form input names plus __action_id, __action_value, and __rendered_content.
-Do not generate assigner in new workflows; it is reserved for editing existing Dify drafts with explicit variable assignment context.
+Use iteration only when the request explicitly asks to batch process, traverse a list, handle each record, or generate one result per item. The top-level node is type "iteration"; put internal nodes in params.children and internal edges in params.edges. Do not put iteration-start in top-level nodes. Minimal params:
+{"iterator_selector":["start","items"],"iterator_input_type":"array[string]","output_selector":["iter_item","text"],"output_type":"array[string]","is_parallel":false,"parallel_nums":10,"error_handle_mode":"terminated","flatten_output":true,"children":[{"id":"iter_start","type":"iteration-start","title":"开始遍历","params":{}},{"id":"iter_item","type":"llm","title":"逐条生成处理建议","params":{"system_prompt":"...","user_prompt":"请处理当前记录：{{#iter.item#}}"}}],"edges":[{"source":"iter_start","target":"iter_item"}]}.
+When an internal iteration child handles the current item, reference the parent iteration node item as {{#<iteration_node_id>.item#}} and index as {{#<iteration_node_id>.index#}}.
+Use loop only when the request explicitly asks to retry, repeat until a condition is met, check repeatedly, or run at most N times. The top-level node is type "loop"; put loop-start and internal processing nodes in params.children. Do not put loop-start or loop-end in top-level nodes. Minimal params:
+{"loop_count":3,"logical_operator":"and","break_conditions":[],"loop_variables":[],"error_handle_mode":"terminated","children":[{"id":"retry_start","type":"loop-start","title":"开始循环","params":{}},{"id":"retry_step","type":"llm","title":"执行重试检查","params":{"system_prompt":"...","user_prompt":"请检查当前状态：{{#start.query#}}"}}],"edges":[{"source":"retry_start","target":"retry_step"}]}.
+Loop break_conditions must reference loop variables such as ["retry","status_text"], not internal child outputs such as ["retry_step","text"]. If an until condition depends on an internal child output, add a loop_variables item and an internal assigner child that writes the child output into that loop variable, then have break_conditions read the loop variable.
+Do not generate assigner in new workflows except for this loop-variable update pattern. Otherwise assigner is reserved for editing existing Dify drafts with explicit variable assignment context.
 Every node must have a business-specific title. Do not use generic titles like
 Start, LLM, End, Code, Node, 开始, 大模型, 结束. Good Chinese examples:
 接收售后诉求, 判断售后类型, 生成理发售后回复, 返回处理结果.

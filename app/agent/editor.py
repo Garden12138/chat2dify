@@ -25,7 +25,9 @@ Return only JSON. Return the full revised WorkflowPlan, not a patch.
 Supported node types are only:
 start, llm, code, if-else, end, http-request, template-transform,
 question-classifier, parameter-extractor, variable-aggregator,
-document-extractor, assigner, list-operator, knowledge-retrieval, human-input.
+document-extractor, assigner, list-operator, knowledge-retrieval, human-input,
+iteration, loop. iteration-start, loop-start, and loop-end are internal
+container children only; never place them in top-level nodes.
 Prefer the smallest safe change that satisfies the request.
 Preserve existing node ids when a node keeps the same purpose.
 Use if-else for explicit string or numeric conditions.
@@ -37,8 +39,11 @@ Use list-operator only for filtering/sorting/limiting arrays.
 Use knowledge-retrieval only for explicit knowledge base, document library, RAG, retrieval, or stored-material Q&A requests.
 Use human-input only for explicit human review, manual approval, manager approval, human confirmation, or human-supplied follow-up information. delivery_methods[].id must be a valid UUID. Each action needs an outgoing edge with source_handle equal to user_actions[].id.
 human-input outputs include form input names plus __action_id, __action_value, and __rendered_content.
+Use iteration only for explicit batch/list traversal requirements. Keep internal children in the iteration node params.children and internal edges in params.edges; internal item references should use {{#<iteration_node_id>.item#}}.
+Use loop only for explicit retry/repeat/until/max-N-times requirements. Keep loop-start/loop-end inside the loop node params.children and internal edges in params.edges.
+Loop break_conditions must reference loop variables such as ["retry","status_text"], not internal child outputs such as ["retry_step","text"]. If an until condition depends on an internal child output, add or keep an internal assigner child that writes the child output into a loop variable, then have break_conditions read the loop variable.
 Do not invent dataset_ids. Keep existing dataset_ids, or omit them so chat2dify can inject DIFY_DEFAULT_DATASET_IDS for newly added knowledge nodes.
-Keep existing assigner nodes when present, but do not add assigner unless the request explicitly asks to update an existing variable and the target variable is unambiguous.
+Keep existing assigner nodes when present, but do not add assigner unless the request explicitly asks to update an existing variable, the target variable is unambiguous, or it is needed for the loop-variable update pattern above.
 Every node must keep or receive a business-specific title. Do not use generic
 titles like Start, LLM, End, Code, Node, 开始, 大模型, 结束.
 For every llm node, split prompts clearly:
@@ -132,6 +137,7 @@ class WorkflowEditPlanner:
                     "Existing start inputs unless explicitly requested.",
                     "Existing end outputs unless explicitly requested.",
                     "Unrelated node params and edges.",
+                    "Existing iteration/loop params.children and params.edges unless explicitly requested.",
                 ],
                 "avoid": [
                     "Rebuilding the whole graph.",

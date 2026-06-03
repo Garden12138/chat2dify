@@ -189,6 +189,76 @@ def test_decompile_dify_graph_covers_human_input_node() -> None:
     assert review.params["timeout_unit"] == "day"
 
 
+def test_decompile_dify_graph_covers_iteration_and_loop_containers() -> None:
+    plan = WorkflowPlan.model_validate(
+        {
+            "name": "containers",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "items", "type": "json"}, {"name": "query"}]}},
+                {
+                    "id": "batch",
+                    "type": "iteration",
+                    "title": "批量处理记录",
+                    "params": {
+                        "start_node_id": "batch_start",
+                        "iterator_selector": ["start", "items", "records"],
+                        "output_selector": ["item_template", "output"],
+                        "children": [
+                            {"id": "batch_start", "type": "iteration-start", "params": {}},
+                            {
+                                "id": "item_template",
+                                "type": "template-transform",
+                                "params": {
+                                    "template": "{{ item }}",
+                                    "variables": [{"variable": "item", "value_selector": ["batch", "item"]}],
+                                },
+                            },
+                        ],
+                        "edges": [{"source": "batch_start", "target": "item_template"}],
+                    },
+                },
+                {
+                    "id": "retry",
+                    "type": "loop",
+                    "title": "循环检查状态",
+                    "params": {
+                        "start_node_id": "retry_start",
+                        "loop_count": 3,
+                        "children": [
+                            {"id": "retry_start", "type": "loop-start", "params": {}},
+                            {"id": "retry_template", "type": "template-transform", "params": {"template": "{{#start.query#}}"}},
+                        ],
+                        "edges": [{"source": "retry_start", "target": "retry_template"}],
+                    },
+                },
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answers", "value_selector": ["batch", "output"]}]}},
+            ],
+            "edges": [
+                {"source": "start", "target": "batch"},
+                {"source": "batch", "target": "retry"},
+                {"source": "retry", "target": "end"},
+            ],
+        }
+    )
+    graph = yaml.safe_load(_compiler().compile(plan))["workflow"]["graph"]
+
+    decompiled = decompile_dify_graph(graph, name="Loaded")
+    nodes = {node.id: node for node in decompiled.nodes}
+
+    assert set(nodes) == {"start", "batch", "retry", "end"}
+    assert nodes["batch"].type == "iteration"
+    assert [child["id"] for child in nodes["batch"].params["children"]] == ["batch_start", "item_template"]
+    assert nodes["batch"].params["edges"][0] == {
+        "source": "batch_start",
+        "target": "item_template",
+        "source_handle": "source",
+        "target_handle": "target",
+    }
+    assert nodes["retry"].type == "loop"
+    assert [child["id"] for child in nodes["retry"].params["children"]] == ["retry_start", "retry_template"]
+    assert nodes["retry"].params["loop_count"] == 3
+
+
 def test_compile_plan_to_dify_graph_preserves_existing_layout_and_places_new_nodes() -> None:
     base_plan = WorkflowPlan.model_validate(
         {

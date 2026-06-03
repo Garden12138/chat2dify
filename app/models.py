@@ -21,6 +21,11 @@ NodeType = Literal[
     "list-operator",
     "knowledge-retrieval",
     "human-input",
+    "iteration",
+    "iteration-start",
+    "loop",
+    "loop-start",
+    "loop-end",
 ]
 InputType = Literal["text", "paragraph", "number", "boolean", "file", "file-list", "json"]
 

@@ -1342,6 +1342,212 @@ def test_validator_rejects_start_incoming_and_end_outgoing() -> None:
     assert any(issue.code == "PLAN_END_HAS_OUTGOING_EDGE" for issue in issues)
 
 
+def test_normalizer_compiler_and_validator_cover_iteration_node() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "name": "批量售后记录处理",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "items", "type": "json"}]}},
+                {
+                    "id": "batch",
+                    "type": "batch",
+                    "params": {
+                        "iterator_selector": ["start", "items", "records"],
+                        "children": [
+                            {"id": "batch_start", "type": "iteration-start"},
+                            {
+                                "id": "item_llm",
+                                "type": "llm",
+                                "title": "逐条生成售后建议",
+                                "params": {"user_prompt": "请处理当前售后记录：{{#batch.item#}}"},
+                            },
+                        ],
+                        "edges": [{"source": "batch_start", "target": "item_llm"}],
+                    },
+                },
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answers", "value_selector": ["batch", "output"]}]}},
+            ],
+            "edges": [{"source": "start", "target": "batch"}, {"source": "batch", "target": "end"}],
+        }
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    dsl = _compiler().compile(plan)
+    graph = yaml.safe_load(dsl)["workflow"]["graph"]
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    internal_edge = next(edge for edge in graph["edges"] if edge["source"] == "batch_start" and edge["target"] == "item_llm")
+
+    assert next(node for node in plan.nodes if node.id == "batch").type == "iteration"
+    assert validate_plan(plan) == []
+    assert validate_dsl(dsl, expected_dsl_version="9.9.9") == []
+    assert nodes["batch"]["data"]["type"] == "iteration"
+    assert nodes["batch"]["data"]["_children"] == [
+        {"nodeId": "batch_start", "nodeType": "iteration-start"},
+        {"nodeId": "item_llm", "nodeType": "llm"},
+    ]
+    assert nodes["batch_start"]["parentId"] == "batch"
+    assert nodes["batch_start"]["type"] == "custom-iteration-start"
+    assert nodes["item_llm"]["parentId"] == "batch"
+    assert internal_edge["data"]["isInIteration"] is True
+    assert internal_edge["data"]["iteration_id"] == "batch"
+
+
+def test_normalizer_compiler_and_validator_cover_loop_node() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "name": "维修状态重试检查",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {"id": "retry", "type": "retry_loop", "params": {"loop_count": 3}},
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["start", "query"]}]}},
+            ],
+            "edges": [{"source": "start", "target": "retry"}, {"source": "retry", "target": "end"}],
+        }
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    dsl = _compiler().compile(plan)
+    graph = yaml.safe_load(dsl)["workflow"]["graph"]
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    internal_edges = [edge for edge in graph["edges"] if edge["data"].get("isInLoop")]
+
+    assert next(node for node in plan.nodes if node.id == "retry").type == "loop"
+    assert validate_plan(plan) == []
+    assert nodes["retry"]["data"]["type"] == "loop"
+    assert nodes["retry"]["data"]["loop_count"] == 3
+    assert nodes["retrystart"]["parentId"] == "retry"
+    assert nodes["retrystart"]["type"] == "custom-loop-start"
+    assert internal_edges and internal_edges[0]["data"]["loop_id"] == "retry"
+
+
+def test_loop_break_condition_uses_loop_variable_for_dify_checklist() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "name": "维修状态重试检查",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "retry",
+                    "type": "loop",
+                    "params": {
+                        "loop_count": 3,
+                        "start_node_id": "retry_start",
+                        "break_conditions": [
+                            {
+                                "id": "done",
+                                "variable_selector": ["check_status", "text"],
+                                "comparison_operator": "contains",
+                                "value": "已完成",
+                                "varType": "string",
+                            }
+                        ],
+                        "children": [
+                            {"id": "retry_start", "type": "loop-start", "params": {}},
+                            {
+                                "id": "check_status",
+                                "type": "llm",
+                                "title": "检查维修处理状态",
+                                "params": {
+                                    "system_prompt": "你是维修售后状态检查专员。",
+                                    "user_prompt": "请检查当前维修状态：{{#start.query#}}",
+                                },
+                            },
+                        ],
+                        "edges": [{"source": "retry_start", "target": "check_status"}],
+                    },
+                },
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["start", "query"]}]}},
+            ],
+            "edges": [{"source": "start", "target": "retry"}, {"source": "retry", "target": "end"}],
+        }
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    retry = next(node for node in plan.nodes if node.id == "retry")
+    condition_selector = retry.params["break_conditions"][0]["variable_selector"]
+    variable_label = condition_selector[1]
+    assigner = next(child for child in retry.params["children"] if child["type"] == "assigner")
+
+    assert condition_selector == ["retry", variable_label]
+    assert any(item["label"] == variable_label for item in retry.params["loop_variables"])
+    assert assigner["params"]["items"][0]["variable_selector"] == ["retry", variable_label]
+    assert assigner["params"]["items"][0]["value"] == ["check_status", "text"]
+    assert validate_plan(plan) == []
+
+    graph = yaml.safe_load(_compiler().compile(plan))["workflow"]["graph"]
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    internal_edges = [edge for edge in graph["edges"] if edge["data"].get("isInLoop")]
+    assert nodes[assigner["id"]]["parentId"] == "retry"
+    assert any(edge["source"] == "check_status" and edge["target"] == assigner["id"] for edge in internal_edges)
+
+
+def test_validator_rejects_loop_break_condition_internal_child_selector() -> None:
+    plan = WorkflowPlan.model_validate(
+        {
+            "name": "bad loop",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "retry",
+                    "type": "loop",
+                    "params": {
+                        "loop_count": 3,
+                        "start_node_id": "retry_start",
+                        "break_conditions": [{"variable_selector": ["check_status", "text"]}],
+                        "children": [
+                            {"id": "retry_start", "type": "loop-start", "params": {}},
+                            {
+                                "id": "check_status",
+                                "type": "llm",
+                                "params": {
+                                    "system_prompt": "你是维修售后状态检查专员。",
+                                    "user_prompt": "请检查：{{#start.query#}}",
+                                },
+                            },
+                        ],
+                        "edges": [{"source": "retry_start", "target": "check_status"}],
+                    },
+                },
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["start", "query"]}]}},
+            ],
+            "edges": [{"source": "start", "target": "retry"}, {"source": "retry", "target": "end"}],
+        }
+    )
+
+    issues = validate_plan(plan)
+
+    assert any(issue.code == "PLAN_LOOP_BREAK_CONDITION_INTERNAL_SELECTOR_INVALID" for issue in issues)
+
+
+def test_validator_rejects_invalid_iteration_container_graph() -> None:
+    plan = WorkflowPlan.model_validate(
+        {
+            "name": "bad iteration",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "items", "type": "json"}]}},
+                {
+                    "id": "batch",
+                    "type": "iteration",
+                    "params": {
+                        "start_node_id": "batch_start",
+                        "iterator_selector": ["start", "items"],
+                        "output_selector": ["missing", "output"],
+                        "children": [
+                            {"id": "batch_start", "type": "iteration-start", "params": {}},
+                            {"id": "item_template", "type": "template-transform", "params": {"template": "{{#batch.item#}}"}},
+                        ],
+                        "edges": [],
+                    },
+                },
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["batch", "output"]}]}},
+            ],
+            "edges": [{"source": "start", "target": "batch"}, {"source": "batch", "target": "end"}],
+        }
+    )
+
+    issues = validate_plan(plan)
+
+    assert any(issue.code == "PLAN_CONTAINER_CHILD_UNREACHABLE" for issue in issues)
+    assert any(issue.code == "PLAN_CONTAINER_OUTPUT_NODE_UNKNOWN" for issue in issues)
+
+
 def _shorthand_branch_plan() -> dict:
     return {
         "name": "客服分流",

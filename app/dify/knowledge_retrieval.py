@@ -8,10 +8,10 @@ from app.models import WorkflowPlan
 
 def knowledge_dataset_ids(plan: WorkflowPlan, default_dataset_ids: list[str] | None = None) -> list[str]:
     ids: list[str] = []
-    for node in plan.nodes:
-        if node.type != "knowledge-retrieval":
+    for node_type, params in _iter_plan_node_params(plan):
+        if node_type != "knowledge-retrieval":
             continue
-        node_dataset_ids = _string_list(node.params.get("dataset_ids")) or list(default_dataset_ids or [])
+        node_dataset_ids = _string_list(params.get("dataset_ids")) or list(default_dataset_ids or [])
         for dataset_id in node_dataset_ids:
             if dataset_id not in ids:
                 ids.append(dataset_id)
@@ -29,21 +29,31 @@ def apply_dataset_retrieval_settings(
 
     enriched = plan.model_copy(deep=True)
     changed = False
-    for node in enriched.nodes:
-        if node.type != "knowledge-retrieval":
+    for node_type, params in _iter_plan_node_params(enriched):
+        if node_type != "knowledge-retrieval":
             continue
-        dataset_ids = _string_list(node.params.get("dataset_ids")) or list(default_dataset_ids or [])
+        dataset_ids = _string_list(params.get("dataset_ids")) or list(default_dataset_ids or [])
         selected_datasets = [datasets_by_id[dataset_id] for dataset_id in dataset_ids if dataset_id in datasets_by_id]
         if not selected_datasets:
             continue
 
-        current_config = node.params.get("multiple_retrieval_config")
+        current_config = params.get("multiple_retrieval_config")
         next_config = multiple_retrieval_config_from_datasets(current_config, selected_datasets)
         if next_config != current_config:
-            node.params["multiple_retrieval_config"] = next_config
+            params["multiple_retrieval_config"] = next_config
             changed = True
 
     return enriched if changed else plan
+
+
+def _iter_plan_node_params(plan: WorkflowPlan):
+    for node in plan.nodes:
+        yield node.type, node.params
+        children = node.params.get("children") if isinstance(node.params.get("children"), list) else []
+        for child in children:
+            if isinstance(child, dict):
+                params = child.get("params") if isinstance(child.get("params"), dict) else {}
+                yield str(child.get("type") or ""), params
 
 
 def multiple_retrieval_config_from_datasets(value: Any, datasets: list[Any]) -> dict[str, Any]:

@@ -773,6 +773,27 @@ function nodeDetails(node) {
       promptPreview("Form", params.form_content),
     ];
   }
+  if (node.type === "iteration") {
+    const children = Array.isArray(params.children) ? params.children : [];
+    return [
+      nodeLine("Iterator", selectorLabel(params.iterator_selector)),
+      nodeLine("Output", selectorLabel(params.output_selector)),
+      nodeLine("Parallel", params.is_parallel ? `${params.parallel_nums || 10}` : "disabled"),
+      nodeLine("Flatten", params.flatten_output === false ? "false" : "true"),
+      nodeLine("Children", childSummary(children)),
+    ];
+  }
+  if (node.type === "loop") {
+    const children = Array.isArray(params.children) ? params.children : [];
+    const conditions = Array.isArray(params.break_conditions) ? params.break_conditions : [];
+    const variables = Array.isArray(params.loop_variables) ? params.loop_variables : [];
+    return [
+      nodeLine("Max count", String(params.loop_count || 3)),
+      nodeLine("Break", `${params.logical_operator || "and"} · ${conditions.length} condition${conditions.length === 1 ? "" : "s"}`),
+      nodeLine("Variables", variables.map((item) => `${item.label}:${item.var_type || "string"}`).filter(Boolean).join(", ") || "none"),
+      nodeLine("Children", childSummary(children)),
+    ];
+  }
   if (node.type === "code") {
     return [promptPreview("Code", params.code)];
   }
@@ -788,6 +809,13 @@ function modelLabel(params) {
 
 function selectorLabel(selector) {
   return Array.isArray(selector) ? selector.join(".") : selector || "none";
+}
+
+function childSummary(children) {
+  if (!Array.isArray(children) || children.length === 0) {
+    return "none";
+  }
+  return children.map((child) => `${child.title || child.id || "child"} (${child.type || "unknown"})`).join(", ");
 }
 
 function nodeLine(label, value) {

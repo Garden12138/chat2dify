@@ -43,13 +43,21 @@ def test_summarize_events_counts_nodes_and_parse_errors() -> None:
             {"event": "workflow_started"},
             {"event": "node_started"},
             {"event": "node_finished"},
+            {"event": "iteration_started"},
+            {"event": "iteration_next"},
+            {"event": "iteration_completed"},
+            {"event": "loop_started"},
+            {"event": "loop_next"},
+            {"event": "loop_completed"},
             {"event": "workflow_finished"},
         ],
         [SseParseIssue(message="bad", raw="{bad")],
     )
 
-    assert summary["events"] == 4
+    assert summary["events"] == 10
     assert summary["node_started"] == 1
     assert summary["node_finished"] == 1
+    assert summary["iteration_events"] == 3
+    assert summary["loop_events"] == 3
     assert summary["event_counts"]["workflow_finished"] == 1
     assert summary["parse_errors"] == 1

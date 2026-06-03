@@ -56,6 +56,13 @@ def explain_plan(plan: WorkflowPlan) -> dict[str, list[str] | str]:
         elif node.type == "human-input":
             actions = [str(item.get("title") or item.get("id")) for item in node.params.get("user_actions", []) if isinstance(item, dict)]
             steps.append(f"{node.id} 等待人工介入：{', '.join(actions) or '未配置动作'}")
+        elif node.type == "iteration":
+            children = node.params.get("children", [])
+            selector = ".".join(str(part) for part in node.params.get("iterator_selector", []))
+            steps.append(f"{node.id} 遍历列表 {selector or '未配置'}，内部节点 {len(children) if isinstance(children, list) else 0} 个")
+        elif node.type == "loop":
+            children = node.params.get("children", [])
+            steps.append(f"{node.id} 最多循环 {node.params.get('loop_count', 3)} 次，内部节点 {len(children) if isinstance(children, list) else 0} 个")
         elif node.type in {"code", "http-request", "template-transform"}:
             steps.append(f"{node.id} 执行 {node.type} 节点")
 

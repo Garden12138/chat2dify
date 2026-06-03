@@ -129,6 +129,31 @@ def test_planner_accepts_human_input_node() -> None:
     assert sorted(edge.source_handle for edge in result.plan.edges if edge.source == "review") == ["approve", "reject"]
 
 
+def test_planner_accepts_iteration_node() -> None:
+    planner = FakePlanner([json.dumps(_iteration_plan())])
+
+    result = planner.generate("批量处理售后记录列表并逐条生成建议", app_name="批量售后处理", dsl_version="9.9.9")
+
+    batch = next(node for node in result.plan.nodes if node.id == "batch")
+    assert batch.type == "iteration"
+    assert batch.params["iterator_selector"] == ["start", "items", "records"]
+    assert batch.params["output_selector"] == ["item_llm", "text"]
+    assert [child["type"] for child in batch.params["children"]] == ["iteration-start", "llm"]
+    assert batch.params["edges"][0]["source"] == "batch_start"
+
+
+def test_planner_accepts_loop_node() -> None:
+    planner = FakePlanner([json.dumps(_loop_plan())])
+
+    result = planner.generate("最多 3 次循环检查维修状态", app_name="维修状态检查", dsl_version="9.9.9")
+
+    retry = next(node for node in result.plan.nodes if node.id == "retry")
+    assert retry.type == "loop"
+    assert retry.params["loop_count"] == 3
+    assert [child["type"] for child in retry.params["children"]] == ["loop-start", "llm"]
+    assert retry.params["edges"][0]["target"] == "retry_llm"
+
+
 def test_planner_self_repairs_after_validation_failure() -> None:
     bad = {
         "name": "bad",
@@ -351,4 +376,72 @@ def _knowledge_plan() -> dict:
             {"source": "knowledge", "target": "llm"},
             {"source": "llm", "target": "end"},
         ],
+    }
+
+
+def _iteration_plan() -> dict:
+    return {
+        "nodes": [
+            {
+                "id": "start",
+                "type": "start",
+                "title": "接收售后记录列表",
+                "params": {"variables": [{"name": "items", "type": "json"}]},
+            },
+            {
+                "id": "batch",
+                "type": "list_loop",
+                "title": "批量处理售后记录",
+                "params": {
+                    "iterator_selector": ["start", "items", "records"],
+                    "output_selector": ["item_llm", "text"],
+                    "children": [
+                        {"id": "batch_start", "type": "iteration-start", "title": "开始遍历", "params": {}},
+                        {
+                            "id": "item_llm",
+                            "type": "llm",
+                            "title": "逐条生成处理建议",
+                            "params": {
+                                "system_prompt": "你是售后服务专员，逐条分析售后记录并给出处理建议。",
+                                "user_prompt": "请处理当前记录：{{#batch.item#}}",
+                            },
+                        },
+                    ],
+                    "edges": [{"source": "batch_start", "target": "item_llm"}],
+                },
+            },
+            {"id": "end", "type": "end", "title": "返回建议列表", "params": {"outputs": [{"variable": "answers", "value_selector": ["batch", "output"]}]}},
+        ],
+        "edges": [{"source": "start", "target": "batch"}, {"source": "batch", "target": "end"}],
+    }
+
+
+def _loop_plan() -> dict:
+    return {
+        "nodes": [
+            {"id": "start", "type": "start", "title": "接收维修状态问题", "params": {"variables": [{"name": "query"}]}},
+            {
+                "id": "retry",
+                "type": "retry_loop",
+                "title": "循环检查维修状态",
+                "params": {
+                    "loop_count": 3,
+                    "children": [
+                        {"id": "retry_start", "type": "loop-start", "title": "开始循环", "params": {}},
+                        {
+                            "id": "retry_llm",
+                            "type": "llm",
+                            "title": "执行状态检查",
+                            "params": {
+                                "system_prompt": "你是维修状态检查专员，按规则检查是否已满足回复条件。",
+                                "user_prompt": "请检查当前维修状态：{{#start.query#}}",
+                            },
+                        },
+                    ],
+                    "edges": [{"source": "retry_start", "target": "retry_llm"}],
+                },
+            },
+            {"id": "end", "type": "end", "title": "返回检查结果", "params": {"outputs": [{"variable": "answer", "value_selector": ["start", "query"]}]}},
+        ],
+        "edges": [{"source": "start", "target": "retry"}, {"source": "retry", "target": "end"}],
     }

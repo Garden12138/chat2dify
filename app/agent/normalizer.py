@@ -53,6 +53,14 @@ GENERIC_TITLES = {
     "human",
     "manualinput",
     "approval",
+    "iteration",
+    "iterate",
+    "iterationstart",
+    "loop",
+    "repeat",
+    "while",
+    "loopstart",
+    "loopend",
     "开始",
     "开始节点",
     "输入",
@@ -83,6 +91,11 @@ GENERIC_TITLES = {
     "人工输入",
     "人工审核",
     "人工审批",
+    "循环",
+    "遍历",
+    "批量处理",
+    "循环开始",
+    "循环结束",
 }
 
 NODE_TYPE_ALIASES = {
@@ -130,6 +143,29 @@ NODE_TYPE_ALIASES = {
     "manualinput": "human-input",
     "approval": "human-input",
     "review": "human-input",
+    "iterate": "iteration",
+    "iterator": "iteration",
+    "list-loop": "iteration",
+    "list_loop": "iteration",
+    "listloop": "iteration",
+    "batch": "iteration",
+    "batch-loop": "iteration",
+    "batch_loop": "iteration",
+    "batchloop": "iteration",
+    "for-each": "iteration",
+    "for_each": "iteration",
+    "foreach": "iteration",
+    "iteration_start": "iteration-start",
+    "iterationstart": "iteration-start",
+    "repeat": "loop",
+    "while": "loop",
+    "retry-loop": "loop",
+    "retry_loop": "loop",
+    "retryloop": "loop",
+    "loop_start": "loop-start",
+    "loopstart": "loop-start",
+    "loop_end": "loop-end",
+    "loopend": "loop-end",
 }
 
 
@@ -217,6 +253,22 @@ def normalize_plan_payload(
                 node["params"] = _normalize_knowledge_retrieval_params(params, default_dataset_ids or [])
             case "human-input":
                 node["params"] = _normalize_human_input_params(params)
+            case "iteration":
+                node["params"] = _normalize_iteration_params(
+                    params,
+                    node_id=str(node.get("id") or "iteration"),
+                    workflow_name=str(data.get("name", "")),
+                    default_dataset_ids=default_dataset_ids or [],
+                )
+            case "loop":
+                node["params"] = _normalize_loop_params(
+                    params,
+                    node_id=str(node.get("id") or "loop"),
+                    workflow_name=str(data.get("name", "")),
+                    default_dataset_ids=default_dataset_ids or [],
+                )
+            case "iteration-start" | "loop-start" | "loop-end":
+                node["params"] = dict(params)
         if before != node.get("params"):
             changes.append(f"normalized {node.get('id', '<unknown>')} params")
 
@@ -659,6 +711,572 @@ def _normalize_human_input_params(params: dict[str, Any]) -> dict[str, Any]:
     result.pop("buttons", None)
     result.pop("timeoutUnit", None)
     return result
+
+
+def _normalize_iteration_params(
+    params: dict[str, Any],
+    *,
+    node_id: str,
+    workflow_name: str,
+    default_dataset_ids: list[str],
+) -> dict[str, Any]:
+    result = dict(params)
+    iterator_selector = (
+        result.get("iterator_selector")
+        or result.get("iterator")
+        or result.get("items")
+        or result.get("list")
+        or result.get("variable")
+        or ["start", "items"]
+    )
+    result["iterator_selector"] = _normalize_selector(iterator_selector)
+    result["iterator_input_type"] = _array_var_type(
+        str(result.get("iterator_input_type") or result.get("input_type") or "array[string]")
+    )
+    result["is_parallel"] = bool(result.get("is_parallel", result.get("parallel", False)))
+    result["parallel_nums"] = _positive_int(result.get("parallel_nums") or result.get("parallel_count"), default=10)
+    result["error_handle_mode"] = _error_handle_mode(str(result.get("error_handle_mode") or "terminated"))
+    result["flatten_output"] = bool(result.get("flatten_output", True))
+    result.setdefault("_isShowTips", False)
+
+    start_node_id = str(result.get("start_node_id") or result.get("start") or f"{node_id}start")
+    children = _normalize_container_children(
+        result.get("children") or result.get("_children") or result.get("nodes") or [],
+        container_id=node_id,
+        container_type="iteration",
+        start_node_id=start_node_id,
+        workflow_name=workflow_name,
+        default_dataset_ids=default_dataset_ids,
+    )
+    result["start_node_id"] = str(children[0].get("id") if children else start_node_id)
+    result["children"] = children
+    result["edges"] = _normalize_container_edges(
+        result.get("edges") or result.get("child_edges") or [],
+        children,
+        start_node_id=result["start_node_id"],
+    )
+
+    raw_output_selector = result.get("output_selector") or result.get("output") or result.get("result_selector")
+    output_selector = _normalize_optional_selector(raw_output_selector)
+    if not output_selector:
+        last_child = _last_processing_child(children)
+        if last_child:
+            output_selector = [str(last_child.get("id")), _default_node_output_name(last_child)]
+    result["output_selector"] = output_selector
+    result["output_type"] = _array_var_type(str(result.get("output_type") or "array[string]"))
+
+    result.pop("iterator", None)
+    result.pop("items", None)
+    result.pop("list", None)
+    result.pop("variable", None)
+    result.pop("input_type", None)
+    result.pop("parallel", None)
+    result.pop("parallel_count", None)
+    result.pop("start", None)
+    result.pop("nodes", None)
+    result.pop("child_edges", None)
+    result.pop("output", None)
+    result.pop("result_selector", None)
+    return result
+
+
+def _normalize_loop_params(
+    params: dict[str, Any],
+    *,
+    node_id: str,
+    workflow_name: str,
+    default_dataset_ids: list[str],
+) -> dict[str, Any]:
+    result = dict(params)
+    result["loop_count"] = _positive_int(
+        result.get("loop_count") or result.get("max_iterations") or result.get("times"),
+        default=3,
+    )
+    logical_operator = str(result.get("logical_operator") or result.get("operator") or "and").lower()
+    result["logical_operator"] = logical_operator if logical_operator in {"and", "or"} else "and"
+    result["error_handle_mode"] = _error_handle_mode(str(result.get("error_handle_mode") or "terminated"))
+    result["break_conditions"] = _normalize_loop_break_conditions(
+        result.get("break_conditions") or result.get("conditions") or result.get("until") or []
+    )
+    result["loop_variables"] = _normalize_loop_variables(
+        result.get("loop_variables") or result.get("variables") or result.get("state") or []
+    )
+
+    start_node_id = str(result.get("start_node_id") or result.get("start") or f"{node_id}start")
+    children = _normalize_container_children(
+        result.get("children") or result.get("_children") or result.get("nodes") or [],
+        container_id=node_id,
+        container_type="loop",
+        start_node_id=start_node_id,
+        workflow_name=workflow_name,
+        default_dataset_ids=default_dataset_ids,
+    )
+    result["start_node_id"] = str(children[0].get("id") if children else start_node_id)
+    result["children"] = children
+    result["edges"] = _normalize_container_edges(
+        result.get("edges") or result.get("child_edges") or [],
+        children,
+        start_node_id=result["start_node_id"],
+    )
+    _rewrite_loop_break_conditions_for_dify_checklist(result, node_id=node_id)
+
+    result.pop("max_iterations", None)
+    result.pop("times", None)
+    result.pop("operator", None)
+    result.pop("conditions", None)
+    result.pop("until", None)
+    result.pop("variables", None)
+    result.pop("state", None)
+    result.pop("start", None)
+    result.pop("nodes", None)
+    result.pop("child_edges", None)
+    return result
+
+
+def _normalize_container_children(
+    value: Any,
+    *,
+    container_id: str,
+    container_type: str,
+    start_node_id: str,
+    workflow_name: str,
+    default_dataset_ids: list[str],
+) -> list[dict[str, Any]]:
+    internal_start_type = "iteration-start" if container_type == "iteration" else "loop-start"
+    raw_children = value if isinstance(value, list) else []
+    children: list[dict[str, Any]] = []
+    for idx, item in enumerate(raw_children):
+        child = _normalize_container_child(
+            item,
+            container_id=container_id,
+            container_type=container_type,
+            workflow_name=workflow_name,
+            default_dataset_ids=default_dataset_ids,
+            index=idx,
+        )
+        if child:
+            children.append(child)
+
+    start_index = next((idx for idx, child in enumerate(children) if child.get("type") == internal_start_type), None)
+    if start_index is None:
+        children.insert(
+            0,
+            {
+                "id": start_node_id,
+                "type": internal_start_type,
+                "title": _default_title(internal_start_type),
+                "desc": "",
+                "params": {},
+            },
+        )
+    elif start_index != 0:
+        children.insert(0, children.pop(start_index))
+    if children:
+        children[0]["id"] = str(children[0].get("id") or start_node_id)
+        children[0]["type"] = internal_start_type
+
+    if len(children) == 1:
+        children.append(_default_container_processing_child(container_id, container_type))
+    return _dedupe_container_child_ids(children, container_id=container_id)
+
+
+def _normalize_container_child(
+    item: Any,
+    *,
+    container_id: str,
+    container_type: str,
+    workflow_name: str,
+    default_dataset_ids: list[str],
+    index: int,
+) -> dict[str, Any] | None:
+    if isinstance(item, str):
+        item = {"type": item}
+    if not isinstance(item, dict):
+        return None
+    child = deepcopy(item)
+    raw_type = str(child.get("type") or child.get("node_type") or "")
+    child_type = _normalize_node_type(raw_type)
+    internal_start_type = "iteration-start" if container_type == "iteration" else "loop-start"
+    if child_type == "start":
+        child_type = internal_start_type
+    if child_type == "end" and container_type == "loop":
+        child_type = "loop-end"
+    child["type"] = child_type
+    child.setdefault("id", f"{container_id}_{child_type.replace('-', '_')}_{index + 1}")
+    child.setdefault("title", _default_title(child_type))
+    child.setdefault("desc", "")
+    params = child.get("params")
+    if not isinstance(params, dict):
+        params = {}
+    match child_type:
+        case "llm":
+            child["params"] = _normalize_llm_params(params, workflow_name=workflow_name)
+        case "code":
+            child["params"] = _normalize_code_params(params)
+        case "if-else":
+            child["params"] = _normalize_if_else_params(params)
+        case "http-request":
+            child["params"] = _normalize_http_params(params)
+        case "template-transform":
+            child["params"] = _normalize_template_params(params)
+        case "question-classifier":
+            child["params"] = _normalize_question_classifier_params(params)
+        case "parameter-extractor":
+            child["params"] = _normalize_parameter_extractor_params(params)
+        case "variable-aggregator":
+            child["params"] = _normalize_variable_aggregator_params(params)
+        case "document-extractor":
+            child["params"] = _normalize_document_extractor_params(params)
+        case "assigner":
+            child["params"] = _normalize_assigner_params(params)
+        case "list-operator":
+            list_params = _normalize_list_operator_params(params)
+            if _list_operator_needs_code_fallback(list_params):
+                child["type"] = "code"
+                child["params"] = _normalize_code_params(_object_list_operator_code_params(list_params))
+            else:
+                child["params"] = list_params
+        case "knowledge-retrieval":
+            child["params"] = _normalize_knowledge_retrieval_params(params, default_dataset_ids)
+        case "human-input":
+            child["params"] = _normalize_human_input_params(params)
+        case "iteration-start" | "loop-start" | "loop-end":
+            child["params"] = dict(params)
+        case _:
+            child["params"] = dict(params)
+    return child
+
+
+def _default_container_processing_child(container_id: str, container_type: str) -> dict[str, Any]:
+    if container_type == "iteration":
+        child_id = f"{container_id}_item_template"
+        return {
+            "id": child_id,
+            "type": "template-transform",
+            "title": "处理循环项",
+            "desc": "",
+            "params": _normalize_template_params(
+                {
+                    "template": "{{ item }}",
+                    "variables": [
+                        {"variable": "item", "value_selector": [container_id, "item"], "value_type": "string"}
+                    ],
+                }
+            ),
+        }
+    child_id = f"{container_id}_loop_step"
+    return {
+        "id": child_id,
+        "type": "template-transform",
+        "title": "执行循环步骤",
+        "desc": "",
+        "params": _normalize_template_params(
+            {
+                "template": "{{ query }}",
+                "variables": [{"variable": "query", "value_selector": ["start", "query"], "value_type": "string"}],
+            }
+        ),
+    }
+
+
+def _dedupe_container_child_ids(children: list[dict[str, Any]], *, container_id: str) -> list[dict[str, Any]]:
+    used: set[str] = set()
+    result: list[dict[str, Any]] = []
+    for idx, child in enumerate(children):
+        child_copy = dict(child)
+        child_id = str(child_copy.get("id") or f"{container_id}_child_{idx + 1}")
+        if child_id in used:
+            base = child_id
+            suffix = 2
+            while child_id in used:
+                child_id = f"{base}_{suffix}"
+                suffix += 1
+            child_copy["id"] = child_id
+        used.add(child_id)
+        result.append(child_copy)
+    return result
+
+
+def _normalize_container_edges(value: Any, children: list[dict[str, Any]], *, start_node_id: str) -> list[dict[str, Any]]:
+    child_ids = {str(child.get("id")) for child in children if child.get("id")}
+    edges: list[dict[str, Any]] = []
+    for item in value if isinstance(value, list) else []:
+        if not isinstance(item, dict):
+            continue
+        source = str(item.get("source") or item.get("source_node_id") or "")
+        target = str(item.get("target") or item.get("target_node_id") or "")
+        if source not in child_ids or target not in child_ids:
+            continue
+        edges.append(
+            {
+                "source": source,
+                "target": target,
+                "source_handle": str(item.get("source_handle") or item.get("sourceHandle") or SOURCE_HANDLE),
+                "target_handle": str(item.get("target_handle") or item.get("targetHandle") or "target"),
+            }
+        )
+    if edges:
+        return edges
+
+    ordered_ids = [str(child.get("id")) for child in children if child.get("id")]
+    processing_ids = [child_id for child_id in ordered_ids if child_id != start_node_id]
+    if not processing_ids:
+        return []
+    chain = [{"source": start_node_id, "target": processing_ids[0], "source_handle": SOURCE_HANDLE, "target_handle": "target"}]
+    for source, target in zip(processing_ids, processing_ids[1:], strict=False):
+        chain.append({"source": source, "target": target, "source_handle": SOURCE_HANDLE, "target_handle": "target"})
+    return chain
+
+
+def _last_processing_child(children: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for child in reversed(children):
+        if child.get("type") not in {"iteration-start", "loop-start", "loop-end"}:
+            return child
+    return None
+
+
+def _default_node_output_name(node: dict[str, Any]) -> str:
+    node_type = str(node.get("type") or "")
+    params = node.get("params", {}) if isinstance(node.get("params"), dict) else {}
+    if node_type == "llm":
+        return "text"
+    if node_type == "code":
+        outputs = params.get("outputs") if isinstance(params.get("outputs"), dict) else {}
+        return next(iter(outputs.keys()), "result")
+    if node_type == "parameter-extractor":
+        parameters = params.get("parameters") if isinstance(params.get("parameters"), list) else []
+        first = next((item for item in parameters if isinstance(item, dict) and item.get("name")), None)
+        return str(first.get("name")) if first else "__reason"
+    mapping = {
+        "template-transform": "output",
+        "variable-aggregator": "output",
+        "document-extractor": "text",
+        "list-operator": "result",
+        "knowledge-retrieval": "result",
+        "http-request": "body",
+        "human-input": "selected_action",
+    }
+    return mapping.get(node_type, "output")
+
+
+def _normalize_loop_break_conditions(value: Any) -> list[dict[str, Any]]:
+    conditions: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        value = [value]
+    if isinstance(value, str) and value.strip():
+        value = [_condition_from_text(value)]
+    for idx, item in enumerate(value or []):
+        if isinstance(item, str):
+            item = _condition_from_text(item)
+        if not isinstance(item, dict):
+            continue
+        condition = dict(item)
+        condition["id"] = str(condition.get("id") or f"condition_{idx + 1}")
+        if isinstance(condition.get("variable_selector"), str):
+            condition["variable_selector"] = _selector_from_ref(condition["variable_selector"])
+        else:
+            condition["variable_selector"] = _normalize_optional_selector(condition.get("variable_selector"))
+        condition.setdefault("comparison_operator", "not empty")
+        condition.setdefault("value", "")
+        condition.setdefault("varType", "string")
+        conditions.append(condition)
+    return conditions
+
+
+def _rewrite_loop_break_conditions_for_dify_checklist(result: dict[str, Any], *, node_id: str) -> None:
+    children = result.get("children") if isinstance(result.get("children"), list) else []
+    child_by_id = {
+        str(child.get("id")): child
+        for child in children
+        if isinstance(child, dict) and child.get("id")
+    }
+    if not child_by_id:
+        return
+
+    loop_variables = result.get("loop_variables") if isinstance(result.get("loop_variables"), list) else []
+    used_labels = {
+        str(item.get("label"))
+        for item in loop_variables
+        if isinstance(item, dict) and item.get("label")
+    }
+    child_output_selectors: dict[tuple[str, ...], str] = {}
+    for condition in result.get("break_conditions") or []:
+        if not isinstance(condition, dict):
+            continue
+        selector = condition.get("variable_selector")
+        if not _looks_like_selector(selector):
+            continue
+        selector = [str(item) for item in selector]
+        child_id = selector[0]
+        if child_id not in child_by_id:
+            continue
+        child_type = str(child_by_id[child_id].get("type") or "")
+        if child_type in {"loop-start", "loop-end"}:
+            continue
+        selector_key = tuple(selector)
+        label = child_output_selectors.get(selector_key)
+        if not label:
+            label = _unique_loop_variable_label("_".join(selector), used_labels)
+            used_labels.add(label)
+            loop_variables.append(
+                {
+                    "id": label,
+                    "label": label,
+                    "var_type": _var_type(str(condition.get("varType") or "string")),
+                    "value_type": "constant",
+                    "value": "",
+                }
+            )
+            child_output_selectors[selector_key] = label
+        condition["variable_selector"] = [node_id, label]
+
+    if not child_output_selectors:
+        return
+
+    result["loop_variables"] = loop_variables
+    result["children"] = children
+    result["edges"] = result.get("edges") if isinstance(result.get("edges"), list) else []
+    existing_child_ids = set(child_by_id)
+    for selector_key, label in child_output_selectors.items():
+        selector = list(selector_key)
+        source_child_id = selector[0]
+        if _loop_assigner_exists(children, node_id=node_id, variable_label=label, value_selector=selector):
+            continue
+        assigner_id = _unique_child_id(f"{node_id}_{label}_assigner", existing_child_ids)
+        existing_child_ids.add(assigner_id)
+        assigner = {
+            "id": assigner_id,
+            "type": "assigner",
+            "title": "更新循环判断变量",
+            "desc": "",
+            "params": _normalize_assigner_params(
+                {
+                    "version": "2",
+                    "items": [
+                        {
+                            "variable_selector": [node_id, label],
+                            "input_type": "variable",
+                            "operation": "over-write",
+                            "value": selector,
+                        }
+                    ],
+                }
+            ),
+        }
+        _insert_child_after(children, assigner, source_child_id)
+        _insert_assigner_edges(result["edges"], source_child_id=source_child_id, assigner_id=assigner_id)
+
+
+def _unique_loop_variable_label(value: str, used_labels: set[str]) -> str:
+    preferred = _safe_variable_name(value)
+    if preferred.startswith("loop_"):
+        preferred = preferred.removeprefix("loop_")
+    if not preferred:
+        preferred = "loop_result"
+    candidate = preferred
+    index = 2
+    while candidate in used_labels:
+        candidate = f"{preferred}_{index}"
+        index += 1
+    return candidate
+
+
+def _unique_child_id(value: str, used_ids: set[str]) -> str:
+    preferred = _safe_variable_name(value)
+    candidate = preferred
+    index = 2
+    while candidate in used_ids:
+        candidate = f"{preferred}_{index}"
+        index += 1
+    return candidate
+
+
+def _insert_child_after(children: list[dict[str, Any]], child: dict[str, Any], source_child_id: str) -> None:
+    for idx, item in enumerate(children):
+        if isinstance(item, dict) and str(item.get("id")) == source_child_id:
+            children.insert(idx + 1, child)
+            return
+    children.append(child)
+
+
+def _loop_assigner_exists(
+    children: list[dict[str, Any]],
+    *,
+    node_id: str,
+    variable_label: str,
+    value_selector: list[str],
+) -> bool:
+    for child in children:
+        if not isinstance(child, dict) or child.get("type") != "assigner":
+            continue
+        params = child.get("params") if isinstance(child.get("params"), dict) else {}
+        for item in params.get("items") if isinstance(params.get("items"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("variable_selector") == [node_id, variable_label] and item.get("value") == value_selector:
+                return True
+    return False
+
+
+def _insert_assigner_edges(edges: list[dict[str, Any]], *, source_child_id: str, assigner_id: str) -> None:
+    outgoing = [
+        edge
+        for edge in edges
+        if isinstance(edge, dict) and str(edge.get("source")) == source_child_id and str(edge.get("target")) != assigner_id
+    ]
+    if not any(
+        isinstance(edge, dict) and str(edge.get("source")) == source_child_id and str(edge.get("target")) == assigner_id
+        for edge in edges
+    ):
+        edges.append(
+            {
+                "source": source_child_id,
+                "target": assigner_id,
+                "source_handle": SOURCE_HANDLE,
+                "target_handle": "target",
+            }
+        )
+    for edge in outgoing:
+        edge["source"] = assigner_id
+        edge["source_handle"] = SOURCE_HANDLE
+
+
+def _normalize_loop_variables(value: Any) -> list[dict[str, Any]]:
+    variables: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        value = [{"label": key, **(item if isinstance(item, dict) else {"value": item})} for key, item in value.items()]
+    for idx, item in enumerate(value or []):
+        if isinstance(item, str):
+            item = {"label": item, "var_type": "string", "value_type": "constant", "value": ""}
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or item.get("name") or item.get("variable") or f"state_{idx + 1}")
+        value_type = str(item.get("value_type") or item.get("type") or "constant")
+        if value_type not in {"constant", "variable"}:
+            value_type = "constant"
+        value = item.get("value", "")
+        if value_type == "variable":
+            value = _normalize_optional_selector(value)
+        variables.append(
+            {
+                "id": str(item.get("id") or _safe_variable_name(label) or f"state_{idx + 1}"),
+                "label": _safe_variable_name(label),
+                "var_type": _var_type(str(item.get("var_type") or item.get("variable_type") or "string")),
+                "value_type": value_type,
+                "value": value,
+            }
+        )
+    return variables
+
+
+def _error_handle_mode(value: str) -> str:
+    normalized = str(value or "").strip().lower().replace("_", "-")
+    allowed = {"terminated", "continue-on-error", "remove-abnormal-output"}
+    if normalized in {"continue", "continue-error", "continue-on-error"}:
+        return "continue-on-error"
+    if normalized in {"remove", "remove-abnormal-output", "remove-abnormal"}:
+        return "remove-abnormal-output"
+    return normalized if normalized in allowed else "terminated"
 
 
 def _normalize_human_delivery_methods(value: Any) -> list[dict[str, Any]]:
@@ -1435,6 +2053,16 @@ def _semantic_title(
             return f"检索{subject}知识库"
         case "human-input":
             return f"人工审核{subject}"
+        case "iteration":
+            return f"批量处理{subject}"
+        case "loop":
+            return f"循环检查{subject}"
+        case "iteration-start":
+            return "开始遍历"
+        case "loop-start":
+            return "开始循环"
+        case "loop-end":
+            return "退出循环"
         case "end":
             upstream = _first_upstream(node, node_by_id, edges)
             if upstream and upstream.get("type") == "llm":

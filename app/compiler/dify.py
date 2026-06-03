@@ -14,11 +14,18 @@ from app.list_operator import normalize_list_comparison_operator, normalize_list
 
 
 CUSTOM_NODE_TYPE = "custom"
+CUSTOM_ITERATION_START_NODE_TYPE = "custom-iteration-start"
+CUSTOM_LOOP_START_NODE_TYPE = "custom-loop-start"
+CUSTOM_SIMPLE_NODE_TYPE = "custom-simple"
 SOURCE_HANDLE = "source"
 TARGET_HANDLE = "target"
 NODE_WIDTH_X_OFFSET = 300
 START_X = 80
 START_Y = 282
+CONTAINER_CHILD_Z_INDEX = 1002
+CONTAINER_PARENT_Z_INDEX = 1
+CONTAINER_CHILD_START_X = 24
+CONTAINER_CHILD_START_Y = 68
 DIFY_REF_PATTERN = re.compile(r"\{\{\s*#([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)#\s*\}\}")
 HUMAN_INPUT_DEFAULT_WEBAPP_DELIVERY_ID = "00000000-0000-4000-8000-000000000001"
 
@@ -38,26 +45,17 @@ class DifyDslCompiler:
         self.default_dataset_ids = default_dataset_ids or []
 
     def compile(self, plan: WorkflowPlan) -> str:
-        nodes = [self._compile_node(node, index) for index, node in enumerate(plan.nodes)]
+        nodes: list[dict[str, Any]] = []
+        for index, node in enumerate(plan.nodes):
+            graph_node = self._compile_node(node, index)
+            nodes.append(graph_node)
+            if node.type in {"iteration", "loop"}:
+                nodes.extend(self._compile_container_child_nodes(node))
         type_by_id = {node["id"]: node["data"]["type"] for node in nodes}
-        edges = [
-            {
-                "id": f"{edge.source}-{edge.source_handle}-{edge.target}-{edge.target_handle}",
-                "type": "custom",
-                "source": edge.source,
-                "target": edge.target,
-                "sourceHandle": edge.source_handle,
-                "targetHandle": edge.target_handle,
-                "data": {
-                    "isInIteration": False,
-                    "isInLoop": False,
-                    "sourceType": type_by_id[edge.source],
-                    "targetType": type_by_id[edge.target],
-                },
-                "zIndex": 0,
-            }
-            for edge in plan.edges
-        ]
+        edges = [self._compile_edge(edge.model_dump(), type_by_id) for edge in plan.edges]
+        for node in plan.nodes:
+            if node.type in {"iteration", "loop"}:
+                edges.extend(self._compile_container_edges(node, type_by_id))
 
         data = {
             "version": self.dsl_version,
@@ -124,19 +122,101 @@ class DifyDslCompiler:
                 data.update(self._knowledge_retrieval_data(node))
             case "human-input":
                 data.update(self._human_input_data(node))
+            case "iteration":
+                data.update(self._iteration_data(node))
+            case "iteration-start":
+                data.update({"title": "", "desc": "", "isInIteration": True})
+            case "loop":
+                data.update(self._loop_data(node))
+            case "loop-start":
+                data.update({"title": "", "desc": "", "isInLoop": True})
+            case "loop-end":
+                data.update({})
 
         return {
             "id": node.id,
-            "type": CUSTOM_NODE_TYPE,
+            "type": _graph_node_type(node.type),
             "position": position,
             "positionAbsolute": position.copy(),
             "height": _node_height(node.type, data),
-            "width": 244,
+            "width": _node_width(node.type, data),
             "selected": False,
             "targetPosition": "left",
             "sourcePosition": "right",
+            "zIndex": CONTAINER_PARENT_Z_INDEX if node.type in {"iteration", "loop"} else 0,
             "data": data,
         }
+
+    def _compile_edge(
+        self,
+        edge: dict[str, Any],
+        type_by_id: dict[str, str],
+        *,
+        container: PlanNode | None = None,
+    ) -> dict[str, Any]:
+        source = str(edge.get("source"))
+        target = str(edge.get("target"))
+        source_handle = str(edge.get("source_handle") or edge.get("sourceHandle") or SOURCE_HANDLE)
+        target_handle = str(edge.get("target_handle") or edge.get("targetHandle") or TARGET_HANDLE)
+        data: dict[str, Any] = {
+            "isInIteration": False,
+            "isInLoop": False,
+            "sourceType": type_by_id[source],
+            "targetType": type_by_id[target],
+        }
+        z_index = 0
+        if container and container.type == "iteration":
+            data.update({"isInIteration": True, "iteration_id": container.id})
+            z_index = CONTAINER_CHILD_Z_INDEX
+        elif container and container.type == "loop":
+            data.update({"isInLoop": True, "loop_id": container.id})
+            z_index = CONTAINER_CHILD_Z_INDEX
+        return {
+            "id": f"{source}-{source_handle}-{target}-{target_handle}",
+            "type": "custom",
+            "source": source,
+            "target": target,
+            "sourceHandle": source_handle,
+            "targetHandle": target_handle,
+            "data": data,
+            "zIndex": z_index,
+        }
+
+    def _compile_container_child_nodes(self, node: PlanNode) -> list[dict[str, Any]]:
+        children = node.params.get("children") if isinstance(node.params.get("children"), list) else []
+        graph_nodes: list[dict[str, Any]] = []
+        for index, child in enumerate(children):
+            if not isinstance(child, dict):
+                continue
+            child_node = PlanNode.model_validate(child)
+            graph_node = self._compile_node(child_node, index)
+            position = _child_position(child, index)
+            graph_node["position"] = position
+            graph_node["positionAbsolute"] = position.copy()
+            graph_node["parentId"] = node.id
+            graph_node["extent"] = "parent"
+            graph_node["zIndex"] = CONTAINER_CHILD_Z_INDEX
+            if child_node.type in {"iteration-start", "loop-start"}:
+                graph_node["selectable"] = False
+                graph_node["draggable"] = False
+            if node.type == "iteration":
+                graph_node["data"]["isInIteration"] = True
+                graph_node["data"]["iteration_id"] = node.id
+            else:
+                graph_node["data"]["isInLoop"] = True
+                graph_node["data"]["loop_id"] = node.id
+            graph_nodes.append(graph_node)
+        return graph_nodes
+
+    def _compile_container_edges(self, node: PlanNode, type_by_id: dict[str, str]) -> list[dict[str, Any]]:
+        raw_edges = node.params.get("edges") if isinstance(node.params.get("edges"), list) else []
+        return [
+            self._compile_edge(edge, type_by_id, container=node)
+            for edge in raw_edges
+            if isinstance(edge, dict)
+            and str(edge.get("source")) in type_by_id
+            and str(edge.get("target")) in type_by_id
+        ]
 
     def _start_data(self, node: PlanNode) -> dict[str, Any]:
         variables = []
@@ -367,6 +447,34 @@ class DifyDslCompiler:
             "timeout_unit": _timeout_unit(node.params.get("timeout_unit")),
         }
 
+    def _iteration_data(self, node: PlanNode) -> dict[str, Any]:
+        children = node.params.get("children") if isinstance(node.params.get("children"), list) else []
+        return {
+            "start_node_id": str(node.params.get("start_node_id") or f"{node.id}start"),
+            "iterator_selector": _selector(node.params.get("iterator_selector"), ["start", "items"]),
+            "iterator_input_type": node.params.get("iterator_input_type", "array[string]"),
+            "output_selector": _selector(node.params.get("output_selector"), []),
+            "output_type": node.params.get("output_type", "array[string]"),
+            "_children": _container_children_refs(children),
+            "_isShowTips": bool(node.params.get("_isShowTips", False)),
+            "is_parallel": bool(node.params.get("is_parallel", False)),
+            "parallel_nums": _positive_int(node.params.get("parallel_nums"), default=10),
+            "error_handle_mode": _error_handle_mode(node.params.get("error_handle_mode")),
+            "flatten_output": bool(node.params.get("flatten_output", True)),
+        }
+
+    def _loop_data(self, node: PlanNode) -> dict[str, Any]:
+        children = node.params.get("children") if isinstance(node.params.get("children"), list) else []
+        return {
+            "start_node_id": str(node.params.get("start_node_id") or f"{node.id}start"),
+            "break_conditions": _loop_conditions(node.params.get("break_conditions")),
+            "loop_count": _positive_int(node.params.get("loop_count"), default=3),
+            "logical_operator": node.params.get("logical_operator", "and"),
+            "loop_variables": _loop_variables(node.params.get("loop_variables")),
+            "error_handle_mode": _error_handle_mode(node.params.get("error_handle_mode")),
+            "_children": _container_children_refs(children),
+        }
+
     def _model_config(self, node: PlanNode) -> dict[str, Any]:
         model = node.params.get("model") if isinstance(node.params.get("model"), dict) else {}
         return {
@@ -376,6 +484,87 @@ class DifyDslCompiler:
             "completion_params": model.get("completion_params")
             or node.params.get("completion_params", {"temperature": 0.7}),
         }
+
+
+def _graph_node_type(node_type: str) -> str:
+    if node_type == "iteration-start":
+        return CUSTOM_ITERATION_START_NODE_TYPE
+    if node_type == "loop-start":
+        return CUSTOM_LOOP_START_NODE_TYPE
+    if node_type == "loop-end":
+        return CUSTOM_SIMPLE_NODE_TYPE
+    return CUSTOM_NODE_TYPE
+
+
+def _child_position(child: dict[str, Any], index: int) -> dict[str, int]:
+    raw_position = child.get("position")
+    if not isinstance(raw_position, dict):
+        params = child.get("params") if isinstance(child.get("params"), dict) else {}
+        raw_position = params.get("_position")
+    if isinstance(raw_position, dict):
+        try:
+            return {"x": int(raw_position.get("x", 0)), "y": int(raw_position.get("y", 0))}
+        except (TypeError, ValueError):
+            pass
+    return {"x": CONTAINER_CHILD_START_X + index * NODE_WIDTH_X_OFFSET, "y": CONTAINER_CHILD_START_Y}
+
+
+def _container_children_refs(children: list[Any]) -> list[dict[str, str]]:
+    refs = []
+    for child in children:
+        if not isinstance(child, dict) or not child.get("id") or not child.get("type"):
+            continue
+        refs.append({"nodeId": str(child["id"]), "nodeType": str(child["type"])})
+    return refs
+
+
+def _loop_conditions(value: Any) -> list[dict[str, Any]]:
+    conditions = []
+    for item in value if isinstance(value, list) else []:
+        if not isinstance(item, dict):
+            continue
+        condition = deepcopy(item)
+        condition.setdefault("id", str(uuid4()))
+        condition["variable_selector"] = _selector(condition.get("variable_selector"), [])
+        condition.setdefault("comparison_operator", "not empty")
+        condition.setdefault("value", "")
+        condition.setdefault("varType", "string")
+        conditions.append(condition)
+    return conditions
+
+
+def _loop_variables(value: Any) -> list[dict[str, Any]]:
+    variables = []
+    for item in value if isinstance(value, list) else []:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or item.get("name") or item.get("variable") or "")
+        if not label:
+            continue
+        value_type = str(item.get("value_type") or "constant")
+        variable_value = item.get("value", "")
+        if value_type == "variable":
+            variable_value = _selector(variable_value, [])
+        variables.append(
+            {
+                "id": str(item.get("id") or label),
+                "label": label,
+                "var_type": str(item.get("var_type") or "string"),
+                "value_type": value_type if value_type in {"constant", "variable"} else "constant",
+                "value": variable_value,
+            }
+        )
+    return variables
+
+
+def _error_handle_mode(value: Any) -> str:
+    normalized = str(value or "terminated").strip().lower().replace("_", "-")
+    allowed = {"terminated", "continue-on-error", "remove-abnormal-output"}
+    if normalized in {"continue", "continue-error"}:
+        return "continue-on-error"
+    if normalized in {"remove", "remove-abnormal"}:
+        return "remove-abnormal-output"
+    return normalized if normalized in allowed else "terminated"
 
 
 def _variables(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -776,9 +965,23 @@ def _node_height(node_type: str, data: dict[str, Any]) -> int:
         return 116
     if node_type == "human-input":
         return 116 + max(0, len(data.get("user_actions", [])) - 2) * 24
+    if node_type in {"iteration", "loop"}:
+        children_count = len(data.get("_children", [])) if isinstance(data.get("_children"), list) else 1
+        return 220 + max(0, children_count - 2) * 28
+    if node_type in {"iteration-start", "loop-start", "loop-end"}:
+        return 54
     if node_type == "end":
         return 90 + max(0, len(data.get("outputs", [])) - 1) * 26
     return 90
+
+
+def _node_width(node_type: str, data: dict[str, Any]) -> int:
+    if node_type in {"iteration", "loop"}:
+        children_count = max(2, len(data.get("_children", [])) if isinstance(data.get("_children"), list) else 2)
+        return max(620, 80 + children_count * NODE_WIDTH_X_OFFSET)
+    if node_type == "loop-end":
+        return 168
+    return 244
 
 
 def _default_features() -> dict[str, Any]:
