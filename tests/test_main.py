@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 import yaml
 
 from app.agent.editor import WorkflowEditResult
+from app.agent.normalizer import normalize_plan_payload
 from app.agent.planner import PlannerResult, fallback_plan
 from app.compiler.dify import DifyDslCompiler
 from app.config import Settings
@@ -16,6 +17,7 @@ from app.dify.client import (
 )
 from app.dify.version import DifyVersionInfo
 from app.main import app
+from app.models import WorkflowPlan
 
 
 def test_web_ui_index_and_static_assets(monkeypatch) -> None:
@@ -1018,6 +1020,111 @@ def test_apply_workflow_modification_noop_does_not_sync(monkeypatch) -> None:
     assert data["new_hash"] == "hash-1"
     assert data["sync"]["result"] == "noop"
     assert seen["synced"] is False
+
+
+def test_apply_workflow_modification_syncs_noop_when_graph_is_normalized(monkeypatch) -> None:
+    settings = _test_settings()
+    compiler = DifyDslCompiler(
+        dsl_version="9.9.9",
+        default_model_provider="openai",
+        default_model_name="gpt-4o-mini",
+    )
+    normalized = normalize_plan_payload(
+        {
+            "name": "Loaded",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "review",
+                    "type": "human-input",
+                    "title": "人工审核",
+                    "params": {
+                        "delivery_methods": [{"id": "webapp-1", "type": "webapp", "enabled": True, "config": {}}],
+                        "form_content": "请审核：{{#start.query#}}",
+                        "inputs": [],
+                        "user_actions": [
+                            {"id": "approve", "title": "通过", "button_style": "primary"},
+                            {"id": "reject", "title": "驳回", "button_style": "default"},
+                        ],
+                        "timeout": 3,
+                        "timeout_unit": "day",
+                    },
+                },
+                {"id": "approved", "type": "end", "params": {"outputs": [{"variable": "action", "value_selector": ["review", "__action_id"]}]}},
+                {"id": "rejected", "type": "end", "params": {"outputs": [{"variable": "action", "value_selector": ["review", "__action_id"]}]}},
+            ],
+            "edges": [
+                {"source": "start", "target": "review"},
+                {"source": "review", "target": "approved", "source_handle": "approve"},
+                {"source": "review", "target": "rejected", "source_handle": "reject"},
+            ],
+        }
+    )
+    graph = yaml.safe_load(compiler.compile(WorkflowPlan.model_validate(normalized.payload)))["workflow"]["graph"]
+    review = next(node["data"] for node in graph["nodes"] if node["id"] == "review")
+    review["delivery_methods"][0]["id"] = "webapp-1"
+    seen = {"synced": False, "delivery_id": None}
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get_draft_workflow(self, _app_id):
+            return DifyDraftWorkflow(
+                id="workflow-1",
+                graph=graph,
+                features={},
+                hash="hash-1",
+                version="draft",
+                environment_variables=[],
+                conversation_variables=[],
+                raw={},
+            )
+
+        def sync_draft_workflow(self, _app_id, **kwargs):
+            seen["synced"] = True
+            synced_review = next(node["data"] for node in kwargs["graph"]["nodes"] if node["id"] == "review")
+            seen["delivery_id"] = synced_review["delivery_methods"][0]["id"]
+            return DifyDraftSyncResult(result="success", hash="hash-2", updated_at="", workflow_url="/app/app-1/workflow")
+
+    class FakeEditPlanner:
+        def __init__(self, _settings):
+            pass
+
+        def generate(self, _message, *, current_plan, dsl_version):
+            return WorkflowEditResult(
+                plan=current_plan,
+                raw_plan=current_plan.model_dump(),
+                attempts=1,
+                repaired=False,
+            )
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+    monkeypatch.setattr("app.main.WorkflowEditPlanner", FakeEditPlanner)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/modify/apply",
+            json={"app_id": "app-1", "message": "normalize graph only"},
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["guard"]["no_op"] is True
+    assert data["new_hash"] == "hash-2"
+    assert seen["synced"] is True
+    assert seen["delivery_id"] != "webapp-1"
 
 
 def test_workflow_modification_expected_hash_conflict(monkeypatch) -> None:

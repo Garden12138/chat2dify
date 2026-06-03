@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from copy import deepcopy
-from uuid import uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 from typing import Any
 
 import yaml
@@ -20,6 +20,7 @@ NODE_WIDTH_X_OFFSET = 300
 START_X = 80
 START_Y = 282
 DIFY_REF_PATTERN = re.compile(r"\{\{\s*#([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)#\s*\}\}")
+HUMAN_INPUT_DEFAULT_WEBAPP_DELIVERY_ID = "00000000-0000-4000-8000-000000000001"
 
 
 class DifyDslCompiler:
@@ -522,7 +523,7 @@ def _human_delivery_methods(value: Any) -> list[dict[str, Any]]:
             continue
         method_type = str(item.get("type") or "webapp")
         method = {
-            "id": str(item.get("id") or f"{method_type}-{idx + 1}"),
+            "id": _human_delivery_method_id(item.get("id"), fallback_key=f"{method_type}-{idx + 1}"),
             "type": method_type,
             "enabled": bool(item.get("enabled", True)),
         }
@@ -533,10 +534,27 @@ def _human_delivery_methods(value: Any) -> list[dict[str, Any]]:
             method["config"] = {}
         methods.append(method)
     if not methods:
-        methods.append({"id": "webapp-1", "type": "webapp", "enabled": True, "config": {}})
+        methods.append(
+            {
+                "id": HUMAN_INPUT_DEFAULT_WEBAPP_DELIVERY_ID,
+                "type": "webapp",
+                "enabled": True,
+                "config": {},
+            }
+        )
     if not any(method.get("enabled") for method in methods):
         methods[0]["enabled"] = True
     return methods
+
+
+def _human_delivery_method_id(value: Any, *, fallback_key: str) -> str:
+    raw = str(value or "").strip()
+    if raw:
+        try:
+            return str(UUID(raw))
+        except ValueError:
+            return str(uuid5(NAMESPACE_URL, f"chat2dify:human-input:delivery:{raw}"))
+    return str(uuid5(NAMESPACE_URL, f"chat2dify:human-input:delivery:{fallback_key}"))
 
 
 def _human_inputs(value: Any) -> list[dict[str, Any]]:

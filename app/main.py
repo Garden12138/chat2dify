@@ -284,7 +284,7 @@ def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:
                 return response
             if not response["validation"]["ok"]:
                 raise HTTPException(status_code=422, detail=response["validation"]["issues"])
-            if response["guard"]["no_op"]:
+            if response["guard"]["no_op"] and graph == draft.graph:
                 response["new_hash"] = draft.hash
                 response["sync"] = {
                     "result": "noop",

@@ -4,6 +4,7 @@ import re
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from app.input_variables import file_upload_settings, is_file_input_type
 from app.list_operator import normalize_list_comparison_operator, normalize_list_variable_selector
@@ -11,6 +12,7 @@ from app.list_operator import normalize_list_comparison_operator, normalize_list
 
 SOURCE_HANDLE = "source"
 FALSE_HANDLE = "false"
+HUMAN_INPUT_DEFAULT_WEBAPP_DELIVERY_ID = "00000000-0000-4000-8000-000000000001"
 DIFY_REF_PATTERN = re.compile(r"\{\{\s*#([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)#\s*\}\}")
 GENERIC_TITLES = {
     "",
@@ -672,7 +674,7 @@ def _normalize_human_delivery_methods(value: Any) -> list[dict[str, Any]]:
         if method_type not in {"webapp", "email", "slack", "teams", "discord"}:
             method_type = "webapp"
         method = {
-            "id": str(item.get("id") or f"{method_type}-{idx + 1}"),
+            "id": _normalize_human_delivery_method_id(item.get("id"), fallback_key=f"{method_type}-{idx + 1}"),
             "type": method_type,
             "enabled": bool(item.get("enabled", True)),
         }
@@ -682,10 +684,27 @@ def _normalize_human_delivery_methods(value: Any) -> list[dict[str, Any]]:
             method["config"] = {}
         methods.append(method)
     if not methods:
-        methods.append({"id": "webapp-1", "type": "webapp", "enabled": True, "config": {}})
+        methods.append(
+            {
+                "id": HUMAN_INPUT_DEFAULT_WEBAPP_DELIVERY_ID,
+                "type": "webapp",
+                "enabled": True,
+                "config": {},
+            }
+        )
     if not any(method.get("enabled") for method in methods):
         methods[0]["enabled"] = True
     return methods
+
+
+def _normalize_human_delivery_method_id(value: Any, *, fallback_key: str) -> str:
+    raw = str(value or "").strip()
+    if raw:
+        try:
+            return str(UUID(raw))
+        except ValueError:
+            return str(uuid5(NAMESPACE_URL, f"chat2dify:human-input:delivery:{raw}"))
+    return str(uuid5(NAMESPACE_URL, f"chat2dify:human-input:delivery:{fallback_key}"))
 
 
 def _normalize_human_form_inputs(value: Any) -> list[dict[str, Any]]:

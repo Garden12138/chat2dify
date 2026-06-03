@@ -1,5 +1,6 @@
 import yaml
 from pydantic import ValidationError
+from uuid import UUID
 
 from app.agent.planner import fallback_plan
 from app.agent.normalizer import normalize_plan_payload
@@ -1071,6 +1072,7 @@ def test_normalizer_compiler_and_validator_cover_human_input_node() -> None:
                     "id": "review",
                     "type": "human",
                     "params": {
+                        "methods": [{"id": "webapp-1", "type": "webapp", "enabled": True, "config": {}}],
                         "content": "请审核售后处理建议：{{start.query}}",
                         "fields": [{"name": "review_comment", "type": "paragraph"}],
                         "actions": ["approve", "reject"],
@@ -1096,6 +1098,8 @@ def test_normalizer_compiler_and_validator_cover_human_input_node() -> None:
 
     assert next(node for node in plan.nodes if node.id == "review").type == "human-input"
     assert review["type"] == "human-input"
+    assert str(UUID(review["delivery_methods"][0]["id"])) == review["delivery_methods"][0]["id"]
+    assert review["delivery_methods"][0]["id"] != "webapp-1"
     assert review["delivery_methods"][0]["type"] == "webapp"
     assert review["delivery_methods"][0]["enabled"] is True
     assert review["user_actions"] == [

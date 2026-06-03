@@ -40,7 +40,8 @@ Use knowledge-retrieval only when the request explicitly asks for knowledge base
 Do not invent dataset_ids. If dataset_ids are not known, omit them and let chat2dify inject DIFY_DEFAULT_DATASET_IDS.
 After knowledge-retrieval, pass {{#knowledge.result#}} or the actual knowledge node id result into an llm node, then end.
 Use human-input only when the request explicitly asks for human review, manual approval, manager approval, human confirmation, or human-supplied follow-up information. Its params must include:
-{"delivery_methods":[{"id":"webapp-1","type":"webapp","enabled":true,"config":{}}],"form_content":"请审核以下内容。","inputs":[],"user_actions":[{"id":"approve","title":"通过","button_style":"primary"},{"id":"reject","title":"驳回","button_style":"default"}],"timeout":3,"timeout_unit":"day"}.
+{"delivery_methods":[{"id":"00000000-0000-4000-8000-000000000001","type":"webapp","enabled":true,"config":{}}],"form_content":"请审核以下内容。","inputs":[],"user_actions":[{"id":"approve","title":"通过","button_style":"primary"},{"id":"reject","title":"驳回","button_style":"default"}],"timeout":3,"timeout_unit":"day"}.
+human-input delivery_methods[].id must be a valid UUID.
 Each outgoing edge from human-input must set source_handle to the matching user_actions[].id.
 human-input outputs include form input names plus __action_id, __action_value, and __rendered_content.
 Do not generate assigner in new workflows; it is reserved for editing existing Dify drafts with explicit variable assignment context.

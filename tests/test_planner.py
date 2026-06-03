@@ -1,4 +1,5 @@
 import json
+from uuid import UUID
 
 import pytest
 
@@ -121,6 +122,8 @@ def test_planner_accepts_human_input_node() -> None:
 
     review = next(node for node in result.plan.nodes if node.id == "review")
     assert review.type == "human-input"
+    assert str(UUID(review.params["delivery_methods"][0]["id"])) == review.params["delivery_methods"][0]["id"]
+    assert review.params["delivery_methods"][0]["id"] != "webapp-1"
     assert review.params["delivery_methods"][0]["type"] == "webapp"
     assert [action["id"] for action in review.params["user_actions"]] == ["approve", "reject"]
     assert sorted(edge.source_handle for edge in result.plan.edges if edge.source == "review") == ["approve", "reject"]
