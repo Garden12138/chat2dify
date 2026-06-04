@@ -119,7 +119,11 @@ DIFY_DEFAULT_DATASET_IDS=dataset_id_1,dataset_id_2
 Tool nodes require tools that are already installed and configured in Dify. Use
 the Web UI Tools panel to search and select installed builtin, API, workflow, or
 MCP tools. Only selected tools are exposed to the planner; chat2dify does not
-install plugins, edit credentials, or let the LLM guess provider IDs.
+install plugins, edit credentials, or let the LLM guess provider IDs. The Web UI
+also lets you configure each selected tool's runtime inputs and form settings;
+those explicit bindings are sent in `tool_selections[].tool_parameters` and
+`tool_selections[].tool_configurations` and take precedence over LLM-generated
+values.
 
 ## Run
 
@@ -183,7 +187,11 @@ tool object returned by `/api/dify/tools`:
       "tool_name": "tool_name",
       "tool_label": "Tool label",
       "parameters": [],
-      "output_schema": {}
+      "output_schema": {},
+      "tool_parameters": {
+        "query": {"type": "mixed", "value": "{{#start.query#}}"}
+      },
+      "tool_configurations": {}
     }
   ]
 }
@@ -280,8 +288,11 @@ max-N-times flows. `iteration-start`, `loop-start`, and `loop-end` are internal
 Dify graph children generated inside their parent container, not ordinary
 top-level business nodes.
 `tool` can be generated when the request includes explicit `tool_selections`
-from the Web UI/API and the user asks to call a tool. Existing `_raw_data` tool
-nodes are still preserved as passthrough for draft compatibility. `agent`、
+from the Web UI/API and the user asks to call a tool. String tool inputs such as
+`url`, `query`, and `text` are represented as Dify mixed text values like
+`{{#start.query#}}`; boolean, number, and select settings use Dify ToolInput
+constant/variable structures. Existing `_raw_data` tool nodes are still
+preserved as passthrough for draft compatibility. `agent`、
 `datasource`、`datasource-empty`、`knowledge-index` 和 `trigger-*` 节点目前仍作为
 外部依赖节点兼容层：chat2dify 可以读取已有 Dify 草稿并尽量原样写回这些节点，
 Web UI 会展示 warning 诊断；新建 workflow 时 planner 不主动生成它们。

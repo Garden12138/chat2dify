@@ -913,7 +913,7 @@ def _validate_tool_node(node: PlanNode) -> list[ValidationIssue]:
                         f"tool required parameter is missing: {name}",
                         node.id,
                         f"params.tool_parameters.{name}",
-                        suggestion="为必填 llm 参数提供变量引用或常量，例如 {'type':'variable','value':['start','query']}。",
+                        suggestion="为必填 llm 参数提供 Dify ToolInput，例如字符串参数使用 {'type':'mixed','value':'{{#start.query#}}'}。",
                     )
                 )
         else:

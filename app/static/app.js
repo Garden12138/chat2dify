@@ -8,6 +8,7 @@ const TOOL_TYPE_KEY = "chat2dify.workbench.toolType.v1";
 const MAX_HISTORY_ITEMS = 12;
 const DATASET_PAGE_SIZE = 50;
 const DEFAULT_RUN_INPUTS = '{"query":"我要投诉订单配送太慢"}';
+const DEFAULT_TOOL_QUERY_TEMPLATE = "{{#start.query#}}";
 
 const state = {
   lastResponse: {},
@@ -128,9 +129,20 @@ function bindEvents() {
     await loadTools();
   });
   els.toolsList.addEventListener("change", (event) => {
-    const checkbox = event.target.closest("[data-tool-key]");
+    const checkbox = event.target.closest("input[type='checkbox'][data-tool-key]");
     if (checkbox) {
       toggleToolSelection(checkbox.dataset.toolKey, checkbox.checked);
+      return;
+    }
+    const field = event.target.closest("[data-tool-config-key]");
+    if (field) {
+      handleToolConfigInput(field);
+    }
+  });
+  els.toolsList.addEventListener("input", (event) => {
+    const field = event.target.closest("[data-tool-config-key]");
+    if (field) {
+      handleToolConfigInput(field);
     }
   });
 
@@ -334,6 +346,7 @@ async function loadTools() {
     setPanelStatus(els.toolsStatus, "Loading", "muted");
     const data = await requestJson(`/api/dify/tools?${params.toString()}`);
     state.tools.items = Array.isArray(data.data) ? data.data : [];
+    hydrateSelectedToolsFromLoaded();
     state.tools.keyword = keyword;
     state.tools.providerType = els.toolsType.value || "all";
     renderTools();
@@ -358,22 +371,31 @@ function renderTools(errorMessage = "") {
     return;
   }
   if (state.tools.items.length === 0) {
-    els.toolsList.replaceChildren(emptyState("No tools loaded."));
+    if (state.tools.selected.length === 0) {
+      els.toolsList.replaceChildren(emptyState("No tools loaded."));
+      return;
+    }
+    els.toolsList.replaceChildren(
+      ...state.tools.selected.map((tool) => toolOption(tool, true))
+    );
     return;
   }
   const selectedKeys = new Set(state.tools.selected.map(toolKey));
+  const renderedTools = uniqueTools([...state.tools.selected, ...state.tools.items]);
   els.toolsList.replaceChildren(
-    ...state.tools.items.map((tool) => toolOption(tool, selectedKeys.has(toolKey(tool))))
+    ...renderedTools.map((tool) => toolOption(tool, selectedKeys.has(toolKey(tool))))
   );
 }
 
 function toolOption(tool, checked) {
-  const label = document.createElement("label");
-  label.className = `dataset-option${checked ? " is-selected" : ""}`;
+  const key = toolKey(tool);
+  const configuredTool = checked ? selectedToolByKey(key) || compactToolSelection(tool) : compactToolSelection(tool);
+  const label = document.createElement("div");
+  label.className = `dataset-option tool-option${checked ? " is-selected" : ""}`;
   const checkbox = document.createElement("input");
   checkbox.type = "checkbox";
   checkbox.checked = checked;
-  checkbox.dataset.toolKey = toolKey(tool);
+  checkbox.dataset.toolKey = key;
 
   const body = document.createElement("span");
   body.className = "dataset-option-body";
@@ -387,6 +409,9 @@ function toolOption(tool, checked) {
   description.className = "dataset-description";
   description.textContent = tool.description || tool.provider_name || tool.provider_id;
   body.append(name, meta, description);
+  if (checked) {
+    body.append(toolConfigurationPanel(configuredTool));
+  }
   label.append(checkbox, body);
   return label;
 }
@@ -398,6 +423,122 @@ function toolMeta(tool) {
     Array.isArray(tool.parameters) ? `${tool.parameters.length} params` : "",
     tool.requires_configuration ? "needs config" : "",
   ].filter(Boolean).join(" · ") || "tool";
+}
+
+function toolConfigurationPanel(tool) {
+  const panel = document.createElement("div");
+  panel.className = "tool-config";
+  if (tool.requires_configuration) {
+    panel.append(renderMessageRow({ tone: "warning", text: "This tool may require credentials or provider configuration in Dify." }));
+  }
+  const schemas = Array.isArray(tool.parameters) ? tool.parameters : [];
+  const inputSchemas = schemas.filter((schema) => schemaForm(schema) === "llm");
+  const settingSchemas = schemas.filter((schema) => schemaForm(schema) !== "llm");
+  panel.append(toolConfigSection(tool, "Input parameters", "tool_parameters", inputSchemas));
+  panel.append(toolConfigSection(tool, "Settings", "tool_configurations", settingSchemas));
+  return panel;
+}
+
+function toolConfigSection(tool, title, group, schemas) {
+  const section = document.createElement("div");
+  section.className = "tool-config-section";
+  const heading = document.createElement("div");
+  heading.className = "tool-config-heading";
+  heading.textContent = `${title} · ${schemas.length || 0}`;
+  section.append(heading);
+  if (!schemas.length) {
+    section.append(emptyState(group === "tool_parameters" ? "No runtime inputs." : "No settings."));
+    return section;
+  }
+  section.append(...schemas.map((schema) => toolConfigField(tool, group, schema)));
+  return section;
+}
+
+function toolConfigField(tool, group, schema) {
+  const variable = schemaVariable(schema);
+  const key = toolKey(tool);
+  const map = group === "tool_parameters" ? tool.tool_parameters : tool.tool_configurations;
+  const value = map?.[variable] || defaultToolInputForSchema(schema, group) || { type: defaultToolValueType(schema, group), value: "" };
+  const row = document.createElement("div");
+  row.className = `tool-config-field${schema.required && !toolInputHasValue(value) ? " is-missing" : ""}`;
+
+  const label = document.createElement("div");
+  label.className = "tool-config-label";
+  label.textContent = `${localizedLabel(schema.label) || variable}${schema.required ? " *" : ""}`;
+  const meta = document.createElement("div");
+  meta.className = "tool-config-meta";
+  meta.textContent = [
+    variable,
+    schema.type || "string",
+    schema.form || "llm",
+    schema.default !== undefined && schema.default !== null && schema.default !== "" ? `default ${String(schema.default)}` : "",
+  ].filter(Boolean).join(" · ");
+  const controls = document.createElement("div");
+  controls.className = "tool-config-controls";
+  controls.append(toolConfigModeControl(key, group, variable, value, schema));
+  controls.append(toolConfigValueControl(key, group, variable, value, schema));
+  row.append(label, meta, controls);
+  return row;
+}
+
+function toolConfigModeControl(key, group, variable, value, schema) {
+  const select = document.createElement("select");
+  select.className = "tool-config-mode";
+  select.dataset.toolConfigKey = key;
+  select.dataset.toolParamGroup = group;
+  select.dataset.toolParamName = variable;
+  select.dataset.toolParamPart = "type";
+  select.dataset.toolParamSchemaType = String(schema.type || "string");
+  const modes = toolAllowedValueTypes(schema, group);
+  for (const mode of modes) {
+    const option = document.createElement("option");
+    option.value = mode;
+    option.textContent = mode;
+    select.append(option);
+  }
+  select.value = modes.includes(value?.type) ? value.type : modes[0];
+  return select;
+}
+
+function toolConfigValueControl(key, group, variable, value, schema) {
+  const type = value?.type || defaultToolValueType(schema, group);
+  const schemaType = normalizedSchemaType(schema);
+  const options = Array.isArray(schema.options) ? schema.options : [];
+  let control;
+  if (type === "constant" && schemaType === "boolean") {
+    control = document.createElement("select");
+    for (const item of [
+      ["true", "True"],
+      ["false", "False"],
+    ]) {
+      const option = document.createElement("option");
+      option.value = item[0];
+      option.textContent = item[1];
+      control.append(option);
+    }
+    control.value = String(Boolean(value?.value));
+  } else if (type === "constant" && options.length) {
+    control = document.createElement("select");
+    for (const item of options) {
+      const option = document.createElement("option");
+      option.value = String(item.value ?? "");
+      option.textContent = localizedLabel(item.label) || String(item.value ?? "");
+      control.append(option);
+    }
+    control.value = String(value?.value ?? "");
+  } else {
+    control = document.createElement("input");
+    control.type = type === "constant" && isNumberSchema(schema) ? "number" : "text";
+    control.placeholder = toolValuePlaceholder(type, schema, group);
+    control.value = toolValueToDisplay(value, schema);
+  }
+  control.className = "tool-config-value";
+  control.dataset.toolConfigKey = key;
+  control.dataset.toolParamGroup = group;
+  control.dataset.toolParamName = variable;
+  control.dataset.toolParamPart = "value";
+  control.dataset.toolParamSchemaType = String(schema.type || "string");
+  return control;
 }
 
 function toggleToolSelection(key, selected) {
@@ -415,6 +556,240 @@ function toggleToolSelection(key, selected) {
   saveSelectedTools();
   renderTools();
   markModifyPreviewDirty();
+}
+
+function handleToolConfigInput(field) {
+  const key = field.dataset.toolConfigKey;
+  const group = field.dataset.toolParamGroup;
+  const name = field.dataset.toolParamName;
+  const part = field.dataset.toolParamPart;
+  if (!key || !group || !name || !part) {
+    return;
+  }
+  const tool = selectedToolByKey(key);
+  if (!tool) {
+    return;
+  }
+  const schema = (tool.parameters || []).find((item) => schemaVariable(item) === name) || { name, type: field.dataset.toolParamSchemaType };
+  const mapName = group === "tool_configurations" ? "tool_configurations" : "tool_parameters";
+  const current = tool[mapName]?.[name] || defaultToolInputForSchema(schema, group) || { type: defaultToolValueType(schema, group), value: "" };
+  if (!tool[mapName] || typeof tool[mapName] !== "object") {
+    tool[mapName] = {};
+  }
+  if (part === "type") {
+    const nextType = field.value;
+    tool[mapName][name] = {
+      type: nextType,
+      value: defaultValueForToolInputType(nextType, schema, group),
+    };
+    saveSelectedTools();
+    renderTools();
+    markModifyPreviewDirty();
+    return;
+  }
+  tool[mapName][name] = {
+    type: current.type || defaultToolValueType(schema, group),
+    value: parseToolConfigValue(field.value, current.type || defaultToolValueType(schema, group), schema),
+  };
+  saveSelectedTools();
+  markModifyPreviewDirty();
+}
+
+function hydrateSelectedToolsFromLoaded() {
+  if (!state.tools.selected.length || !state.tools.items.length) {
+    return;
+  }
+  state.tools.selected = uniqueTools(state.tools.selected.map((selected) => {
+    const latest = state.tools.items.find((item) => toolKey(item) === toolKey(selected));
+    if (!latest) {
+      return selected;
+    }
+    return {
+      ...latest,
+      tool_parameters: selected.tool_parameters || {},
+      tool_configurations: selected.tool_configurations || {},
+    };
+  }));
+  saveSelectedTools();
+}
+
+function selectedToolByKey(key) {
+  return state.tools.selected.find((tool) => toolKey(tool) === key);
+}
+
+function schemaVariable(schema = {}) {
+  return String(schema.variable || schema.name || "").trim();
+}
+
+function schemaForm(schema = {}) {
+  return String(schema.form || "llm").trim() || "llm";
+}
+
+function normalizedSchemaType(schema = {}) {
+  return String(schema.type || "string").trim().toLowerCase();
+}
+
+function localizedLabel(value) {
+  if (!value) {
+    return "";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "object") {
+    return value.zh_Hans || value.en_US || value.zh_CN || value.label || value.text || Object.values(value).find(Boolean) || "";
+  }
+  return String(value);
+}
+
+function toolAllowedValueTypes(schema, group) {
+  const type = normalizedSchemaType(schema);
+  if (type === "file" || type === "files") {
+    return ["variable"];
+  }
+  if (group === "tool_configurations" && ["boolean", "select", "checkbox", "number", "number-input"].includes(type)) {
+    return ["constant", "variable"];
+  }
+  if (group === "tool_configurations") {
+    return ["mixed", "constant", "variable"];
+  }
+  if (toolSchemaUsesMixedText(schema)) {
+    return ["mixed", "variable", "constant"];
+  }
+  return ["variable", "constant", "mixed"];
+}
+
+function defaultToolValueType(schema, group) {
+  const type = normalizedSchemaType(schema);
+  if (type === "file" || type === "files") {
+    return "variable";
+  }
+  if (group === "tool_configurations" && ["boolean", "select", "checkbox", "number", "number-input"].includes(type)) {
+    return "constant";
+  }
+  if (toolSchemaUsesMixedText(schema)) {
+    return "mixed";
+  }
+  return "variable";
+}
+
+function defaultToolInputForSchema(schema, group) {
+  const defaultValue = schema.default;
+  if (defaultValue !== undefined && defaultValue !== null && defaultValue !== "") {
+    return normalizeToolInputValue(defaultValue, schema, group);
+  }
+  const options = Array.isArray(schema.options) ? schema.options : [];
+  if (schema.required && options.length && options[0]?.value !== undefined && options[0]?.value !== "") {
+    return normalizeToolInputValue(options[0].value, schema, group);
+  }
+  if (group === "tool_parameters" && schema.required && isQueryLikeToolParameter(schemaVariable(schema)) && toolSchemaUsesMixedText(schema)) {
+    return { type: "mixed", value: DEFAULT_TOOL_QUERY_TEMPLATE };
+  }
+  return null;
+}
+
+function normalizeToolInputValue(value, schema, group) {
+  if (value && typeof value === "object" && "type" in value && "value" in value) {
+    return {
+      type: value.type || defaultToolValueType(schema, group),
+      value: value.type === "variable" ? normalizeSelectorValue(value.value) : value.value,
+    };
+  }
+  const type = defaultToolValueType(schema, group);
+  return {
+    type,
+    value: parseToolConfigValue(value, type, schema),
+  };
+}
+
+function defaultValueForToolInputType(type, schema, group) {
+  if (type === "variable") {
+    return isQueryLikeToolParameter(schemaVariable(schema)) ? ["start", "query"] : [];
+  }
+  const configured = defaultToolInputForSchema(schema, group);
+  if (configured && configured.type === type) {
+    return configured.value;
+  }
+  if (type === "constant" && normalizedSchemaType(schema) === "boolean") {
+    return false;
+  }
+  return "";
+}
+
+function parseToolConfigValue(value, type, schema) {
+  if (type === "variable") {
+    return normalizeSelectorValue(value);
+  }
+  if (type === "constant") {
+    if (normalizedSchemaType(schema) === "boolean") {
+      return String(value).toLowerCase() === "true" || value === true || value === 1;
+    }
+    if (isNumberSchema(schema) && value !== "") {
+      const parsed = Number(value);
+      return Number.isNaN(parsed) ? value : parsed;
+    }
+    return value;
+  }
+  return String(value ?? "");
+}
+
+function toolValueToDisplay(value, schema) {
+  if (!value || typeof value !== "object") {
+    return "";
+  }
+  if (value.type === "variable") {
+    return Array.isArray(value.value) ? value.value.join(".") : String(value.value || "");
+  }
+  if (value.type === "constant" && normalizedSchemaType(schema) === "boolean") {
+    return String(Boolean(value.value));
+  }
+  return value.value === undefined || value.value === null ? "" : String(value.value);
+}
+
+function toolValuePlaceholder(type, schema, group) {
+  if (type === "variable") {
+    return "start.query";
+  }
+  if (type === "mixed") {
+    return group === "tool_parameters" ? DEFAULT_TOOL_QUERY_TEMPLATE : "constant text or {{#start.query#}}";
+  }
+  return schema.default !== undefined && schema.default !== null ? String(schema.default) : "constant value";
+}
+
+function normalizeSelectorValue(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item).trim()).filter(Boolean);
+  }
+  return String(value || "")
+    .replace(/^\{\{\s*#?/, "")
+    .replace(/#?\s*\}\}$/, "")
+    .split(".")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function toolSchemaUsesMixedText(schema) {
+  return ["", "string", "text-input", "secret-input"].includes(normalizedSchemaType(schema));
+}
+
+function isNumberSchema(schema) {
+  return ["number", "number-input", "text-number"].includes(normalizedSchemaType(schema));
+}
+
+function isQueryLikeToolParameter(name) {
+  return ["query", "q", "question", "input", "text", "keyword", "keywords", "url"].includes(
+    String(name || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "")
+  );
+}
+
+function toolInputHasValue(value) {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  if (value.value === undefined || value.value === null || value.value === "") {
+    return false;
+  }
+  return !(Array.isArray(value.value) && value.value.length === 0);
 }
 
 async function handleCreate() {
@@ -941,8 +1316,8 @@ function nodeDetails(node) {
     return [
       nodeLine("Provider", [params.provider_name || params.provider_id, params.provider_type].filter(Boolean).join(" / ") || "not configured"),
       nodeLine("Tool", params.tool_label || params.tool_name || "not configured"),
-      nodeLine("Inputs", Object.keys(toolParameters).join(", ") || "none"),
-      nodeLine("Configurations", Object.keys(toolConfigurations).join(", ") || "none"),
+      nodeLine("Inputs", toolBindingSummary(toolParameters)),
+      nodeLine("Configurations", toolBindingSummary(toolConfigurations)),
       nodeLine("Schema", schemas.map((item) => `${item.name || item.variable}:${item.type || "string"}${item.required ? "*" : ""}`).join(", ") || "none"),
       nodeLine("Outputs", externalOutputSummary(params)),
     ];
@@ -984,6 +1359,22 @@ function externalOutputSummary(raw) {
   const variables = Array.isArray(raw.variables) ? raw.variables : [];
   const names = variables.map((item) => item && (item.name || item.variable)).filter(Boolean);
   return names.join(", ") || "text, files, json / Dify runtime";
+}
+
+function toolBindingSummary(values) {
+  const entries = Object.entries(values || {});
+  if (!entries.length) {
+    return "none";
+  }
+  return entries.map(([name, value]) => `${name}=${toolBindingValueLabel(value)}`).join(", ");
+}
+
+function toolBindingValueLabel(value) {
+  if (!value || typeof value !== "object") {
+    return String(value ?? "");
+  }
+  const rawValue = Array.isArray(value.value) ? value.value.join(".") : String(value.value ?? "");
+  return `${value.type || "mixed"}:${rawValue}`;
 }
 
 function modelLabel(params) {
@@ -1294,6 +1685,7 @@ function currentToolSelections() {
 
 function compactToolSelection(tool = {}) {
   const item = tool || {};
+  const parameters = Array.isArray(item.parameters) ? item.parameters : [];
   return {
     provider_id: item.provider_id,
     provider_type: item.provider_type,
@@ -1301,13 +1693,36 @@ function compactToolSelection(tool = {}) {
     tool_name: item.tool_name,
     tool_label: item.tool_label,
     description: item.description,
-    parameters: Array.isArray(item.parameters) ? item.parameters : [],
+    parameters,
     output_schema: item.output_schema && typeof item.output_schema === "object" ? item.output_schema : {},
     plugin_id: item.plugin_id || undefined,
     plugin_unique_identifier: item.plugin_unique_identifier || undefined,
+    tool_parameters: configuredToolValues(parameters, item.tool_parameters, "tool_parameters"),
+    tool_configurations: configuredToolValues(parameters, item.tool_configurations, "tool_configurations"),
     is_team_authorization: item.is_team_authorization,
     requires_configuration: Boolean(item.requires_configuration),
   };
+}
+
+function configuredToolValues(parameters, current, group) {
+  const configured = current && typeof current === "object" ? { ...current } : {};
+  for (const schema of parameters) {
+    if (schemaForm(schema) === "llm" && group !== "tool_parameters") {
+      continue;
+    }
+    if (schemaForm(schema) !== "llm" && group !== "tool_configurations") {
+      continue;
+    }
+    const variable = schemaVariable(schema);
+    if (!variable || configured[variable]) {
+      continue;
+    }
+    const value = defaultToolInputForSchema(schema, group);
+    if (value) {
+      configured[variable] = value;
+    }
+  }
+  return configured;
 }
 
 function uniqueTools(tools) {

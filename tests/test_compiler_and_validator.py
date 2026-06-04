@@ -1497,6 +1497,60 @@ def test_normalizer_treats_empty_tool_parameter_as_missing_and_uses_schema_defau
     assert tool_data["tool_configurations"]["generate_summary"] == {"type": "constant", "value": False}
 
 
+def test_selected_tool_explicit_parameters_override_generated_tool_values() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "name": "网页总结",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "scrape",
+                    "type": "tool",
+                    "params": {
+                        "provider_id": "webscraper",
+                        "provider_type": "builtin",
+                        "tool_name": "webscraper",
+                        "tool_parameters": {"url": {"type": "mixed", "value": "https://llm.example"}},
+                        "tool_configurations": {"generate_summary": {"type": "constant", "value": False}},
+                    },
+                },
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["scrape", "text"]}]}},
+            ],
+            "edges": [{"source": "start", "target": "scrape"}, {"source": "scrape", "target": "end"}],
+        },
+        tool_selections=[
+            {
+                "provider_id": "webscraper",
+                "provider_type": "builtin",
+                "provider_name": "webscraper",
+                "tool_name": "webscraper",
+                "tool_label": "网页爬虫",
+                "parameters": [
+                    {"name": "url", "form": "llm", "type": "string", "required": True},
+                    {
+                        "name": "generate_summary",
+                        "form": "form",
+                        "type": "boolean",
+                        "required": False,
+                        "default": "false",
+                    },
+                ],
+                "tool_parameters": {"url": {"type": "mixed", "value": "{{#start.query#}}"}},
+                "tool_configurations": {"generate_summary": {"type": "constant", "value": True}},
+            }
+        ],
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    issues = validate_plan(plan)
+    dsl = _compiler().compile(plan)
+    graph = yaml.safe_load(dsl)["workflow"]["graph"]
+    tool_data = next(node["data"] for node in graph["nodes"] if node["id"] == "scrape")
+
+    assert not has_errors(issues)
+    assert tool_data["tool_parameters"]["url"] == {"type": "mixed", "value": "{{#start.query#}}"}
+    assert tool_data["tool_configurations"]["generate_summary"] == {"type": "constant", "value": True}
+
+
 def test_normalizer_uses_first_required_tool_configuration_option_when_no_default() -> None:
     normalized = normalize_plan_payload(
         {

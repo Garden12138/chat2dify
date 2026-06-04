@@ -58,6 +58,9 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert "currentDatasetIds" in script.text
     assert "loadTools" in script.text
     assert "currentToolSelections" in script.text
+    assert "toolConfigurationPanel" in script.text
+    assert "tool_configurations" in script.text
+    assert "tool_parameters" in script.text
     assert "Applied reviewed preview" in script.text
     assert "localStorage" in script.text
     assert "renderValidationPanel" in script.text

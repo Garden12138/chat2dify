@@ -1374,13 +1374,21 @@ def _normalize_tool_params(params: dict[str, Any], tool_selections: list[dict[st
     result["tool_name"] = str(result.get("tool_name") or "").strip()
     result["tool_label"] = str(result.get("tool_label") or result.get("tool_name") or "").strip()
     result["tool_node_version"] = str(result.get("tool_node_version") or "2")
+    explicit_tool_parameters = (selected or {}).get("tool_parameters") if isinstance(selected, dict) else {}
+    explicit_tool_configurations = (selected or {}).get("tool_configurations") if isinstance(selected, dict) else {}
     result["tool_parameters"] = _normalize_tool_runtime_inputs(
-        result.get("tool_parameters") or result.get("tool_inputs") or {},
+        _merge_tool_inputs(
+            result.get("tool_parameters") or result.get("tool_inputs") or {},
+            explicit_tool_parameters,
+        ),
         schemas,
         form="llm",
     )
     result["tool_configurations"] = _normalize_tool_configurations(
-        result.get("tool_configurations") or result.get("tool_settings") or result.get("config") or {},
+        _merge_tool_inputs(
+            result.get("tool_configurations") or result.get("tool_settings") or result.get("config") or {},
+            explicit_tool_configurations,
+        ),
         schemas,
     )
     result.pop("tool_inputs", None)
@@ -1414,6 +1422,14 @@ def _find_selected_tool(params: dict[str, Any], tool_selections: list[dict[str, 
         if len(matches) == 1:
             return matches[0]
     return candidates[0] if len(candidates) == 1 else None
+
+
+def _merge_tool_inputs(generated: Any, explicit: Any) -> dict[str, Any]:
+    base = deepcopy(generated) if isinstance(generated, dict) else {}
+    if isinstance(explicit, dict):
+        for key, value in explicit.items():
+            base[str(key)] = deepcopy(value)
+    return base
 
 
 def _normalize_tool_param_schemas(value: Any) -> list[dict[str, Any]]:
