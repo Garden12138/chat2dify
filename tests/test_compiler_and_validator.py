@@ -7,7 +7,7 @@ from app.agent.normalizer import normalize_plan_payload
 from app.compiler.dify import DifyDslCompiler
 from app.dify.knowledge_retrieval import apply_dataset_retrieval_settings
 from app.models import WorkflowPlan
-from app.validator import validate_dsl, validate_plan
+from app.validator import has_errors, validate_dsl, validate_plan
 
 
 def _compiler() -> DifyDslCompiler:
@@ -146,6 +146,55 @@ def test_plan_validator_rejects_unknown_variable_reference() -> None:
     issues = validate_plan(plan)
 
     assert any(issue.code == "PLAN_VARIABLE_UNKNOWN" for issue in issues)
+
+
+def test_plan_validator_accepts_external_dependency_outputs() -> None:
+    trigger_plan = WorkflowPlan.model_validate(
+        {
+            "name": "trigger output",
+            "nodes": [
+                {
+                    "id": "webhook",
+                    "type": "trigger-webhook",
+                    "title": "Webhook 触发",
+                    "params": {"_raw_data": {"variables": [{"name": "payload"}]}},
+                },
+                {
+                    "id": "end",
+                    "type": "end",
+                    "params": {"outputs": [{"variable": "payload", "value_selector": ["webhook", "payload"]}]},
+                },
+            ],
+            "edges": [{"source": "webhook", "target": "end"}],
+        }
+    )
+    datasource_plan = WorkflowPlan.model_validate(
+        {
+            "name": "datasource output",
+            "nodes": [
+                {
+                    "id": "source",
+                    "type": "datasource",
+                    "title": "读取数据源",
+                    "params": {"_raw_data": {"provider_type": "local_file"}},
+                },
+                {
+                    "id": "end",
+                    "type": "end",
+                    "params": {"outputs": [{"variable": "file", "value_selector": ["source", "file"]}]},
+                },
+            ],
+            "edges": [{"source": "source", "target": "end"}],
+        }
+    )
+
+    trigger_issues = validate_plan(trigger_plan)
+    datasource_issues = validate_plan(datasource_plan)
+
+    assert not [issue for issue in trigger_issues if issue.code == "PLAN_VARIABLE_UNKNOWN"]
+    assert not [issue for issue in datasource_issues if issue.code == "PLAN_VARIABLE_UNKNOWN"]
+    assert any(issue.code == "PLAN_EXTERNAL_DEPENDENCY_NODE_PASSTHROUGH" for issue in trigger_issues)
+    assert any(issue.code == "PLAN_EXTERNAL_DEPENDENCY_NODE_PASSTHROUGH" for issue in datasource_issues)
 
 
 def test_plan_validator_warns_about_generic_titles_and_empty_system_prompt() -> None:
@@ -1340,6 +1389,190 @@ def test_validator_rejects_start_incoming_and_end_outgoing() -> None:
 
     assert any(issue.code == "PLAN_START_HAS_INCOMING_EDGE" for issue in issues)
     assert any(issue.code == "PLAN_END_HAS_OUTGOING_EDGE" for issue in issues)
+
+
+def test_normalizer_validator_and_compiler_cover_structured_tool_node() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "name": "工具查询总结",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "lookup",
+                    "type": "tool",
+                    "title": "调用搜索工具查询信息",
+                    "params": {
+                        "provider_id": "provider-1",
+                        "provider_type": "builtin",
+                        "tool_name": "search",
+                    },
+                },
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["lookup", "answer"]}]}},
+            ],
+            "edges": [{"source": "start", "target": "lookup"}, {"source": "lookup", "target": "end"}],
+        },
+        tool_selections=[
+            {
+                "provider_id": "provider-1",
+                "provider_type": "builtin",
+                "provider_name": "websearch",
+                "tool_name": "search",
+                "tool_label": "搜索",
+                "parameters": [{"name": "query", "form": "llm", "type": "string", "required": True}],
+                "output_schema": {"properties": {"answer": {"type": "string"}}},
+            }
+        ],
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    issues = validate_plan(plan)
+    dsl = _compiler().compile(plan)
+    graph = yaml.safe_load(dsl)["workflow"]["graph"]
+    tool_data = next(node["data"] for node in graph["nodes"] if node["id"] == "lookup")
+
+    assert not has_errors(issues)
+    assert tool_data["type"] == "tool"
+    assert tool_data["provider_id"] == "provider-1"
+    assert tool_data["provider_name"] == "websearch"
+    assert tool_data["tool_name"] == "search"
+    assert tool_data["tool_parameters"]["query"] == {"type": "mixed", "value": "{{#start.query#}}"}
+    assert tool_data["output_schema"]["properties"]["answer"]["type"] == "string"
+
+
+def test_normalizer_treats_empty_tool_parameter_as_missing_and_uses_schema_defaults() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "name": "网页总结",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "scrape",
+                    "type": "tool",
+                    "params": {
+                        "provider_id": "webscraper",
+                        "provider_type": "builtin",
+                        "tool_name": "webscraper",
+                        "tool_parameters": {"url": ""},
+                    },
+                },
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["scrape", "text"]}]}},
+            ],
+            "edges": [{"source": "start", "target": "scrape"}, {"source": "scrape", "target": "end"}],
+        },
+        tool_selections=[
+            {
+                "provider_id": "webscraper",
+                "provider_type": "builtin",
+                "provider_name": "webscraper",
+                "tool_name": "webscraper",
+                "tool_label": "网页爬虫",
+                "parameters": [
+                    {"name": "url", "form": "llm", "type": "string", "required": True},
+                    {
+                        "name": "user_agent",
+                        "form": "form",
+                        "type": "string",
+                        "required": False,
+                        "default": "Mozilla/5.0",
+                    },
+                    {
+                        "name": "generate_summary",
+                        "form": "form",
+                        "type": "boolean",
+                        "required": False,
+                        "default": "false",
+                    },
+                ],
+            }
+        ],
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    issues = validate_plan(plan)
+    dsl = _compiler().compile(plan)
+    graph = yaml.safe_load(dsl)["workflow"]["graph"]
+    tool_data = next(node["data"] for node in graph["nodes"] if node["id"] == "scrape")
+
+    assert not has_errors(issues)
+    assert tool_data["tool_parameters"]["url"] == {"type": "mixed", "value": "{{#start.query#}}"}
+    assert tool_data["tool_configurations"]["user_agent"] == {"type": "mixed", "value": "Mozilla/5.0"}
+    assert tool_data["tool_configurations"]["generate_summary"] == {"type": "constant", "value": False}
+
+
+def test_normalizer_uses_first_required_tool_configuration_option_when_no_default() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "name": "语音回复",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "tts",
+                    "type": "tool",
+                    "params": {"provider_id": "audio", "provider_type": "builtin", "tool_name": "tts"},
+                },
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["tts", "files"]}]}},
+            ],
+            "edges": [{"source": "start", "target": "tts"}, {"source": "tts", "target": "end"}],
+        },
+        tool_selections=[
+            {
+                "provider_id": "audio",
+                "provider_type": "builtin",
+                "provider_name": "audio",
+                "tool_name": "tts",
+                "tool_label": "Text To Speech",
+                "parameters": [
+                    {"name": "text", "form": "llm", "type": "string", "required": True},
+                    {
+                        "name": "model",
+                        "form": "form",
+                        "type": "select",
+                        "required": True,
+                        "options": [{"value": "langgenius/tongyi/tongyi#qwen3-tts-flash"}],
+                    },
+                ],
+            }
+        ],
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    issues = validate_plan(plan)
+    dsl = _compiler().compile(plan)
+    graph = yaml.safe_load(dsl)["workflow"]["graph"]
+    tool_data = next(node["data"] for node in graph["nodes"] if node["id"] == "tts")
+
+    assert not has_errors(issues)
+    assert tool_data["tool_parameters"]["text"] == {"type": "mixed", "value": "{{#start.query#}}"}
+    assert tool_data["tool_configurations"]["model"] == {
+        "type": "constant",
+        "value": "langgenius/tongyi/tongyi#qwen3-tts-flash",
+    }
+
+
+def test_validator_rejects_structured_tool_missing_required_parameter() -> None:
+    plan = WorkflowPlan.model_validate(
+        {
+            "name": "bad tool",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "lookup",
+                    "type": "tool",
+                    "params": {
+                        "provider_id": "provider-1",
+                        "provider_type": "builtin",
+                        "tool_name": "search",
+                        "paramSchemas": [{"name": "keyword", "variable": "keyword", "form": "llm", "required": True}],
+                        "tool_parameters": {},
+                        "tool_configurations": {},
+                    },
+                },
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["lookup", "text"]}]}},
+            ],
+            "edges": [{"source": "start", "target": "lookup"}, {"source": "lookup", "target": "end"}],
+        }
+    )
+
+    issues = validate_plan(plan)
+
+    assert any(issue.code == "PLAN_TOOL_REQUIRED_PARAMETER_MISSING" for issue in issues)
 
 
 def test_normalizer_compiler_and_validator_cover_iteration_node() -> None:

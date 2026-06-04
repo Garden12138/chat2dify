@@ -61,6 +61,14 @@ GENERIC_TITLES = {
     "while",
     "loopstart",
     "loopend",
+    "tool",
+    "agent",
+    "datasource",
+    "datasourceempty",
+    "knowledgeindex",
+    "triggerwebhook",
+    "triggerplugin",
+    "triggerschedule",
     "开始",
     "开始节点",
     "输入",
@@ -96,6 +104,12 @@ GENERIC_TITLES = {
     "批量处理",
     "循环开始",
     "循环结束",
+    "工具",
+    "智能体",
+    "数据源",
+    "知识库写入",
+    "触发器",
+    "webhook触发器",
 }
 
 NODE_TYPE_ALIASES = {
@@ -166,6 +180,51 @@ NODE_TYPE_ALIASES = {
     "loopstart": "loop-start",
     "loop_end": "loop-end",
     "loopend": "loop-end",
+    "tool": "tool",
+    "agent": "agent",
+    "data-source": "datasource",
+    "data_source": "datasource",
+    "datasource": "datasource",
+    "data-source-empty": "datasource-empty",
+    "data_source_empty": "datasource-empty",
+    "datasource-empty": "datasource-empty",
+    "datasource_empty": "datasource-empty",
+    "datasourceempty": "datasource-empty",
+    "knowledge-index": "knowledge-index",
+    "knowledge_index": "knowledge-index",
+    "knowledgeindex": "knowledge-index",
+    "knowledge-base": "knowledge-index",
+    "knowledge_base": "knowledge-index",
+    "knowledgebase": "knowledge-index",
+    "trigger-webhook": "trigger-webhook",
+    "trigger_webhook": "trigger-webhook",
+    "triggerwebhook": "trigger-webhook",
+    "webhook-trigger": "trigger-webhook",
+    "webhook_trigger": "trigger-webhook",
+    "webhooktrigger": "trigger-webhook",
+    "trigger-plugin": "trigger-plugin",
+    "trigger_plugin": "trigger-plugin",
+    "triggerplugin": "trigger-plugin",
+    "plugin-trigger": "trigger-plugin",
+    "plugin_trigger": "trigger-plugin",
+    "plugintrigger": "trigger-plugin",
+    "trigger-schedule": "trigger-schedule",
+    "trigger_schedule": "trigger-schedule",
+    "triggerschedule": "trigger-schedule",
+    "schedule-trigger": "trigger-schedule",
+    "schedule_trigger": "trigger-schedule",
+    "scheduletrigger": "trigger-schedule",
+}
+
+EXTERNAL_DEPENDENCY_NODE_TYPES = {
+    "tool",
+    "agent",
+    "datasource",
+    "datasource-empty",
+    "knowledge-index",
+    "trigger-webhook",
+    "trigger-plugin",
+    "trigger-schedule",
 }
 
 
@@ -181,6 +240,7 @@ def normalize_plan_payload(
     *,
     app_name: str | None = None,
     default_dataset_ids: list[str] | None = None,
+    tool_selections: list[dict[str, Any]] | None = None,
 ) -> NormalizationResult:
     data = deepcopy(payload)
     changes: list[str] = []
@@ -267,6 +327,10 @@ def normalize_plan_payload(
                     workflow_name=str(data.get("name", "")),
                     default_dataset_ids=default_dataset_ids or [],
                 )
+            case "tool":
+                node["params"] = _normalize_tool_params(params, tool_selections or [])
+            case node_type if node_type in EXTERNAL_DEPENDENCY_NODE_TYPES:
+                node["params"] = _normalize_external_dependency_params(params)
             case "iteration-start" | "loop-start" | "loop-end":
                 node["params"] = dict(params)
         if before != node.get("params"):
@@ -278,6 +342,9 @@ def normalize_plan_payload(
             continue
         old_title = str(node.get("title") or "")
         node_type = str(node.get("type") or "")
+        node_params = node.get("params") if isinstance(node.get("params"), dict) else {}
+        if node_type in EXTERNAL_DEPENDENCY_NODE_TYPES and not (node_type == "tool" and "_raw_data" not in node_params):
+            continue
         if _is_generic_title(old_title, node_type):
             node["title"] = _semantic_title(node, data, node_by_id, edges)
             changes.append(f"normalized generic title for {node.get('id', '<unknown>')}")
@@ -940,6 +1007,8 @@ def _normalize_container_child(
             child["params"] = _normalize_knowledge_retrieval_params(params, default_dataset_ids)
         case "human-input":
             child["params"] = _normalize_human_input_params(params)
+        case child_type if child_type in EXTERNAL_DEPENDENCY_NODE_TYPES:
+            child["params"] = _normalize_external_dependency_params(params)
         case "iteration-start" | "loop-start" | "loop-end":
             child["params"] = dict(params)
         case _:
@@ -1267,6 +1336,288 @@ def _normalize_loop_variables(value: Any) -> list[dict[str, Any]]:
             }
         )
     return variables
+
+
+def _normalize_tool_params(params: dict[str, Any], tool_selections: list[dict[str, Any]]) -> dict[str, Any]:
+    if isinstance(params.get("_raw_data"), dict):
+        return _normalize_external_dependency_params(params)
+
+    result = dict(params)
+    selected = _find_selected_tool(result, tool_selections)
+    if selected:
+        result.setdefault("provider_id", selected.get("provider_id"))
+        result.setdefault("provider_type", selected.get("provider_type"))
+        result.setdefault("provider_name", selected.get("provider_name") or selected.get("provider_id"))
+        result.setdefault("tool_name", selected.get("tool_name"))
+        result.setdefault("tool_label", selected.get("tool_label") or selected.get("tool_name"))
+        if selected.get("description") and not result.get("tool_description"):
+            result["tool_description"] = selected.get("description")
+        if selected.get("plugin_id") and not result.get("plugin_id"):
+            result["plugin_id"] = selected.get("plugin_id")
+        if selected.get("plugin_unique_identifier") and not result.get("plugin_unique_identifier"):
+            result["plugin_unique_identifier"] = selected.get("plugin_unique_identifier")
+        if selected.get("is_team_authorization") is not None and result.get("is_team_authorization") is None:
+            result["is_team_authorization"] = selected.get("is_team_authorization")
+        if selected.get("output_schema") and not result.get("output_schema"):
+            result["output_schema"] = deepcopy(selected.get("output_schema"))
+
+    schemas = _normalize_tool_param_schemas(
+        result.get("paramSchemas") or result.get("parameters") or (selected or {}).get("parameters") or []
+    )
+    if schemas:
+        result["paramSchemas"] = schemas
+    result.pop("parameters", None)
+
+    result["provider_id"] = str(result.get("provider_id") or "").strip()
+    result["provider_type"] = str(result.get("provider_type") or "").strip()
+    result["provider_name"] = str(result.get("provider_name") or result.get("provider_id") or "").strip()
+    result["tool_name"] = str(result.get("tool_name") or "").strip()
+    result["tool_label"] = str(result.get("tool_label") or result.get("tool_name") or "").strip()
+    result["tool_node_version"] = str(result.get("tool_node_version") or "2")
+    result["tool_parameters"] = _normalize_tool_runtime_inputs(
+        result.get("tool_parameters") or result.get("tool_inputs") or {},
+        schemas,
+        form="llm",
+    )
+    result["tool_configurations"] = _normalize_tool_configurations(
+        result.get("tool_configurations") or result.get("tool_settings") or result.get("config") or {},
+        schemas,
+    )
+    result.pop("tool_inputs", None)
+    result.pop("tool_settings", None)
+    result.pop("config", None)
+    return result
+
+
+def _find_selected_tool(params: dict[str, Any], tool_selections: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not tool_selections:
+        return None
+    provider_id = str(params.get("provider_id") or "").strip()
+    provider_type = str(params.get("provider_type") or "").strip()
+    tool_name = str(params.get("tool_name") or params.get("name") or "").strip()
+    candidates = [item for item in tool_selections if isinstance(item, dict)]
+    for item in candidates:
+        if (
+            provider_id
+            and tool_name
+            and str(item.get("provider_id") or "").strip() == provider_id
+            and str(item.get("tool_name") or "").strip() == tool_name
+            and (not provider_type or str(item.get("provider_type") or "").strip() == provider_type)
+        ):
+            return item
+    if tool_name:
+        matches = [item for item in candidates if str(item.get("tool_name") or "").strip() == tool_name]
+        if len(matches) == 1:
+            return matches[0]
+    if provider_id:
+        matches = [item for item in candidates if str(item.get("provider_id") or "").strip() == provider_id]
+        if len(matches) == 1:
+            return matches[0]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _normalize_tool_param_schemas(value: Any) -> list[dict[str, Any]]:
+    schemas: list[dict[str, Any]] = []
+    for item in value or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("variable") or "").strip()
+        if not name:
+            continue
+        schema = deepcopy(item)
+        schema["name"] = name
+        schema["variable"] = str(schema.get("variable") or name)
+        schema["form"] = str(schema.get("form") or "llm")
+        schema["type"] = str(schema.get("type") or "string")
+        schema["required"] = bool(schema.get("required", False))
+        if "label" not in schema or schema.get("label") in (None, ""):
+            schema["label"] = {"en_US": name, "zh_Hans": name}
+        schemas.append(schema)
+    return schemas
+
+
+def _normalize_tool_runtime_inputs(value: Any, schemas: list[dict[str, Any]], *, form: str) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    result: dict[str, Any] = {}
+    schema_by_name = {
+        str(schema.get("name") or schema.get("variable")): schema
+        for schema in schemas
+        if str(schema.get("form") or "") == form and (schema.get("name") or schema.get("variable"))
+    }
+    for name, schema in schema_by_name.items():
+        raw_value = raw.get(name)
+        variable_name = str(schema.get("variable") or name)
+        if raw_value is None and variable_name != name:
+            raw_value = raw.get(variable_name)
+        if _is_empty_tool_input(raw_value):
+            raw_value = None
+        if raw_value is None:
+            default = schema.get("default")
+            if not _is_empty_tool_input(default):
+                raw_value = default
+            elif schema.get("required") and _is_query_like_tool_parameter(name):
+                raw_value = ["start", "query"]
+        if raw_value is not None:
+            result[variable_name] = _normalize_tool_runtime_input(raw_value, schema)
+
+    for key, raw_value in raw.items():
+        if key in result:
+            continue
+        if any(str(schema.get("name")) == key or str(schema.get("variable")) == key for schema in schema_by_name.values()):
+            continue
+        schema = next(
+            (item for item in schemas if str(item.get("name")) == str(key) or str(item.get("variable")) == str(key)),
+            {},
+        )
+        result[str(key)] = _normalize_tool_runtime_input(raw_value, schema)
+    return result
+
+
+def _normalize_tool_configurations(value: Any, schemas: list[dict[str, Any]]) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    result: dict[str, Any] = {}
+    config_schemas = [
+        schema
+        for schema in schemas
+        if str(schema.get("form") or "") != "llm" and (schema.get("name") or schema.get("variable"))
+    ]
+    for schema in config_schemas:
+        name = str(schema.get("variable") or schema.get("name"))
+        raw_value = raw.get(name)
+        if raw_value is None and str(schema.get("name")) != name:
+            raw_value = raw.get(str(schema.get("name")))
+        if _is_empty_tool_input(raw_value):
+            raw_value = None
+        if raw_value is None:
+            raw_value = _tool_schema_default_value(schema)
+        if raw_value is not None:
+            result[name] = _normalize_tool_form_input(raw_value, schema)
+    for key, raw_value in raw.items():
+        if _is_empty_tool_input(raw_value):
+            continue
+        result.setdefault(str(key), deepcopy(raw_value))
+    return result
+
+
+def _normalize_tool_var_input(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict) and "value" in value:
+        kind = str(value.get("type") or "mixed")
+        if kind not in {"variable", "constant", "mixed"}:
+            kind = "mixed"
+        raw_value = value.get("value")
+        if kind == "variable":
+            raw_value = _normalize_selector(raw_value)
+        elif isinstance(raw_value, str):
+            raw_value = normalize_template_refs(raw_value)
+        return {"type": kind, "value": raw_value}
+    if isinstance(value, list) and _looks_like_selector(value):
+        return {"type": "variable", "value": _normalize_selector(value)}
+    if isinstance(value, str):
+        text = normalize_template_refs(value)
+        match = DIFY_REF_PATTERN.fullmatch(text.strip())
+        if match:
+            return {"type": "variable", "value": [match.group(1), *[piece for piece in match.group(2).split(".") if piece]]}
+        if re.fullmatch(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_.-]+", text.strip()):
+            return {"type": "variable", "value": _normalize_selector(text)}
+        return {"type": "mixed", "value": text}
+    return {"type": "constant", "value": deepcopy(value)}
+
+
+def _normalize_tool_runtime_input(value: Any, schema: dict[str, Any]) -> dict[str, Any]:
+    normalized = _normalize_tool_var_input(value)
+    if not _tool_schema_uses_mixed_text(schema):
+        return normalized
+    raw_value = normalized.get("value")
+    if normalized.get("type") == "variable" and _looks_like_selector(raw_value):
+        return {"type": "mixed", "value": _selector_to_dify_template(raw_value)}
+    if isinstance(raw_value, str):
+        return {"type": "mixed", "value": normalize_template_refs(raw_value)}
+    return normalized
+
+
+def _tool_schema_uses_mixed_text(schema: dict[str, Any]) -> bool:
+    schema_type = str(schema.get("type") or "").strip().lower()
+    return schema_type in {"", "string", "text-input", "secret-input"}
+
+
+def _selector_to_dify_template(selector: Any) -> str:
+    normalized = _normalize_selector(selector)
+    if len(normalized) < 2:
+        return ""
+    return "{{#" + ".".join(normalized) + "#}}"
+
+
+def _normalize_tool_form_input(value: Any, schema: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(value, dict) and "type" in value and "value" in value:
+        return _normalize_tool_var_input(value)
+    form_type = str(schema.get("type") or "").strip().lower()
+    if form_type == "boolean":
+        return {"type": "constant", "value": _coerce_tool_bool(value)}
+    if form_type in {"number", "number-input"}:
+        return {"type": "constant", "value": _coerce_tool_number(value)}
+    if form_type in {"select", "checkbox"}:
+        return {"type": "constant", "value": deepcopy(value)}
+    if form_type in {"model-selector", "app-selector"}:
+        return {"type": "constant", "value": deepcopy(value)}
+    return {"type": "mixed", "value": str(value) if value is not None else ""}
+
+
+def _tool_schema_default_value(schema: dict[str, Any]) -> Any:
+    default = schema.get("default")
+    if not _is_empty_tool_input(default):
+        return default
+    options = schema.get("options") if isinstance(schema.get("options"), list) else []
+    if schema.get("required") and options:
+        first = options[0]
+        if isinstance(first, dict) and not _is_empty_tool_input(first.get("value")):
+            return first.get("value")
+    return None
+
+
+def _is_empty_tool_input(value: Any) -> bool:
+    if value is None or value == "":
+        return True
+    if isinstance(value, dict) and "value" in value:
+        raw_value = value.get("value")
+        return raw_value is None or raw_value == "" or raw_value == []
+    return False
+
+
+def _coerce_tool_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value == 1
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "y", "on"}
+    return bool(value)
+
+
+def _coerce_tool_number(value: Any) -> int | float | Any:
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return value
+        try:
+            parsed = float(stripped)
+        except ValueError:
+            return value
+        return int(parsed) if parsed.is_integer() else parsed
+    return value
+
+
+def _is_query_like_tool_parameter(name: str) -> bool:
+    normalized = _safe_variable_name(name)
+    return normalized in {"query", "q", "question", "input", "text", "keyword", "keywords", "url"}
+
+
+def _normalize_external_dependency_params(params: dict[str, Any]) -> dict[str, Any]:
+    result = deepcopy(params)
+    if "_raw_data" in result and isinstance(result["_raw_data"], dict):
+        result["_raw_data"] = deepcopy(result["_raw_data"])
+    return result
 
 
 def _error_handle_mode(value: str) -> str:
@@ -2057,6 +2408,11 @@ def _semantic_title(
             return f"批量处理{subject}"
         case "loop":
             return f"循环检查{subject}"
+        case "tool":
+            tool_label = str(params.get("tool_label") or params.get("tool_name") or "").strip()
+            if tool_label:
+                return f"调用{tool_label}"
+            return f"调用{subject}工具"
         case "iteration-start":
             return "开始遍历"
         case "loop-start":

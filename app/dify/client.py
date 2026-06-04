@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from copy import deepcopy
 from dataclasses import dataclass
 import time
 from typing import Any
@@ -122,6 +123,60 @@ class DifyDatasetListResult:
             limit=_int_or_none(payload.get("limit")) or len(items),
             total=_int_or_none(payload.get("total")) or len(items),
         )
+
+
+@dataclass(frozen=True)
+class DifyToolListItem:
+    provider_id: str
+    provider_type: str
+    provider_name: str
+    tool_name: str
+    tool_label: str
+    description: str
+    parameters: list[dict[str, Any]]
+    output_schema: dict[str, Any]
+    plugin_id: str | None = None
+    plugin_unique_identifier: str | None = None
+    is_team_authorization: bool | None = None
+    requires_configuration: bool = False
+
+
+@dataclass(frozen=True)
+class DifyToolListResult:
+    data: list[DifyToolListItem]
+    count: int
+    types: list[str]
+
+    @classmethod
+    def from_provider_payloads(
+        cls,
+        payloads: list[tuple[str, list[dict[str, Any]]]],
+        *,
+        keyword: str | None = None,
+    ) -> "DifyToolListResult":
+        items: list[DifyToolListItem] = []
+        for provider_type, providers in payloads:
+            for provider in providers:
+                if not isinstance(provider, dict):
+                    continue
+                items.extend(_tool_items_from_provider(provider, provider_type=provider_type))
+        if keyword:
+            needle = keyword.strip().lower()
+            items = [
+                item
+                for item in items
+                if needle in " ".join(
+                    [
+                        item.provider_id,
+                        item.provider_name,
+                        item.tool_name,
+                        item.tool_label,
+                        item.description,
+                    ]
+                ).lower()
+            ]
+        types = sorted({item.provider_type for item in items})
+        return cls(data=items, count=len(items), types=types)
 
 
 @dataclass(frozen=True)
@@ -313,6 +368,36 @@ class DifyClient:
         if not ids:
             return DifyDatasetListResult(data=[], has_more=False, page=1, limit=0, total=0)
         return self.list_datasets(page=1, limit=max(len(ids), 50), include_all=True, ids=ids)
+
+    def list_tools(
+        self,
+        *,
+        keyword: str | None = None,
+        provider_type: str | None = None,
+    ) -> DifyToolListResult:
+        self._ensure_logged_in()
+        endpoints = {
+            "builtin": "/workspaces/current/tools/builtin",
+            "api": "/workspaces/current/tools/api",
+            "workflow": "/workspaces/current/tools/workflow",
+            "mcp": "/workspaces/current/tools/mcp",
+        }
+        requested_types = [provider_type] if provider_type and provider_type != "all" else list(endpoints)
+        payloads: list[tuple[str, list[dict[str, Any]]]] = []
+        for item_type in requested_types:
+            path = endpoints.get(str(item_type))
+            if not path:
+                continue
+            response = self._get_with_auth_retry(path)
+            self._raise_for_response(response)
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise DifyClientError(f"Invalid Dify JSON response: {response.text}") from exc
+            if not isinstance(payload, list):
+                raise DifyClientError(f"Dify tools response for {item_type} must be a JSON list.")
+            payloads.append((str(item_type), [item for item in payload if isinstance(item, dict)]))
+        return DifyToolListResult.from_provider_payloads(payloads, keyword=keyword)
 
     def get_draft_workflow(self, app_id: str) -> DifyDraftWorkflow:
         self._ensure_logged_in()
@@ -529,6 +614,123 @@ class DifyClient:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise DifyClientError(f"Dify request failed: {response.status_code} {body}") from exc
+
+
+def _tool_items_from_provider(provider: dict[str, Any], *, provider_type: str) -> list[DifyToolListItem]:
+    provider_id = str(provider.get("id") or provider.get("provider") or provider.get("name") or "").strip()
+    provider_name = str(provider.get("name") or provider_id).strip()
+    provider_label = _localized_text(provider.get("label")) or provider_name
+    plugin_id = _string_or_none(provider.get("plugin_id"))
+    plugin_unique_identifier = _string_or_none(provider.get("plugin_unique_identifier"))
+    is_team_authorization = _bool_or_none(provider.get("is_team_authorization"))
+    allow_delete = _bool_or_none(provider.get("allow_delete"))
+    tools = provider.get("tools") if isinstance(provider.get("tools"), list) else []
+    items: list[DifyToolListItem] = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        tool_name = str(tool.get("name") or "").strip()
+        if not provider_id or not tool_name:
+            continue
+        parameters = [
+            _tool_parameter_payload(parameter)
+            for parameter in tool.get("parameters") or []
+            if isinstance(parameter, dict)
+        ]
+        output_schema = tool.get("output_schema") if isinstance(tool.get("output_schema"), dict) else {}
+        items.append(
+            DifyToolListItem(
+                provider_id=provider_id,
+                provider_type=str(provider.get("type") or provider_type),
+                provider_name=provider_name,
+                tool_name=tool_name,
+                tool_label=_localized_text(tool.get("label")) or tool_name,
+                description=_localized_text(tool.get("description")) or _localized_text(provider.get("description")) or "",
+                parameters=parameters,
+                output_schema=deepcopy(output_schema),
+                plugin_id=plugin_id,
+                plugin_unique_identifier=plugin_unique_identifier,
+                is_team_authorization=is_team_authorization,
+                requires_configuration=_requires_tool_configuration(
+                    provider_type=str(provider.get("type") or provider_type),
+                    allow_delete=allow_delete,
+                    is_team_authorization=is_team_authorization,
+                    parameters=parameters,
+                ),
+            )
+        )
+    if not items and provider_type == "mcp":
+        provider_description = _localized_text(provider.get("description")) or _string_or_none(provider.get("server_url")) or ""
+        return [
+            DifyToolListItem(
+                provider_id=provider_id,
+                provider_type=str(provider.get("type") or provider_type),
+                provider_name=provider_name,
+                tool_name=provider_name,
+                tool_label=provider_label,
+                description=provider_description,
+                parameters=[],
+                output_schema={},
+                plugin_id=plugin_id,
+                plugin_unique_identifier=plugin_unique_identifier,
+                is_team_authorization=is_team_authorization,
+                requires_configuration=not bool(provider.get("is_authorized", True)),
+            )
+        ] if provider_id else []
+    return items
+
+
+def _tool_parameter_payload(parameter: dict[str, Any]) -> dict[str, Any]:
+    result = {
+        "name": str(parameter.get("name") or parameter.get("variable") or ""),
+        "label": parameter.get("label"),
+        "human_description": parameter.get("human_description"),
+        "type": parameter.get("type"),
+        "form": parameter.get("form"),
+        "llm_description": parameter.get("llm_description"),
+        "required": bool(parameter.get("required", False)),
+        "multiple": bool(parameter.get("multiple", False)),
+        "default": parameter.get("default"),
+        "options": deepcopy(parameter.get("options")) if isinstance(parameter.get("options"), list) else None,
+        "input_schema": deepcopy(parameter.get("input_schema")) if isinstance(parameter.get("input_schema"), dict) else None,
+        "min": parameter.get("min"),
+        "max": parameter.get("max"),
+    }
+    return {key: value for key, value in result.items() if value is not None}
+
+
+def _requires_tool_configuration(
+    *,
+    provider_type: str,
+    allow_delete: bool | None,
+    is_team_authorization: bool | None,
+    parameters: list[dict[str, Any]],
+) -> bool:
+    if provider_type == "builtin" and allow_delete and is_team_authorization is False:
+        return True
+    for parameter in parameters:
+        if str(parameter.get("form") or "") == "llm":
+            continue
+        if not parameter.get("required"):
+            continue
+        default = parameter.get("default")
+        if default is None or default == "":
+            return True
+    return False
+
+
+def _localized_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("zh_Hans", "en_US", "zh_CN", "label", "text", "name"):
+            text = value.get(key)
+            if text:
+                return str(text)
+        for text in value.values():
+            if text:
+                return str(text)
+    return ""
 
 
 def _lines_until_deadline(lines: Any, deadline: float) -> Any:

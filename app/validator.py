@@ -7,7 +7,7 @@ import yaml
 from pydantic import ValidationError
 
 from app.list_operator import DIFY_LIST_COMPARISON_OPERATORS
-from app.models import PlanNode, ValidationIssue, WorkflowPlan
+from app.models import ENTRY_NODE_TYPES, PlanNode, ValidationIssue, WorkflowPlan
 
 
 SUPPORTED_NODE_TYPES = {
@@ -31,6 +31,24 @@ SUPPORTED_NODE_TYPES = {
     "loop",
     "loop-start",
     "loop-end",
+    "tool",
+    "agent",
+    "datasource",
+    "datasource-empty",
+    "knowledge-index",
+    "trigger-webhook",
+    "trigger-plugin",
+    "trigger-schedule",
+}
+EXTERNAL_DEPENDENCY_NODE_TYPES = {
+    "tool",
+    "agent",
+    "datasource",
+    "datasource-empty",
+    "knowledge-index",
+    "trigger-webhook",
+    "trigger-plugin",
+    "trigger-schedule",
 }
 TEMPLATE_REF_RE = re.compile(r"\{\{#([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)#\}\}")
 BARE_TEMPLATE_REF_RE = re.compile(r"\{\{\s*(?!#)([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)\s*\}\}")
@@ -79,6 +97,14 @@ GENERIC_TITLES = {
     "loop",
     "loopstart",
     "loopend",
+    "tool",
+    "agent",
+    "datasource",
+    "datasourceempty",
+    "knowledgeindex",
+    "triggerwebhook",
+    "triggerplugin",
+    "triggerschedule",
     "开始",
     "开始节点",
     "输入",
@@ -114,6 +140,12 @@ GENERIC_TITLES = {
     "批量处理",
     "循环开始",
     "循环结束",
+    "工具",
+    "智能体",
+    "数据源",
+    "知识库写入",
+    "触发器",
+    "webhook触发器",
 }
 
 PARAMETER_EXTRACTOR_TYPES = {
@@ -151,7 +183,7 @@ def validate_plan(plan: WorkflowPlan) -> list[ValidationIssue]:
                     message=f"Unsupported node type: {node.type}",
                     node_id=node.id,
                     path=f"nodes.{node.id}.type",
-                    suggestion="仅使用当前支持的 start、llm、code、if-else、end、http-request、template-transform、question-classifier、parameter-extractor、variable-aggregator、document-extractor、assigner、list-operator、knowledge-retrieval、human-input、iteration、loop 节点。",
+                    suggestion="仅使用当前支持的 workflow 节点；tool 节点需要 Web UI/API 传入 tool_selections，其余外部依赖节点只用于已有 Dify 草稿兼容。",
                 )
             )
     issues.extend(_validate_graph_semantics(plan))
@@ -248,14 +280,14 @@ def _validate_graph_semantics(plan: WorkflowPlan) -> list[ValidationIssue]:
         incoming.setdefault(edge.target, []).append(edge.source)
 
     for node in plan.nodes:
-        if node.type == "start" and incoming.get(node.id):
+        if node.type in ENTRY_NODE_TYPES and incoming.get(node.id):
             issues.append(
                 ValidationIssue(
-                    code="PLAN_START_HAS_INCOMING_EDGE",
-                    message="start node cannot have incoming edges.",
+                    code="PLAN_START_HAS_INCOMING_EDGE" if node.type == "start" else "PLAN_ENTRY_HAS_INCOMING_EDGE",
+                    message=f"{node.type} entry node cannot have incoming edges.",
                     node_id=node.id,
                     path=f"nodes.{node.id}",
-                    suggestion="删除指向 start 节点的连线。",
+                    suggestion="删除指向 entry 节点的连线。",
                 )
             )
         if node.type == "end" and outgoing.get(node.id):
@@ -795,6 +827,18 @@ def _validate_node_params(plan: WorkflowPlan) -> list[ValidationIssue]:
                             "params.timeout",
                         )
                     )
+            case "tool":
+                issues.extend(_validate_tool_node(node))
+            case node_type if node_type in EXTERNAL_DEPENDENCY_NODE_TYPES:
+                issues.append(
+                    _node_issue(
+                        "PLAN_EXTERNAL_DEPENDENCY_NODE_PASSTHROUGH",
+                        f"{node.type} node is preserved as an external-dependency Dify node.",
+                        node.id,
+                        "type",
+                        suggestion="该节点依赖 Dify 插件、触发器或外部配置；chat2dify 会尽量原样保留，但不会替你校验外部资源是否可用。",
+                    ).model_copy(update={"severity": "warning"})
+                )
     return issues
 
 
@@ -813,6 +857,99 @@ def _node_issue(
         path=f"nodes.{node_id}.{path}",
         suggestion=suggestion,
     )
+
+
+def _validate_tool_node(node: PlanNode) -> list[ValidationIssue]:
+    params = node.params
+    if isinstance(params.get("_raw_data"), dict):
+        return [
+            _node_issue(
+                "PLAN_EXTERNAL_DEPENDENCY_NODE_PASSTHROUGH",
+                "tool node is preserved as an external-dependency Dify node.",
+                node.id,
+                "type",
+                suggestion="该 tool 节点来自 Dify 既有草稿；chat2dify 会尽量原样保留，但不会替你校验插件鉴权是否可用。",
+            ).model_copy(update={"severity": "warning"})
+        ]
+
+    issues: list[ValidationIssue] = []
+    for field in ("provider_id", "provider_type", "tool_name"):
+        if not str(params.get(field) or "").strip():
+            issues.append(
+                _node_issue(
+                    f"PLAN_TOOL_{field.upper()}_MISSING",
+                    f"tool node requires {field}.",
+                    node.id,
+                    f"params.{field}",
+                    suggestion="在 Web UI 选择已安装工具，或让 planner 使用 tool_selections 中的真实工具元数据。",
+                )
+            )
+    if str(params.get("provider_type") or "") not in {"builtin", "api", "workflow", "mcp"}:
+        issues.append(
+            _node_issue(
+                "PLAN_TOOL_PROVIDER_TYPE_INVALID",
+                "tool provider_type must be builtin, api, workflow, or mcp.",
+                node.id,
+                "params.provider_type",
+            )
+        )
+    schemas = params.get("paramSchemas") if isinstance(params.get("paramSchemas"), list) else []
+    tool_parameters = params.get("tool_parameters") if isinstance(params.get("tool_parameters"), dict) else {}
+    tool_configurations = params.get("tool_configurations") if isinstance(params.get("tool_configurations"), dict) else {}
+    for idx, schema in enumerate(schemas):
+        if not isinstance(schema, dict):
+            continue
+        name = str(schema.get("variable") or schema.get("name") or "").strip()
+        if not name:
+            continue
+        if not schema.get("required"):
+            continue
+        if str(schema.get("form") or "") == "llm":
+            value = tool_parameters.get(name)
+            if not _tool_var_input_has_value(value):
+                issues.append(
+                    _node_issue(
+                        "PLAN_TOOL_REQUIRED_PARAMETER_MISSING",
+                        f"tool required parameter is missing: {name}",
+                        node.id,
+                        f"params.tool_parameters.{name}",
+                        suggestion="为必填 llm 参数提供变量引用或常量，例如 {'type':'variable','value':['start','query']}。",
+                    )
+                )
+        else:
+            value = tool_configurations.get(name)
+            if value in (None, "") or (isinstance(value, dict) and not _tool_var_input_has_value(value)):
+                issues.append(
+                    _node_issue(
+                        "PLAN_TOOL_REQUIRED_CONFIGURATION_MISSING",
+                        f"tool required configuration is missing: {name}",
+                        node.id,
+                        f"params.tool_configurations.{name}",
+                        suggestion="该字段需要 Dify 工具配置或显式默认值；chat2dify 不会猜测鉴权/配置。",
+                    )
+                )
+        if not schema.get("name") and not schema.get("variable"):
+            issues.append(
+                _node_issue(
+                    "PLAN_TOOL_PARAMETER_SCHEMA_INVALID",
+                    "tool parameter schema requires name or variable.",
+                    node.id,
+                    f"params.paramSchemas.{idx}",
+                )
+            )
+    return issues
+
+
+def _tool_var_input_has_value(value: Any) -> bool:
+    if value in (None, ""):
+        return False
+    if isinstance(value, dict):
+        raw = value.get("value")
+        if raw in (None, ""):
+            return False
+        if isinstance(raw, list) and not raw:
+            return False
+    return True
 
 
 def _validate_iteration_node(node: PlanNode) -> list[ValidationIssue]:
@@ -1132,6 +1269,14 @@ def _known_outputs(plan: WorkflowPlan) -> dict[str, set[str]]:
                     if isinstance(item, dict) and item.get("label")
                 }
                 outputs[node.id] = {*labels, "loop_round"}
+            case "tool" | "agent":
+                outputs[node.id] = {"text", "files", "json", *_schema_output_names(node.params)}
+            case "datasource" | "datasource-empty":
+                outputs[node.id] = {"datasource_type", "file", *_schema_output_names(node.params)}
+            case "knowledge-index":
+                outputs[node.id] = {"result", "document_ids", *_schema_output_names(node.params)}
+            case "trigger-webhook" | "trigger-plugin" | "trigger-schedule":
+                outputs[node.id] = _external_trigger_outputs(node.params)
             case "iteration-start" | "loop-start" | "loop-end":
                 outputs[node.id] = set()
             case "assigner":
@@ -1191,13 +1336,44 @@ def _outputs_for_node(node_type: str, params: dict[str, Any]) -> set[str]:
                 if isinstance(item, dict) and item.get("label")
             }
             return {*labels, "loop_round"}
+        case "tool" | "agent":
+            return {"text", "files", "json", *_schema_output_names(params)}
+        case "datasource" | "datasource-empty":
+            return {"datasource_type", "file", *_schema_output_names(params)}
+        case "knowledge-index":
+            return {"result", "document_ids", *_schema_output_names(params)}
+        case "trigger-webhook" | "trigger-plugin" | "trigger-schedule":
+            return _external_trigger_outputs(params)
     return set()
+
+
+def _schema_output_names(params: dict[str, Any]) -> set[str]:
+    raw_data = params.get("_raw_data") if isinstance(params.get("_raw_data"), dict) else params
+    schema = raw_data.get("output_schema") if isinstance(raw_data, dict) else None
+    properties = schema.get("properties") if isinstance(schema, dict) and isinstance(schema.get("properties"), dict) else {}
+    return {str(key) for key in properties if str(key)}
+
+
+def _external_trigger_outputs(params: dict[str, Any]) -> set[str]:
+    raw_data = params.get("_raw_data") if isinstance(params.get("_raw_data"), dict) else params
+    outputs = {"payload"}
+    variables = raw_data.get("variables") if isinstance(raw_data, dict) else None
+    for item in variables if isinstance(variables, list) else []:
+        if isinstance(item, dict):
+            name = item.get("name") or item.get("variable")
+            if name:
+                outputs.add(str(name))
+    return outputs
 
 
 def _selectors_in_value(value: Any) -> list[list[str]]:
     selectors: list[list[str]] = []
     if isinstance(value, dict):
+        if value.get("type") == "variable" and _is_selector(value.get("value")):
+            selectors.append([str(item) for item in value["value"]])
         for key, child in value.items():
+            if key == "_raw_data":
+                continue
             if (
                 key
                 in {

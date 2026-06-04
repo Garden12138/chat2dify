@@ -28,6 +28,16 @@ CONTAINER_CHILD_START_X = 24
 CONTAINER_CHILD_START_Y = 68
 DIFY_REF_PATTERN = re.compile(r"\{\{\s*#([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)#\s*\}\}")
 HUMAN_INPUT_DEFAULT_WEBAPP_DELIVERY_ID = "00000000-0000-4000-8000-000000000001"
+EXTERNAL_DEPENDENCY_NODE_TYPES = {
+    "tool",
+    "agent",
+    "datasource",
+    "datasource-empty",
+    "knowledge-index",
+    "trigger-webhook",
+    "trigger-plugin",
+    "trigger-schedule",
+}
 
 
 class DifyDslCompiler:
@@ -132,6 +142,8 @@ class DifyDslCompiler:
                 data.update({"title": "", "desc": "", "isInLoop": True})
             case "loop-end":
                 data.update({})
+            case node_type if node_type in EXTERNAL_DEPENDENCY_NODE_TYPES:
+                data.update(_external_dependency_data(node))
 
         return {
             "id": node.id,
@@ -494,6 +506,19 @@ def _graph_node_type(node_type: str) -> str:
     if node_type == "loop-end":
         return CUSTOM_SIMPLE_NODE_TYPE
     return CUSTOM_NODE_TYPE
+
+
+def _external_dependency_data(node: PlanNode) -> dict[str, Any]:
+    raw_data = node.params.get("_raw_data") if isinstance(node.params.get("_raw_data"), dict) else None
+    if raw_data is not None:
+        data = deepcopy(raw_data)
+    else:
+        data = {key: deepcopy(value) for key, value in node.params.items() if not str(key).startswith("_")}
+    data.pop("type", None)
+    data.pop("title", None)
+    data.pop("desc", None)
+    data.pop("selected", None)
+    return data
 
 
 def _child_position(child: dict[str, Any], index: int) -> dict[str, int]:
@@ -968,6 +993,8 @@ def _node_height(node_type: str, data: dict[str, Any]) -> int:
     if node_type in {"iteration", "loop"}:
         children_count = len(data.get("_children", [])) if isinstance(data.get("_children"), list) else 1
         return 220 + max(0, children_count - 2) * 28
+    if node_type in EXTERNAL_DEPENDENCY_NODE_TYPES:
+        return 104
     if node_type in {"iteration-start", "loop-start", "loop-end"}:
         return 54
     if node_type == "end":

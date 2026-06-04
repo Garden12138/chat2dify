@@ -42,6 +42,32 @@
         </form>
       </section>
 
+      <section class="tool-panel" aria-labelledby="tools-title">
+        <div class="panel-heading">
+          <h2 id="tools-title">Tools</h2>
+          <span id="tools-status" class="panel-status status-muted">local</span>
+        </div>
+        <form id="tools-form" class="form-stack">
+          <label>
+            Search tools
+            <input id="tools-search" autocomplete="off" placeholder="Search, query, MCP">
+          </label>
+          <label>
+            Tool type
+            <select id="tools-type">
+              <option value="all">All</option>
+              <option value="builtin">Builtin</option>
+              <option value="api">API</option>
+              <option value="workflow">Workflow</option>
+              <option value="mcp">MCP</option>
+            </select>
+          </label>
+          <button id="refresh-tools" type="submit" class="secondary">Refresh tools</button>
+          <div id="tools-selected-summary" class="selection-summary"></div>
+          <div id="tools-list" class="dataset-list"></div>
+        </form>
+      </section>
+
       <section class="tool-panel" aria-labelledby="create-title">
         <div class="panel-heading">
           <h2 id="create-title">Create</h2>
@@ -154,6 +180,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js?v=workbench-20260603-human-input" defer></script>
+    <script src="/static/app.js?v=workbench-20260604-tools" defer></script>
   </body>
 </html>

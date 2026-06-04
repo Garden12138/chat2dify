@@ -26,7 +26,14 @@ class FakePlanner(WorkflowPlanner):
         self.responses = responses
         self.last_errors: list[str] = []
 
-    def _call_llm(self, message: str, *, app_name: str | None, last_error: str = "") -> str:
+    def _call_llm(
+        self,
+        message: str,
+        *,
+        app_name: str | None,
+        last_error: str = "",
+        tool_selections: list[dict] | None = None,
+    ) -> str:
         self.last_errors.append(last_error)
         if not self.responses:
             raise PlannerError("no fake response")
@@ -99,6 +106,33 @@ def test_planner_accepts_stable_builtin_nodes() -> None:
     assert doc.params["variable_selector"] == ["start", "files"]
     assert list_node.params["variable"] == ["start", "items", "records"]
     assert list_node.params["limit"]["size"] == 1
+
+
+def test_planner_accepts_selected_tool_node() -> None:
+    planner = FakePlanner([json.dumps(_selected_tool_plan())])
+
+    result = planner.generate(
+        "调用搜索工具查询后总结",
+        app_name="工具查询总结",
+        dsl_version="9.9.9",
+        tool_selections=[
+            {
+                "provider_id": "provider-1",
+                "provider_type": "builtin",
+                "provider_name": "websearch",
+                "tool_name": "search",
+                "tool_label": "搜索",
+                "parameters": [{"name": "query", "form": "llm", "type": "string", "required": True}],
+                "output_schema": {"properties": {"answer": {"type": "string"}}},
+            }
+        ],
+    )
+
+    tool = next(node for node in result.plan.nodes if node.id == "lookup")
+    assert tool.type == "tool"
+    assert tool.title == "调用搜索"
+    assert tool.params["provider_id"] == "provider-1"
+    assert tool.params["tool_parameters"]["query"] == {"type": "mixed", "value": "{{#start.query#}}"}
 
 
 def test_planner_accepts_knowledge_retrieval_node_with_default_dataset_ids() -> None:
@@ -345,6 +379,36 @@ def _human_input_plan() -> dict:
             {"source": "llm", "target": "review"},
             {"source": "review", "target": "approved", "source_handle": "approve"},
             {"source": "review", "target": "rejected", "source_handle": "reject"},
+        ],
+    }
+
+
+def _selected_tool_plan() -> dict:
+    return {
+        "nodes": [
+            {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+            {
+                "id": "lookup",
+                "type": "tool",
+                "title": "Tool",
+                "params": {
+                    "provider_id": "provider-1",
+                    "provider_type": "builtin",
+                    "tool_name": "search",
+                },
+            },
+            {
+                "id": "summarize",
+                "type": "llm",
+                "title": "总结工具查询结果",
+                "params": {"user_prompt": "请总结工具结果：{{#lookup.answer#}}"},
+            },
+            {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["summarize", "text"]}]}},
+        ],
+        "edges": [
+            {"source": "start", "target": "lookup"},
+            {"source": "lookup", "target": "summarize"},
+            {"source": "summarize", "target": "end"},
         ],
     }
 

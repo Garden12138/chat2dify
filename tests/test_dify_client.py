@@ -353,6 +353,93 @@ def test_list_datasets_invalid_json_is_wrapped() -> None:
         client.list_datasets()
 
 
+def test_list_tools_sends_csrf_and_returns_flattened_tools() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/console/api/login":
+            return httpx.Response(200, json={"result": "success"}, headers=[("set-cookie", "csrf_token=csrf123; Path=/")])
+        if request.url.path == "/console/api/workspaces/current/tools/builtin":
+            seen["csrf"] = request.headers.get(CSRF_HEADER_NAME, "")
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": "provider-1",
+                        "name": "websearch",
+                        "label": {"zh_Hans": "网页搜索", "en_US": "Web Search"},
+                        "type": "builtin",
+                        "is_team_authorization": True,
+                        "allow_delete": True,
+                        "plugin_id": "plugin-1",
+                        "plugin_unique_identifier": "unique-1",
+                        "tools": [
+                            {
+                                "name": "search",
+                                "label": {"zh_Hans": "搜索"},
+                                "description": {"zh_Hans": "搜索网页"},
+                                "parameters": [
+                                    {"name": "query", "form": "llm", "type": "string", "required": True}
+                                ],
+                                "output_schema": {"properties": {"answer": {"type": "string"}}},
+                            }
+                        ],
+                    }
+                ],
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+    result = client.list_tools(provider_type="builtin", keyword="搜索")
+
+    assert seen["csrf"] == "csrf123"
+    assert result.count == 1
+    assert result.types == ["builtin"]
+    assert result.data[0].provider_id == "provider-1"
+    assert result.data[0].provider_type == "builtin"
+    assert result.data[0].tool_name == "search"
+    assert result.data[0].tool_label == "搜索"
+    assert result.data[0].parameters[0]["name"] == "query"
+    assert result.data[0].output_schema == {"properties": {"answer": {"type": "string"}}}
+
+
+def test_list_tools_refreshes_after_401() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(f"{request.method} {request.url.path}")
+        if request.url.path == "/console/api/login":
+            return httpx.Response(200, json={"result": "success"}, headers=[("set-cookie", "csrf_token=csrf123; Path=/")])
+        if request.url.path == "/console/api/refresh-token":
+            return httpx.Response(200, json={"result": "success"})
+        if request.url.path == "/console/api/workspaces/current/tools/api":
+            if calls.count("GET /console/api/workspaces/current/tools/api") == 1:
+                return httpx.Response(401, json={"message": "expired"})
+            return httpx.Response(200, json=[])
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+    result = client.list_tools(provider_type="api")
+
+    assert result.data == []
+    assert calls.count("GET /console/api/workspaces/current/tools/api") == 2
+    assert "POST /console/api/refresh-token" in calls
+
+
+def test_list_tools_invalid_json_is_wrapped() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/console/api/login":
+            return httpx.Response(200, json={"result": "success"}, headers=[("set-cookie", "csrf_token=csrf123; Path=/")])
+        if request.url.path == "/console/api/workspaces/current/tools/builtin":
+            return httpx.Response(200, text="not json")
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+
+    with pytest.raises(DifyClientError, match="Invalid Dify JSON response"):
+        client.list_tools(provider_type="builtin")
+
+
 def test_sync_draft_workflow_conflict_is_typed() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/console/api/login":

@@ -116,6 +116,11 @@ for Create and Modify requests:
 DIFY_DEFAULT_DATASET_IDS=dataset_id_1,dataset_id_2
 ```
 
+Tool nodes require tools that are already installed and configured in Dify. Use
+the Web UI Tools panel to search and select installed builtin, API, workflow, or
+MCP tools. Only selected tools are exposed to the planner; chat2dify does not
+install plugins, edit credentials, or let the LLM guess provider IDs.
+
 ## Run
 
 ```bash
@@ -149,12 +154,39 @@ List Dify datasets for the Web UI selector:
 curl 'http://127.0.0.1:8000/api/dify/datasets?keyword=售后&page=1&limit=50'
 ```
 
+List installed Dify tools for the Web UI selector:
+
+```bash
+curl 'http://127.0.0.1:8000/api/dify/tools?keyword=search&provider_type=all'
+```
+
 Draft a workflow without importing it:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/workflows/draft \
   -H 'Content-Type: application/json' \
   -d '{"message":"Summarize the user input","app_name":"Summary MVP","dataset_ids":["OPTIONAL_DATASET_ID"]}'
+```
+
+Create or draft a workflow that may use a selected Dify tool by passing the
+tool object returned by `/api/dify/tools`:
+
+```json
+{
+  "message": "先调用所选搜索工具查询信息，再由 LLM 总结并返回 answer",
+  "app_name": "Tool summary workflow",
+  "tool_selections": [
+    {
+      "provider_id": "PROVIDER_ID_FROM_DIFY",
+      "provider_type": "builtin",
+      "provider_name": "provider_name",
+      "tool_name": "tool_name",
+      "tool_label": "Tool label",
+      "parameters": [],
+      "output_schema": {}
+    }
+  ]
+}
 ```
 
 Create a workflow in Dify:
@@ -226,7 +258,9 @@ The current Plan IR supports these node types:
 start, llm, code, if-else, end, http-request, template-transform,
 question-classifier, parameter-extractor, variable-aggregator,
 document-extractor, assigner, list-operator, knowledge-retrieval,
-human-input, iteration, iteration-start, loop, loop-start, loop-end
+human-input, iteration, iteration-start, loop, loop-start, loop-end,
+tool, agent, datasource, datasource-empty, knowledge-index,
+trigger-webhook, trigger-plugin, trigger-schedule
 ```
 
 `question-classifier` is used for semantic routing such as complaint /
@@ -245,6 +279,12 @@ batch/list traversal, while `loop` is used for explicit retry/repeat/until or
 max-N-times flows. `iteration-start`, `loop-start`, and `loop-end` are internal
 Dify graph children generated inside their parent container, not ordinary
 top-level business nodes.
+`tool` can be generated when the request includes explicit `tool_selections`
+from the Web UI/API and the user asks to call a tool. Existing `_raw_data` tool
+nodes are still preserved as passthrough for draft compatibility. `agent`、
+`datasource`、`datasource-empty`、`knowledge-index` 和 `trigger-*` 节点目前仍作为
+外部依赖节点兼容层：chat2dify 可以读取已有 Dify 草稿并尽量原样写回这些节点，
+Web UI 会展示 warning 诊断；新建 workflow 时 planner 不主动生成它们。
 
 Example file workflow request:
 
@@ -282,8 +322,15 @@ Example retry loop workflow request:
 创建最多 3 次维修状态检查工作流。输入 query 是客户提供的维修单号和问题，循环检查处理状态，满足可回复条件或达到 3 次后生成最终回复，最后返回 answer。
 ```
 
-Answer/chatflow nodes, tool/agent nodes, trigger nodes, data-source nodes, and
-model capability registry sync remain out of scope for now.
+Example selected tool workflow request:
+
+```text
+创建工具查询总结工作流。先调用我在 Web UI 勾选的搜索工具查询客户问题相关信息，再用模型总结查询结果并生成客服回复，最后返回 answer。
+```
+
+Answer/chatflow nodes, plugin installation, credential editing, automatic
+creation of agent/trigger/data-source nodes, and model capability registry sync
+remain out of scope for now.
 
 ## Test
 

@@ -14,6 +14,8 @@ from app.dify.client import (
     DifyDraftRunResult,
     DifyDraftSyncResult,
     DifyDraftWorkflow,
+    DifyToolListItem,
+    DifyToolListResult,
 )
 from app.dify.version import DifyVersionInfo
 from app.main import app
@@ -40,6 +42,9 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert 'id="refresh-datasets"' in index.text
     assert 'id="knowledge-dataset-list"' in index.text
     assert 'id="knowledge-dataset-ids"' in index.text
+    assert 'id="tools-form"' in index.text
+    assert 'id="tools-list"' in index.text
+    assert 'id="tools-type"' in index.text
     assert 'id="result-tabs"' in index.text
     assert 'id="load-draft"' in index.text
     assert script.status_code == 200
@@ -51,6 +56,8 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert "SELECTED_DATASET_IDS_KEY" in script.text
     assert "loadDatasets" in script.text
     assert "currentDatasetIds" in script.text
+    assert "loadTools" in script.text
+    assert "currentToolSelections" in script.text
     assert "Applied reviewed preview" in script.text
     assert "localStorage" in script.text
     assert "renderValidationPanel" in script.text
@@ -168,6 +175,130 @@ def test_list_dify_datasets_api_wraps_dify_errors(monkeypatch) -> None:
 
     assert response.status_code == 502
     assert response.json()["detail"] == "Dify unavailable"
+
+
+def test_list_dify_tools_api_returns_slim_tool_list(monkeypatch) -> None:
+    seen = {}
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def list_tools(self, *, keyword=None, provider_type=None):
+            seen["keyword"] = keyword
+            seen["provider_type"] = provider_type
+            return DifyToolListResult(
+                data=[
+                    DifyToolListItem(
+                        provider_id="provider-1",
+                        provider_type="builtin",
+                        provider_name="websearch",
+                        tool_name="search",
+                        tool_label="搜索",
+                        description="搜索网页",
+                        parameters=[{"name": "query", "form": "llm", "type": "string", "required": True}],
+                        output_schema={"properties": {"answer": {"type": "string"}}},
+                        plugin_id="plugin-1",
+                        plugin_unique_identifier="unique-1",
+                        is_team_authorization=True,
+                        requires_configuration=False,
+                    )
+                ],
+                count=1,
+                types=["builtin"],
+            )
+
+    monkeypatch.setattr("app.main.load_settings", _test_settings)
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+
+    with TestClient(app) as client:
+        response = client.get("/api/dify/tools?keyword=%E6%90%9C%E7%B4%A2&provider_type=builtin")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert seen == {"keyword": "搜索", "provider_type": "builtin"}
+    assert data["count"] == 1
+    assert data["types"] == ["builtin"]
+    assert data["data"][0]["tool_name"] == "search"
+    assert data["data"][0]["output_schema"] == {"properties": {"answer": {"type": "string"}}}
+
+
+def test_list_dify_tools_api_wraps_dify_errors(monkeypatch) -> None:
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def list_tools(self, **_kwargs):
+            raise DifyClientError("Tool list unavailable")
+
+    monkeypatch.setattr("app.main.load_settings", _test_settings)
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+
+    with TestClient(app) as client:
+        response = client.get("/api/dify/tools")
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Tool list unavailable"
+
+
+def test_draft_workflow_passes_tool_selections_to_planner(monkeypatch) -> None:
+    seen = {}
+
+    class ToolAwarePlanner:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def generate(self, message, *, app_name=None, dsl_version, tool_selections=None):
+            seen["tool_selections"] = tool_selections
+            plan = fallback_plan(message, app_name=app_name)
+            return PlannerResult(
+                plan=plan,
+                raw_plan=plan.model_dump(),
+                mode="llm",
+                attempts=1,
+                used_fallback=False,
+                repaired=False,
+            )
+
+    monkeypatch.setattr("app.main.load_settings", _test_settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+    monkeypatch.setattr("app.main.WorkflowPlanner", ToolAwarePlanner)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/draft",
+            json={
+                "message": "调用搜索工具后总结",
+                "tool_selections": [
+                    {
+                        "provider_id": "provider-1",
+                        "provider_type": "builtin",
+                        "provider_name": "websearch",
+                        "tool_name": "search",
+                        "tool_label": "搜索",
+                        "parameters": [{"name": "query", "form": "llm", "type": "string", "required": True}],
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    assert seen["tool_selections"][0]["tool_name"] == "search"
 
 
 def test_draft_response_includes_phase2_fields(monkeypatch) -> None:

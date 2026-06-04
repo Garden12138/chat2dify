@@ -3,7 +3,8 @@ import pytest
 
 from app.compiler.dify import DifyDslCompiler
 from app.dify.graph import UnsupportedExistingNodeType, compile_plan_to_dify_graph, decompile_dify_graph
-from app.models import WorkflowPlan
+from app.models import PlanNode, WorkflowPlan
+from app.validator import validate_plan
 
 
 def _compiler() -> DifyDslCompiler:
@@ -12,6 +13,20 @@ def _compiler() -> DifyDslCompiler:
         default_model_provider="openai",
         default_model_name="gpt-4o-mini",
     )
+
+
+def test_external_dependency_node_types_are_valid_plan_nodes() -> None:
+    for node_type in (
+        "tool",
+        "agent",
+        "datasource",
+        "datasource-empty",
+        "knowledge-index",
+        "trigger-webhook",
+        "trigger-plugin",
+        "trigger-schedule",
+    ):
+        assert PlanNode.model_validate({"id": node_type, "type": node_type}).type == node_type
 
 
 def test_decompile_dify_graph_covers_supported_node_types() -> None:
@@ -301,9 +316,87 @@ def test_compile_plan_to_dify_graph_preserves_existing_layout_and_places_new_nod
     assert nodes["template"]["position"]["y"] == 140
 
 
+def test_decompile_and_compile_external_dependency_nodes_as_passthrough() -> None:
+    graph = {
+        "nodes": [
+            {
+                "id": "webhook",
+                "type": "custom",
+                "position": {"x": 10, "y": 20},
+                "data": {
+                    "type": "trigger-webhook",
+                    "title": "Webhook 触发",
+                    "desc": "",
+                    "webhook_url": "https://example.test/hook",
+                    "method": "POST",
+                    "content_type": "application/json",
+                    "variables": [{"name": "payload", "type": "object"}],
+                },
+            },
+            {
+                "id": "tool",
+                "type": "custom",
+                "position": {"x": 310, "y": 20},
+                "data": {
+                    "type": "tool",
+                    "title": "调用外部工具",
+                    "desc": "",
+                    "provider_id": "demo-provider",
+                    "provider_type": "builtin",
+                    "provider_name": "Demo Provider",
+                    "tool_name": "lookup",
+                    "tool_label": "Lookup",
+                    "tool_node_version": "2",
+                    "tool_parameters": {"query": {"type": "variable", "value": ["webhook", "payload"]}},
+                    "tool_configurations": {},
+                    "output_schema": {
+                        "type": "object",
+                        "properties": {"answer": {"type": "string"}},
+                    },
+                },
+            },
+            {
+                "id": "end",
+                "type": "custom",
+                "position": {"x": 610, "y": 20},
+                "data": {
+                    "type": "end",
+                    "title": "结束",
+                    "desc": "",
+                    "outputs": [{"variable": "answer", "value_selector": ["tool", "answer"]}],
+                },
+            },
+        ],
+        "edges": [
+            {"id": "webhook-tool", "source": "webhook", "target": "tool", "sourceHandle": "source", "targetHandle": "target", "data": {}},
+            {"id": "tool-end", "source": "tool", "target": "end", "sourceHandle": "source", "targetHandle": "target", "data": {}},
+        ],
+    }
+
+    plan = decompile_dify_graph(graph, name="External")
+    nodes = {node.id: node for node in plan.nodes}
+    issues = validate_plan(plan)
+    compiled = compile_plan_to_dify_graph(plan, compiler=_compiler(), base_graph=graph)
+    compiled_nodes = {node["id"]: node for node in compiled["nodes"]}
+
+    assert nodes["webhook"].type == "trigger-webhook"
+    assert nodes["webhook"].params["_raw_data"]["webhook_url"] == "https://example.test/hook"
+    assert nodes["tool"].type == "tool"
+    assert nodes["tool"].params["output_schema"]["properties"]["answer"]["type"] == "string"
+    assert not [issue for issue in issues if issue.severity == "error"]
+    assert any(issue.code == "PLAN_EXTERNAL_DEPENDENCY_NODE_PASSTHROUGH" for issue in issues)
+    assert compiled_nodes["tool"]["data"]["provider_id"] == "demo-provider"
+    assert compiled_nodes["tool"]["data"]["tool_parameters"]["query"] == {
+        "type": "mixed",
+        "value": "{{#webhook.payload#}}",
+    }
+    assert compiled_nodes["tool"]["data"]["output_schema"]["properties"]["answer"]["type"] == "string"
+    assert compiled_nodes["webhook"]["data"]["webhook_url"] == "https://example.test/hook"
+
+
 def test_decompile_rejects_unsupported_existing_node_type() -> None:
     graph = {
-        "nodes": [{"id": "tool", "data": {"type": "tool"}}],
+        "nodes": [{"id": "mystery", "data": {"type": "mystery-node"}}],
         "edges": [],
     }
 

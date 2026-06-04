@@ -26,7 +26,16 @@ NodeType = Literal[
     "loop",
     "loop-start",
     "loop-end",
+    "tool",
+    "agent",
+    "datasource",
+    "datasource-empty",
+    "knowledge-index",
+    "trigger-webhook",
+    "trigger-plugin",
+    "trigger-schedule",
 ]
+ENTRY_NODE_TYPES = {"start", "datasource", "trigger-webhook", "trigger-plugin", "trigger-schedule"}
 InputType = Literal["text", "paragraph", "number", "boolean", "file", "file-list", "json"]
 
 
@@ -71,10 +80,10 @@ class WorkflowPlan(BaseModel):
             if edge.target not in node_id_set:
                 raise ValueError(f"edge references unknown target node: {edge.target}")
 
-        starts = [node for node in self.nodes if node.type == "start"]
+        starts = [node for node in self.nodes if node.type in ENTRY_NODE_TYPES]
         ends = [node for node in self.nodes if node.type == "end"]
         if len(starts) != 1:
-            raise ValueError("workflow must contain exactly one start node")
+            raise ValueError("workflow must contain exactly one entry node")
         if not ends:
             raise ValueError("workflow must contain at least one end node")
 
@@ -86,7 +95,7 @@ class WorkflowPlan(BaseModel):
         reachable = _reachable_from(starts[0].id, self.edges)
         unreachable = [node.id for node in self.nodes if node.id not in reachable]
         if unreachable:
-            raise ValueError(f"nodes are not reachable from start: {', '.join(unreachable)}")
+            raise ValueError(f"nodes are not reachable from entry node: {', '.join(unreachable)}")
         return self
 
 
@@ -106,11 +115,29 @@ def _reachable_from(start_id: str, edges: list[PlanEdge]) -> set[str]:
     return seen
 
 
+class WorkflowToolSelection(BaseModel):
+    provider_id: str = Field(min_length=1)
+    provider_type: str = Field(min_length=1)
+    tool_name: str = Field(min_length=1)
+    provider_name: str | None = None
+    tool_label: str | None = None
+    description: str | None = None
+    parameters: list[dict[str, Any]] = Field(default_factory=list)
+    output_schema: dict[str, Any] | None = None
+    plugin_id: str | None = None
+    plugin_unique_identifier: str | None = None
+    tool_parameters: dict[str, Any] = Field(default_factory=dict)
+    tool_configurations: dict[str, Any] = Field(default_factory=dict)
+    is_team_authorization: bool | None = None
+    requires_configuration: bool | None = None
+
+
 class WorkflowRequest(BaseModel):
     message: str = Field(min_length=1)
     app_name: str | None = None
     dry_run: bool = False
     dataset_ids: list[str] | None = None
+    tool_selections: list[WorkflowToolSelection] | None = None
 
 
 class WorkflowModifyRequest(BaseModel):
@@ -120,6 +147,7 @@ class WorkflowModifyRequest(BaseModel):
     allow_destructive: bool = False
     plan: WorkflowPlan | None = None
     dataset_ids: list[str] | None = None
+    tool_selections: list[WorkflowToolSelection] | None = None
 
 
 class WorkflowRunDraftRequest(BaseModel):

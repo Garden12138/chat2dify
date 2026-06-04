@@ -2,6 +2,9 @@ const HISTORY_KEY = "chat2dify.workbench.history.v1";
 const DATASET_IDS_KEY = "chat2dify.workbench.datasetIds.v1";
 const SELECTED_DATASET_IDS_KEY = "chat2dify.workbench.selectedDatasetIds.v1";
 const DATASET_SEARCH_KEY = "chat2dify.workbench.datasetSearch.v1";
+const SELECTED_TOOLS_KEY = "chat2dify.workbench.selectedTools.v1";
+const TOOL_SEARCH_KEY = "chat2dify.workbench.toolSearch.v1";
+const TOOL_TYPE_KEY = "chat2dify.workbench.toolType.v1";
 const MAX_HISTORY_ITEMS = 12;
 const DATASET_PAGE_SIZE = 50;
 const DEFAULT_RUN_INPUTS = '{"query":"我要投诉订单配送太慢"}';
@@ -19,6 +22,12 @@ const state = {
     hasMore: false,
     total: 0,
     keyword: "",
+  },
+  tools: {
+    items: [],
+    selected: [],
+    keyword: "",
+    providerType: "all",
   },
 };
 
@@ -38,6 +47,12 @@ const els = {
   knowledgeDatasetList: document.querySelector("#knowledge-dataset-list"),
   knowledgeSelectedSummary: document.querySelector("#knowledge-selected-summary"),
   loadMoreDatasets: document.querySelector("#load-more-datasets"),
+  toolsForm: document.querySelector("#tools-form"),
+  toolsStatus: document.querySelector("#tools-status"),
+  toolsSearch: document.querySelector("#tools-search"),
+  toolsType: document.querySelector("#tools-type"),
+  toolsList: document.querySelector("#tools-list"),
+  toolsSelectedSummary: document.querySelector("#tools-selected-summary"),
   modifyForm: document.querySelector("#modify-form"),
   modifyStatus: document.querySelector("#modify-status"),
   runForm: document.querySelector("#run-form"),
@@ -59,13 +74,20 @@ document.addEventListener("DOMContentLoaded", () => {
   state.history = loadHistory();
   state.datasets.selectedIds = loadSelectedDatasetIds();
   state.datasets.keyword = loadDatasetSearchText();
+  state.tools.selected = loadSelectedTools();
+  state.tools.keyword = loadToolSearchText();
+  state.tools.providerType = loadToolType();
   els.knowledgeSearch.value = state.datasets.keyword;
   els.knowledgeDatasetIds.value = loadDatasetIdsText();
+  els.toolsSearch.value = state.tools.keyword;
+  els.toolsType.value = state.tools.providerType;
   bindEvents();
   renderHistory();
   renderKnowledgeDatasets();
+  renderTools();
   refreshHealth();
   loadDatasets({ reset: true });
+  loadTools();
   renderResult({});
 });
 
@@ -91,6 +113,25 @@ function bindEvents() {
   els.knowledgeDatasetIds.addEventListener("input", () => {
     saveDatasetIdsText(els.knowledgeDatasetIds.value);
     markModifyPreviewDirty();
+  });
+  els.toolsForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    saveToolSearchText(els.toolsSearch.value);
+    saveToolType(els.toolsType.value);
+    await loadTools();
+  });
+  els.toolsSearch.addEventListener("input", () => {
+    saveToolSearchText(els.toolsSearch.value);
+  });
+  els.toolsType.addEventListener("change", async () => {
+    saveToolType(els.toolsType.value);
+    await loadTools();
+  });
+  els.toolsList.addEventListener("change", (event) => {
+    const checkbox = event.target.closest("[data-tool-key]");
+    if (checkbox) {
+      toggleToolSelection(checkbox.dataset.toolKey, checkbox.checked);
+    }
   });
 
   els.createForm.addEventListener("submit", async (event) => {
@@ -280,12 +321,109 @@ function mergeDatasets(current, incoming) {
   });
 }
 
+async function loadTools() {
+  const params = new URLSearchParams({
+    provider_type: els.toolsType.value || "all",
+  });
+  const keyword = els.toolsSearch.value.trim();
+  if (keyword) {
+    params.set("keyword", keyword);
+  }
+
+  try {
+    setPanelStatus(els.toolsStatus, "Loading", "muted");
+    const data = await requestJson(`/api/dify/tools?${params.toString()}`);
+    state.tools.items = Array.isArray(data.data) ? data.data : [];
+    state.tools.keyword = keyword;
+    state.tools.providerType = els.toolsType.value || "all";
+    renderTools();
+    setPanelStatus(els.toolsStatus, `${data.count ?? state.tools.items.length} found`, "ok");
+  } catch (error) {
+    state.tools.items = [];
+    renderTools(error.message);
+    setPanelStatus(els.toolsStatus, "List failed", "error");
+  }
+}
+
+function renderTools(errorMessage = "") {
+  const loadedCount = state.tools.items.length;
+  const selectedCount = currentToolSelections().length;
+  els.toolsSelectedSummary.textContent = [
+    `${selectedCount} selected`,
+    loadedCount ? `${loadedCount} loaded` : "",
+  ].filter(Boolean).join(" · ");
+
+  if (errorMessage) {
+    els.toolsList.replaceChildren(renderMessageRow({ tone: "error", text: errorMessage }));
+    return;
+  }
+  if (state.tools.items.length === 0) {
+    els.toolsList.replaceChildren(emptyState("No tools loaded."));
+    return;
+  }
+  const selectedKeys = new Set(state.tools.selected.map(toolKey));
+  els.toolsList.replaceChildren(
+    ...state.tools.items.map((tool) => toolOption(tool, selectedKeys.has(toolKey(tool))))
+  );
+}
+
+function toolOption(tool, checked) {
+  const label = document.createElement("label");
+  label.className = `dataset-option${checked ? " is-selected" : ""}`;
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = checked;
+  checkbox.dataset.toolKey = toolKey(tool);
+
+  const body = document.createElement("span");
+  body.className = "dataset-option-body";
+  const name = document.createElement("span");
+  name.className = "dataset-name";
+  name.textContent = tool.tool_label || tool.tool_name;
+  const meta = document.createElement("span");
+  meta.className = "dataset-meta";
+  meta.textContent = toolMeta(tool);
+  const description = document.createElement("span");
+  description.className = "dataset-description";
+  description.textContent = tool.description || tool.provider_name || tool.provider_id;
+  body.append(name, meta, description);
+  label.append(checkbox, body);
+  return label;
+}
+
+function toolMeta(tool) {
+  return [
+    tool.provider_type,
+    tool.provider_name || tool.provider_id,
+    Array.isArray(tool.parameters) ? `${tool.parameters.length} params` : "",
+    tool.requires_configuration ? "needs config" : "",
+  ].filter(Boolean).join(" · ") || "tool";
+}
+
+function toggleToolSelection(key, selected) {
+  if (!key) {
+    return;
+  }
+  if (selected) {
+    const tool = state.tools.items.find((item) => toolKey(item) === key);
+    if (tool) {
+      state.tools.selected = uniqueTools([...state.tools.selected, compactToolSelection(tool)]);
+    }
+  } else {
+    state.tools.selected = state.tools.selected.filter((item) => toolKey(item) !== key);
+  }
+  saveSelectedTools();
+  renderTools();
+  markModifyPreviewDirty();
+}
+
 async function handleCreate() {
   await withBusy(els.createForm, els.createStatus, "Creating", async () => {
     const payload = {
       message: valueOf("#create-message"),
       app_name: optionalValue("#create-app-name"),
       dataset_ids: currentDatasetIds(),
+      tool_selections: currentToolSelections(),
     };
     const data = await requestJson("/api/workflows/create", {
       method: "POST",
@@ -313,6 +451,7 @@ async function handleModify(path, mode) {
       expected_hash: optionalValue("#modify-expected-hash"),
       allow_destructive: document.querySelector("#modify-allow-destructive").checked,
       dataset_ids: currentDatasetIds(),
+      tool_selections: currentToolSelections(),
     };
     const data = await requestJson(path, {
       method: "POST",
@@ -359,6 +498,7 @@ async function handleReviewedPreviewApply() {
       allow_destructive: state.modifyPreview.allow_destructive,
       plan: state.modifyPreview.plan,
       dataset_ids: state.modifyPreview.dataset_ids,
+      tool_selections: state.modifyPreview.tool_selections,
     };
     const data = await requestJson("/api/workflows/modify/apply", {
       method: "POST",
@@ -794,10 +934,56 @@ function nodeDetails(node) {
       nodeLine("Children", childSummary(children)),
     ];
   }
+  if (node.type === "tool" && !params._raw_data) {
+    const schemas = Array.isArray(params.paramSchemas) ? params.paramSchemas : [];
+    const toolParameters = params.tool_parameters && typeof params.tool_parameters === "object" ? params.tool_parameters : {};
+    const toolConfigurations = params.tool_configurations && typeof params.tool_configurations === "object" ? params.tool_configurations : {};
+    return [
+      nodeLine("Provider", [params.provider_name || params.provider_id, params.provider_type].filter(Boolean).join(" / ") || "not configured"),
+      nodeLine("Tool", params.tool_label || params.tool_name || "not configured"),
+      nodeLine("Inputs", Object.keys(toolParameters).join(", ") || "none"),
+      nodeLine("Configurations", Object.keys(toolConfigurations).join(", ") || "none"),
+      nodeLine("Schema", schemas.map((item) => `${item.name || item.variable}:${item.type || "string"}${item.required ? "*" : ""}`).join(", ") || "none"),
+      nodeLine("Outputs", externalOutputSummary(params)),
+    ];
+  }
+  if (isExternalDependencyNode(node.type)) {
+    const raw = params._raw_data || params;
+    return [
+      nodeLine("Mode", "preserved external Dify node"),
+      nodeLine("Provider", [raw.provider_name, raw.provider_type].filter(Boolean).join(" / ") || raw.plugin_id || "Dify configured"),
+      nodeLine("Name", raw.tool_label || raw.tool_name || raw.agent_strategy_label || raw.agent_strategy_name || raw.datasource_label || raw.datasource_name || raw.webhook_url || "configured in Dify"),
+      nodeLine("Outputs", externalOutputSummary(raw)),
+    ];
+  }
   if (node.type === "code") {
     return [promptPreview("Code", params.code)];
   }
   return [];
+}
+
+function isExternalDependencyNode(type) {
+  return [
+    "tool",
+    "agent",
+    "datasource",
+    "datasource-empty",
+    "knowledge-index",
+    "trigger-webhook",
+    "trigger-plugin",
+    "trigger-schedule",
+  ].includes(type);
+}
+
+function externalOutputSummary(raw) {
+  if (!raw || typeof raw !== "object")
+    return "schema unknown";
+  const properties = raw.output_schema && raw.output_schema.properties;
+  if (properties && typeof properties === "object")
+    return Object.keys(properties).join(", ") || "schema empty";
+  const variables = Array.isArray(raw.variables) ? raw.variables : [];
+  const names = variables.map((item) => item && (item.name || item.variable)).filter(Boolean);
+  return names.join(", ") || "text, files, json / Dify runtime";
 }
 
 function modelLabel(params) {
@@ -959,6 +1145,7 @@ function currentModifyPayload() {
     expected_hash: optionalValue("#modify-expected-hash"),
     allow_destructive: document.querySelector("#modify-allow-destructive").checked,
     dataset_ids: currentDatasetIds(),
+    tool_selections: currentToolSelections(),
   };
 }
 
@@ -975,6 +1162,7 @@ function storeModifyPreview(data, payload) {
     allow_destructive: payload.allow_destructive,
     plan: data.plan,
     dataset_ids: payload.dataset_ids || [],
+    tool_selections: payload.tool_selections || [],
   };
   state.modifyPreviewDirty = false;
 }
@@ -989,7 +1177,8 @@ function modifyPreviewMatches(payload) {
     payload.message === preview.message &&
     payload.expected_hash === preview.base_hash &&
     payload.allow_destructive === preview.allow_destructive &&
-    datasetIdsEqual(payload.dataset_ids || [], preview.dataset_ids || [])
+    datasetIdsEqual(payload.dataset_ids || [], preview.dataset_ids || []) &&
+    toolSelectionsEqual(payload.tool_selections || [], preview.tool_selections || [])
   );
 }
 
@@ -1055,11 +1244,88 @@ function saveDatasetSearchText(value) {
   localStorage.setItem(DATASET_SEARCH_KEY, value || "");
 }
 
+function loadSelectedTools() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SELECTED_TOOLS_KEY) || "[]");
+    return Array.isArray(parsed) ? uniqueTools(parsed) : [];
+  } catch (error) {
+    return [];
+  }
+}
+
+function saveSelectedTools() {
+  localStorage.setItem(SELECTED_TOOLS_KEY, JSON.stringify(uniqueTools(state.tools.selected)));
+}
+
+function loadToolSearchText() {
+  try {
+    return localStorage.getItem(TOOL_SEARCH_KEY) || "";
+  } catch (error) {
+    return "";
+  }
+}
+
+function saveToolSearchText(value) {
+  localStorage.setItem(TOOL_SEARCH_KEY, value || "");
+}
+
+function loadToolType() {
+  try {
+    return localStorage.getItem(TOOL_TYPE_KEY) || "all";
+  } catch (error) {
+    return "all";
+  }
+}
+
+function saveToolType(value) {
+  localStorage.setItem(TOOL_TYPE_KEY, value || "all");
+}
+
 function currentDatasetIds() {
   return uniqueDatasetIds([
     ...state.datasets.selectedIds,
     ...parseDatasetIds(els.knowledgeDatasetIds.value),
   ]);
+}
+
+function currentToolSelections() {
+  return uniqueTools(state.tools.selected);
+}
+
+function compactToolSelection(tool = {}) {
+  const item = tool || {};
+  return {
+    provider_id: item.provider_id,
+    provider_type: item.provider_type,
+    provider_name: item.provider_name,
+    tool_name: item.tool_name,
+    tool_label: item.tool_label,
+    description: item.description,
+    parameters: Array.isArray(item.parameters) ? item.parameters : [],
+    output_schema: item.output_schema && typeof item.output_schema === "object" ? item.output_schema : {},
+    plugin_id: item.plugin_id || undefined,
+    plugin_unique_identifier: item.plugin_unique_identifier || undefined,
+    is_team_authorization: item.is_team_authorization,
+    requires_configuration: Boolean(item.requires_configuration),
+  };
+}
+
+function uniqueTools(tools) {
+  const seen = new Set();
+  return (tools || [])
+    .map(compactToolSelection)
+    .filter((tool) => {
+      const key = toolKey(tool);
+      if (!tool.provider_id || !tool.tool_name || seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+}
+
+function toolKey(tool) {
+  return [tool?.provider_type || "", tool?.provider_id || "", tool?.tool_name || ""].join("::");
 }
 
 function parseDatasetIds(value) {
@@ -1083,6 +1349,10 @@ function uniqueDatasetIds(ids) {
 
 function datasetIdsEqual(left, right) {
   return JSON.stringify(left || []) === JSON.stringify(right || []);
+}
+
+function toolSelectionsEqual(left, right) {
+  return JSON.stringify(uniqueTools(left || [])) === JSON.stringify(uniqueTools(right || []));
 }
 
 function rememberApp(data, meta = {}) {

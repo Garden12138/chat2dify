@@ -33,7 +33,26 @@ SUPPORTED_DIFY_NODE_TYPES = {
     "loop",
     "loop-start",
     "loop-end",
+    "tool",
+    "agent",
+    "datasource",
+    "datasource-empty",
+    "knowledge-index",
+    "trigger-webhook",
+    "trigger-plugin",
+    "trigger-schedule",
 }
+EXTERNAL_DEPENDENCY_NODE_TYPES = {
+    "tool",
+    "agent",
+    "datasource",
+    "datasource-empty",
+    "knowledge-index",
+    "trigger-webhook",
+    "trigger-plugin",
+    "trigger-schedule",
+}
+COMMON_DATA_KEYS = {"title", "desc", "selected", "type"}
 LAYOUT_KEYS = (
     "position",
     "positionAbsolute",
@@ -335,6 +354,20 @@ def _params_from_dify_node_data(node_type: str, data: dict[str, Any]) -> dict[st
                 "logical_operator": data.get("logical_operator", "and"),
                 "loop_variables": deepcopy(data.get("loop_variables") or []),
                 "error_handle_mode": data.get("error_handle_mode", "terminated"),
+            }
+        case "tool":
+            return {
+                key: deepcopy(value)
+                for key, value in data.items()
+                if key not in COMMON_DATA_KEYS
+            }
+        case node_type if node_type in EXTERNAL_DEPENDENCY_NODE_TYPES:
+            return {
+                "_raw_data": {
+                    key: deepcopy(value)
+                    for key, value in data.items()
+                    if key not in COMMON_DATA_KEYS
+                }
             }
         case "iteration-start" | "loop-start" | "loop-end":
             return {}

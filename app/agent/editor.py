@@ -12,6 +12,7 @@ from app.agent.planner import (
     _chat_completions_url,
     _extract_plan_payload,
     _issues_to_feedback,
+    _planner_tool_schemas,
     _strip_json_fences,
     _validate_compiled_plan,
 )
@@ -26,10 +27,18 @@ Supported node types are only:
 start, llm, code, if-else, end, http-request, template-transform,
 question-classifier, parameter-extractor, variable-aggregator,
 document-extractor, assigner, list-operator, knowledge-retrieval, human-input,
-iteration, loop. iteration-start, loop-start, and loop-end are internal
+iteration, loop, tool, agent, datasource, datasource-empty, knowledge-index,
+trigger-webhook, trigger-plugin, trigger-schedule. iteration-start, loop-start,
+and loop-end are internal
 container children only; never place them in top-level nodes.
 Prefer the smallest safe change that satisfies the request.
 Preserve existing node ids when a node keeps the same purpose.
+Preserve existing tool, agent, datasource, datasource-empty, knowledge-index,
+trigger-webhook, trigger-plugin, and trigger-schedule nodes exactly unless the
+user explicitly asks to remove them. Do not add agent, datasource, trigger, or
+knowledge-index nodes; they require Dify-side configuration. Add a new tool
+node only when selected_tools is non-empty and the user explicitly asks to call
+or use one of those selected tools. Never invent provider IDs or tool names.
 Use if-else for explicit string or numeric conditions.
 Use question-classifier for semantic intent/category routing; each class needs an outgoing edge with source_handle equal to classes[].id.
 Use parameter-extractor for structured field extraction; default reasoning_mode is "prompt" and parameter names should be variable-safe English names.
@@ -85,7 +94,14 @@ class WorkflowEditPlanner:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
-    def generate(self, message: str, *, current_plan: WorkflowPlan, dsl_version: str) -> WorkflowEditResult:
+    def generate(
+        self,
+        message: str,
+        *,
+        current_plan: WorkflowPlan,
+        dsl_version: str,
+        tool_selections: list[dict[str, Any]] | None = None,
+    ) -> WorkflowEditResult:
         if not self.settings.openai_api_key:
             raise PlannerError("OPENAI_API_KEY is required to modify an existing workflow.")
 
@@ -93,7 +109,12 @@ class WorkflowEditPlanner:
         errors: list[str] = []
         final_raw_plan: dict[str, Any] | None = None
         for attempt in range(1, 4):
-            content = self._call_llm(message, current_plan=current_plan, last_error=last_error)
+            content = self._call_llm(
+                message,
+                current_plan=current_plan,
+                last_error=last_error,
+                tool_selections=tool_selections or [],
+            )
             try:
                 payload = json.loads(_strip_json_fences(content))
                 raw_plan = _extract_plan_payload(payload)
@@ -102,6 +123,7 @@ class WorkflowEditPlanner:
                     raw_plan,
                     app_name=current_plan.name,
                     default_dataset_ids=self.settings.dify_default_dataset_ids,
+                    tool_selections=tool_selections or [],
                 )
                 plan = WorkflowPlan.model_validate(normalized.payload)
                 issues = _validate_compiled_plan(plan, settings=self.settings, dsl_version=dsl_version)
@@ -121,11 +143,19 @@ class WorkflowEditPlanner:
         raw_hint = f" Last raw plan: {json.dumps(final_raw_plan, ensure_ascii=False)[:1000]}" if final_raw_plan else ""
         raise PlannerError(f"Could not generate a valid revised WorkflowPlan after 3 attempts: {last_error}.{raw_hint}")
 
-    def _call_llm(self, message: str, *, current_plan: WorkflowPlan, last_error: str = "") -> str:
+    def _call_llm(
+        self,
+        message: str,
+        *,
+        current_plan: WorkflowPlan,
+        last_error: str = "",
+        tool_selections: list[dict[str, Any]] | None = None,
+    ) -> str:
         url = _chat_completions_url(self.settings.openai_base_url)
         user_content = {
             "request": message,
             "current_plan": current_plan.model_dump(),
+            "selected_tools": _planner_tool_schemas(tool_selections or []),
             "edit_policy": {
                 "output": "Return the complete revised WorkflowPlan JSON.",
                 "default": "Make a minimal targeted edit.",

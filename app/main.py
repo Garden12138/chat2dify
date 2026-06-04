@@ -89,16 +89,35 @@ def list_dify_datasets(
     return asdict(result)
 
 
+@app.get("/api/dify/tools")
+def list_dify_tools(
+    keyword: str | None = Query(default=None),
+    provider_type: str = Query(default="all", pattern="^(all|builtin|api|workflow|mcp)$"),
+) -> dict:
+    settings = load_settings()
+    try:
+        with DifyClient(settings) as client:
+            result = client.list_tools(
+                keyword=keyword.strip() if keyword else None,
+                provider_type=provider_type,
+            )
+    except DifyClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return asdict(result)
+
+
 @app.post("/api/workflows/draft")
 def draft_workflow(request: WorkflowRequest) -> dict:
     settings = load_settings()
     effective_settings = _settings_with_request_dataset_ids(settings, request.dataset_ids)
     version_info = read_dify_version_info(settings.dify_source_path)
     try:
+        planner_kwargs = {"tool_selections": _tool_selection_payloads(request.tool_selections)} if request.tool_selections else {}
         planner_result = WorkflowPlanner(effective_settings).generate(
             request.message,
             app_name=request.app_name,
             dsl_version=version_info.app_dsl_version,
+            **planner_kwargs,
         )
     except PlannerError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -251,15 +270,18 @@ def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:
                     request.plan.model_dump(),
                     app_name=before_plan.name,
                     default_dataset_ids=effective_settings.dify_default_dataset_ids,
+                    tool_selections=_tool_selection_payloads(request.tool_selections),
                 )
                 plan = WorkflowPlan.model_validate(normalized.payload)
                 raw_plan = plan.model_dump()
                 planner_metadata = _preview_plan_planner_metadata(normalized.changes)
             else:
+                edit_kwargs = {"tool_selections": _tool_selection_payloads(request.tool_selections)} if request.tool_selections else {}
                 edit_result = WorkflowEditPlanner(effective_settings).generate(
                     request.message,
                     current_plan=before_plan,
                     dsl_version=version_info.app_dsl_version,
+                    **edit_kwargs,
                 )
                 plan = edit_result.plan
                 raw_plan = edit_result.raw_plan
@@ -384,6 +406,16 @@ def _settings_with_request_dataset_ids(settings: Settings, dataset_ids: list[str
     if not request_dataset_ids:
         return settings
     return replace(settings, dify_default_dataset_ids=request_dataset_ids)
+
+
+def _tool_selection_payloads(tool_selections) -> list[dict]:
+    result = []
+    for item in tool_selections or []:
+        if hasattr(item, "model_dump"):
+            result.append(item.model_dump(exclude_none=True))
+        elif isinstance(item, dict):
+            result.append({key: value for key, value in item.items() if value is not None})
+    return result
 
 
 def _plan_with_dataset_retrieval_settings(

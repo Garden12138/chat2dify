@@ -21,6 +21,17 @@ question-classifier, parameter-extractor, variable-aggregator,
 document-extractor, list-operator, knowledge-retrieval, human-input,
 iteration, loop. iteration-start, loop-start, and loop-end are internal
 container children only; never place them in top-level nodes.
+Do not generate agent, datasource, datasource-empty, trigger-webhook,
+trigger-plugin, trigger-schedule, or knowledge-index nodes in new workflows.
+Generate tool nodes only when the user explicitly asks to call/use a selected
+tool and selected_tools is non-empty in the user message. Never invent tool
+provider IDs or tool names. When generating a tool node, copy provider_id,
+provider_type, provider_name, tool_name, tool_label, paramSchemas, output_schema,
+plugin_id, and plugin_unique_identifier from one selected tool. Use
+tool_parameters for form == "llm" parameters, for example
+{"query":{"type":"variable","value":["start","query"]}}. Use
+tool_configurations only for non-llm settings that have explicit or default
+values.
 Use exactly one start node and at least one end node. Keep nodes connected.
 For simple requests, use start -> llm -> end.
 Use if-else for explicit string or numeric conditions.
@@ -105,7 +116,14 @@ class WorkflowPlanner:
     def generate_plan(self, message: str, *, app_name: str | None = None) -> WorkflowPlan:
         return self.generate(message, app_name=app_name, dsl_version="0.0.0").plan
 
-    def generate(self, message: str, *, app_name: str | None = None, dsl_version: str) -> PlannerResult:
+    def generate(
+        self,
+        message: str,
+        *,
+        app_name: str | None = None,
+        dsl_version: str,
+        tool_selections: list[dict[str, Any]] | None = None,
+    ) -> PlannerResult:
         if not self.settings.openai_api_key:
             plan = fallback_plan(message, app_name=app_name)
             return PlannerResult(
@@ -121,7 +139,12 @@ class WorkflowPlanner:
         errors: list[str] = []
         final_raw_plan: dict[str, Any] | None = None
         for attempt in range(1, 4):
-            content = self._call_llm(message, app_name=app_name, last_error=last_error if attempt else "")
+            content = self._call_llm(
+                message,
+                app_name=app_name,
+                last_error=last_error if attempt else "",
+                tool_selections=tool_selections or [],
+            )
             try:
                 payload = json.loads(_strip_json_fences(content))
                 raw_plan = _extract_plan_payload(payload)
@@ -130,6 +153,7 @@ class WorkflowPlanner:
                     raw_plan,
                     app_name=app_name,
                     default_dataset_ids=self.settings.dify_default_dataset_ids,
+                    tool_selections=tool_selections or [],
                 )
                 plan = WorkflowPlan.model_validate(normalized.payload)
                 issues = _validate_compiled_plan(plan, settings=self.settings, dsl_version=dsl_version)
@@ -151,11 +175,19 @@ class WorkflowPlanner:
         raw_hint = f" Last raw plan: {json.dumps(final_raw_plan, ensure_ascii=False)[:1000]}" if final_raw_plan else ""
         raise PlannerError(f"Could not generate a valid WorkflowPlan after 3 attempts: {last_error}.{raw_hint}")
 
-    def _call_llm(self, message: str, *, app_name: str | None, last_error: str = "") -> str:
+    def _call_llm(
+        self,
+        message: str,
+        *,
+        app_name: str | None,
+        last_error: str = "",
+        tool_selections: list[dict[str, Any]] | None = None,
+    ) -> str:
         url = _chat_completions_url(self.settings.openai_base_url)
         user_content = {
             "app_name": app_name or "Generated Workflow",
             "request": message,
+            "selected_tools": _planner_tool_schemas(tool_selections or []),
         }
         messages: list[dict[str, str]] = [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -263,6 +295,28 @@ def _extract_plan_payload(payload: dict[str, Any]) -> dict[str, Any]:
         if isinstance(nested, dict) and "nodes" in nested and "edges" in nested:
             return nested
     raise ValueError("LLM response must contain a WorkflowPlan object with nodes and edges")
+
+
+def _planner_tool_schemas(tool_selections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result = []
+    for item in tool_selections:
+        if not isinstance(item, dict):
+            continue
+        result.append(
+            {
+                "provider_id": item.get("provider_id"),
+                "provider_type": item.get("provider_type"),
+                "provider_name": item.get("provider_name"),
+                "tool_name": item.get("tool_name"),
+                "tool_label": item.get("tool_label"),
+                "description": item.get("description"),
+                "parameters": item.get("parameters") or [],
+                "output_schema": item.get("output_schema") or {},
+                "plugin_id": item.get("plugin_id"),
+                "plugin_unique_identifier": item.get("plugin_unique_identifier"),
+            }
+        )
+    return result
 
 
 def _title_from_message(message: str) -> str:
