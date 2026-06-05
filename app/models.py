@@ -147,6 +147,11 @@ class WorkflowAgentSelection(BaseModel):
     requires_configuration: bool | None = None
 
 
+class WorkflowPlannerSelection(BaseModel):
+    provider: Literal["openai", "nvidia"]
+    model: str = Field(min_length=1)
+
+
 class WorkflowRequest(BaseModel):
     message: str = Field(min_length=1)
     app_name: str | None = None
@@ -154,6 +159,7 @@ class WorkflowRequest(BaseModel):
     dataset_ids: list[str] | None = None
     tool_selections: list[WorkflowToolSelection] | None = None
     agent_selections: list[WorkflowAgentSelection] | None = None
+    planner: WorkflowPlannerSelection | None = None
 
 
 class WorkflowModifyRequest(BaseModel):
@@ -165,6 +171,7 @@ class WorkflowModifyRequest(BaseModel):
     dataset_ids: list[str] | None = None
     tool_selections: list[WorkflowToolSelection] | None = None
     agent_selections: list[WorkflowAgentSelection] | None = None
+    planner: WorkflowPlannerSelection | None = None
 
 
 class WorkflowRunDraftRequest(BaseModel):

@@ -101,10 +101,42 @@ DIFY_EMAIL=you@example.com
 DIFY_PASSWORD=your-password
 ```
 
-If `OPENAI_API_KEY` is not set, the draft endpoint uses a deterministic fallback
-plan (`start -> llm -> end`) so the MVP can still produce a valid DSL. When it
-is set, the planner tries up to three LLM attempts and feeds validation errors
-back into the model for self-repair.
+The Planner Model panel chooses the LLM used by chat2dify to generate or revise
+Plan IR. This is separate from `DIFY_DEFAULT_MODEL_PROVIDER` /
+`DIFY_DEFAULT_MODEL_NAME`, which configure LLM nodes inside the generated Dify
+workflow. API keys stay on the server and are never returned to or stored by
+the browser.
+
+OpenAI-compatible planner configuration:
+
+```env
+PLANNER_DEFAULT_PROVIDER=openai
+PLANNER_TIMEOUT_SECONDS=300
+PLANNER_REQUEST_RETRIES=2
+OPENAI_API_KEY=
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4o-mini
+```
+
+NVIDIA NIM DeepSeek V4 Flash planner configuration:
+
+```env
+PLANNER_DEFAULT_PROVIDER=nvidia
+PLANNER_TIMEOUT_SECONDS=300
+PLANNER_REQUEST_RETRIES=2
+NVIDIA_API_KEY=nvapi-...
+NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
+NVIDIA_MODEL=deepseek-ai/deepseek-v4-flash
+NVIDIA_THINKING=false
+NVIDIA_REASONING_EFFORT=low
+NVIDIA_MAX_TOKENS=8192
+```
+
+If the default planner provider has no API key, the create draft endpoint uses
+a deterministic fallback plan (`start -> llm -> end`). Modify Preview requires
+a configured planner provider. When an LLM provider is configured, the planner
+tries up to three attempts and feeds structured validation errors back into the
+model for self-repair.
 
 Knowledge retrieval workflows require real Dify dataset IDs. Configure a
 comma-separated default in `.env`, or use the Web UI Knowledge panel to search
@@ -143,6 +175,32 @@ Open the local Web UI:
 ```text
 http://127.0.0.1:8000/
 ```
+
+The Planner Model panel lists only server-registered providers and disables
+providers whose API key is not configured. Create and Modify Preview send the
+selected provider/model in an optional request field:
+
+```json
+{
+  "planner": {
+    "provider": "nvidia",
+    "model": "deepseek-ai/deepseek-v4-flash"
+  }
+}
+```
+
+Modify Apply with a reviewed preview continues to use the preview plan and does
+not call the selected Planner model a second time.
+
+`PLANNER_TIMEOUT_SECONDS` controls how long chat2dify waits for a Planner
+response. NVIDIA reasoning models can take longer than 60 seconds for complex
+workflow plans, so the default is 300 seconds. `PLANNER_REQUEST_RETRIES`
+retries transient disconnects, timeouts, rate limits, and temporary upstream
+errors without consuming an additional Plan self-repair attempt.
+NVIDIA Planner requests use streaming and default to `NVIDIA_THINKING=false`
+for lower latency and fewer hosted-endpoint disconnects. Set it to `true` and
+raise `NVIDIA_REASONING_EFFORT` only when a deployment can sustain longer
+reasoning requests.
 
 Recommended Web UI edit flow:
 

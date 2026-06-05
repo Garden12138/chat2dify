@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -9,7 +10,7 @@ import httpx
 
 from app.agent.normalizer import normalize_plan_payload
 from app.compiler.dify import DifyDslCompiler
-from app.config import Settings
+from app.config import PlannerRuntime, Settings
 from app.models import ValidationIssue, WorkflowPlan
 from app.validator import has_errors, validate_dsl, validate_plan
 
@@ -30,7 +31,7 @@ provider names or strategy names. When generating an agent node, copy
 agent_strategy_provider_name, agent_strategy_name, agent_strategy_label,
 parameters, output_schema, plugin_unique_identifier, and meta from one selected
 agent. Use agent_parameters with Dify ToolInput values, for example
-{"query":{"type":"variable","value":["start","query"]}}. If an agent parameter
+{"query":{"type":"constant","value":"{{#start.query#}}"}}. If an agent parameter
 has type tool-selector or multi-tool-selector, use only the tool value already
 provided in selected_agents[].agent_parameters; do not invent nested tools.
 Generate tool nodes only when the user explicitly asks to call/use a selected
@@ -105,6 +106,8 @@ class PlannerResult:
     attempts: int
     used_fallback: bool
     repaired: bool
+    provider: str = ""
+    model: str = ""
     normalizations: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -114,6 +117,8 @@ class PlannerResult:
             "attempts": self.attempts,
             "used_fallback": self.used_fallback,
             "repaired": self.repaired,
+            "provider": self.provider,
+            "model": self.model,
             "normalizations": self.normalizations,
             "errors": self.errors,
         }
@@ -135,7 +140,8 @@ class WorkflowPlanner:
         tool_selections: list[dict[str, Any]] | None = None,
         agent_selections: list[dict[str, Any]] | None = None,
     ) -> PlannerResult:
-        if not self.settings.openai_api_key:
+        runtime = self.settings.planner_runtime()
+        if not runtime.api_key:
             plan = fallback_plan(message, app_name=app_name)
             return PlannerResult(
                 plan=plan,
@@ -144,6 +150,8 @@ class WorkflowPlanner:
                 attempts=0,
                 used_fallback=True,
                 repaired=False,
+                provider=runtime.provider,
+                model=runtime.model,
             )
 
         last_error = ""
@@ -179,6 +187,8 @@ class WorkflowPlanner:
                     attempts=attempt,
                     used_fallback=False,
                     repaired=attempt > 1 or normalized.changed,
+                    provider=runtime.provider,
+                    model=runtime.model,
                     normalizations=normalized.changes,
                     errors=errors,
                 )
@@ -197,39 +207,126 @@ class WorkflowPlanner:
         tool_selections: list[dict[str, Any]] | None = None,
         agent_selections: list[dict[str, Any]] | None = None,
     ) -> str:
-        url = _chat_completions_url(self.settings.openai_base_url)
+        runtime = self.settings.planner_runtime()
+        url = _chat_completions_url(runtime.base_url)
         user_content = {
             "app_name": app_name or "Generated Workflow",
             "request": message,
             "selected_tools": _planner_tool_schemas(tool_selections or []),
             "selected_agents": _planner_agent_schemas(agent_selections or []),
         }
+        if last_error:
+            user_content["previous_validation_error"] = last_error
         messages: list[dict[str, str]] = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": json.dumps(user_content, ensure_ascii=False)},
         ]
-        if last_error:
-            messages.append({"role": "user", "content": f"Previous JSON failed validation: {last_error}"})
 
         payload: dict[str, Any] = {
-            "model": self.settings.openai_model,
+            "model": runtime.model,
             "messages": messages,
             "temperature": 0.2,
             "response_format": {"type": "json_object"},
         }
-        headers = {"Authorization": f"Bearer {self.settings.openai_api_key}"}
+        if runtime.provider == "nvidia":
+            chat_template_kwargs: dict[str, Any] = {
+                "thinking": self.settings.nvidia_thinking,
+            }
+            if self.settings.nvidia_thinking:
+                chat_template_kwargs["reasoning_effort"] = self.settings.nvidia_reasoning_effort
+            payload.update(
+                {
+                    "top_p": 0.95,
+                    "max_tokens": self.settings.nvidia_max_tokens,
+                    "chat_template_kwargs": chat_template_kwargs,
+                    "stream": True,
+                }
+            )
+        return _post_chat_completion(
+            runtime=runtime,
+            url=url,
+            payload=payload,
+            error_prefix="Planner LLM",
+        )
+
+
+def _post_chat_completion(
+    *,
+    runtime: PlannerRuntime,
+    url: str,
+    payload: dict[str, Any],
+    error_prefix: str,
+) -> str:
+    headers = {
+        "Authorization": f"Bearer {runtime.api_key}",
+        "Accept": "application/json",
+        "Connection": "close",
+    }
+    timeout = httpx.Timeout(
+        connect=min(runtime.timeout_seconds, 15.0),
+        read=runtime.timeout_seconds,
+        write=min(runtime.timeout_seconds, 30.0),
+        pool=min(runtime.timeout_seconds, 15.0),
+    )
+    total_attempts = runtime.request_retries + 1
+    last_error: Exception | None = None
+    for request_attempt in range(1, total_attempts + 1):
         try:
-            with httpx.Client(timeout=60) as client:
+            with httpx.Client(timeout=timeout) as client:
+                if payload.get("stream"):
+                    with client.stream("POST", url, json=payload, headers=headers) as response:
+                        response.raise_for_status()
+                        return _read_streamed_chat_completion(response)
                 response = client.post(url, json=payload, headers=headers)
                 response.raise_for_status()
+                data = response.json()
+                return str(data["choices"][0]["message"]["content"])
         except httpx.HTTPStatusError as exc:
-            raise PlannerError(
-                f"Planner LLM request failed: {exc.response.status_code} {exc.response.text}"
-            ) from exc
+            if exc.response.status_code not in {429, 502, 503, 504}:
+                raise PlannerError(
+                    f"{error_prefix} request failed: {exc.response.status_code} {exc.response.text}"
+                ) from exc
+            last_error = exc
         except httpx.RequestError as exc:
-            raise PlannerError(f"Planner LLM request failed: {exc}") from exc
-        data = response.json()
-        return str(data["choices"][0]["message"]["content"])
+            last_error = exc
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            raise PlannerError(f"{error_prefix} returned an invalid chat completion response.") from exc
+
+        if request_attempt < total_attempts:
+            time.sleep(min(2 ** (request_attempt - 1), 4))
+
+    if isinstance(last_error, httpx.ReadTimeout):
+        message = f"timed out after {runtime.timeout_seconds:g} seconds while waiting for a response"
+    elif isinstance(last_error, httpx.HTTPStatusError):
+        message = f"{last_error.response.status_code} {last_error.response.text}"
+    else:
+        message = str(last_error)
+    raise PlannerError(
+        f"{error_prefix} request failed after {total_attempts} network attempts: {message}"
+    ) from last_error
+
+
+def _read_streamed_chat_completion(response: httpx.Response) -> str:
+    content_parts: list[str] = []
+    for raw_line in response.iter_lines():
+        line = raw_line.strip()
+        if not line or line.startswith(":") or not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        chunk = json.loads(data)
+        choices = chunk.get("choices") or []
+        if not choices:
+            continue
+        delta = choices[0].get("delta") or {}
+        content = delta.get("content")
+        if isinstance(content, str):
+            content_parts.append(content)
+    content = "".join(content_parts)
+    if not content:
+        raise ValueError("stream contained no assistant content")
+    return content
 
 
 def fallback_plan(message: str, *, app_name: str | None = None) -> WorkflowPlan:

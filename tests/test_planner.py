@@ -1,22 +1,32 @@
 import json
 from uuid import UUID
 
+import httpx
 import pytest
 
 from app.agent.planner import PlannerError, WorkflowPlanner, fallback_plan
 from app.config import Settings
 
 
-def _settings(openai_api_key: str | None = "token", *, dataset_ids: str = "") -> Settings:
+def _settings(
+    openai_api_key: str | None = "token",
+    *,
+    dataset_ids: str = "",
+    planner_provider: str = "openai",
+    nvidia_api_key: str | None = None,
+) -> Settings:
     env = {
         "DIFY_SOURCE_DIR": "../dify",
         "DIFY_DEFAULT_MODEL_PROVIDER": "openai",
         "DIFY_DEFAULT_MODEL_NAME": "gpt-4o-mini",
+        "PLANNER_DEFAULT_PROVIDER": planner_provider,
     }
     if dataset_ids:
         env["DIFY_DEFAULT_DATASET_IDS"] = dataset_ids
     if openai_api_key:
         env["OPENAI_API_KEY"] = openai_api_key
+    if nvidia_api_key:
+        env["NVIDIA_API_KEY"] = nvidia_api_key
     return Settings.from_env(env, validate_dify=False)
 
 
@@ -50,6 +60,122 @@ def test_planner_fallback_when_no_openai_key() -> None:
     assert result.attempts == 0
     assert result.plan.name == "Fallback"
     assert result.metadata()["mode"] == "fallback"
+
+
+def test_planner_uses_nvidia_deepseek_v4_flash_payload(monkeypatch) -> None:
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def raise_for_status(self):
+            return None
+
+        def iter_lines(self):
+            yield 'data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}'
+            yield 'data: {"choices":[{"delta":{"content":"{\\"nodes\\":[]}"}}]}'
+            yield "data: [DONE]"
+
+    class FakeClient:
+        def __init__(self, *, timeout):
+            captured["timeout"] = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def stream(self, method, url, *, json, headers):
+            captured["method"] = method
+            captured["url"] = url
+            captured["payload"] = json
+            captured["headers"] = headers
+            return FakeResponse()
+
+    monkeypatch.setattr("app.agent.planner.httpx.Client", FakeClient)
+    planner = WorkflowPlanner(
+        _settings(
+            openai_api_key=None,
+            planner_provider="nvidia",
+            nvidia_api_key="nvapi-test",
+        )
+    )
+
+    content = planner._call_llm("生成售后工作流", app_name="售后", last_error="bad plan")
+
+    assert content == '{"nodes":[]}'
+    assert captured["url"] == "https://integrate.api.nvidia.com/v1/chat/completions"
+    assert captured["method"] == "POST"
+    assert captured["headers"]["Authorization"] == "Bearer nvapi-test"
+    assert captured["payload"]["model"] == "deepseek-ai/deepseek-v4-flash"
+    assert captured["payload"]["chat_template_kwargs"] == {"thinking": False}
+    assert captured["payload"]["max_tokens"] == 8192
+    assert captured["payload"]["stream"] is True
+    assert captured["timeout"].read == 300
+    assert captured["timeout"].connect == 15
+    assert captured["headers"]["Connection"] == "close"
+    assert len(captured["payload"]["messages"]) == 2
+    user_payload = json.loads(captured["payload"]["messages"][1]["content"])
+    assert user_payload["previous_validation_error"] == "bad plan"
+
+
+def test_planner_retries_transient_server_disconnect(monkeypatch) -> None:
+    captured = {"posts": 0, "sleeps": []}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def raise_for_status(self):
+            return None
+
+        def iter_lines(self):
+            yield 'data: {"choices":[{"delta":{"content":"{\\"nodes\\":[]}"}}]}'
+            yield "data: [DONE]"
+
+    class FakeClient:
+        def __init__(self, *, timeout):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def stream(self, method, url, *, json, headers):
+            captured["posts"] += 1
+            if captured["posts"] == 1:
+                request = httpx.Request("POST", url)
+                raise httpx.RemoteProtocolError(
+                    "Server disconnected without sending a response.",
+                    request=request,
+                )
+            return FakeResponse()
+
+    monkeypatch.setattr("app.agent.planner.httpx.Client", FakeClient)
+    monkeypatch.setattr("app.agent.planner.time.sleep", captured["sleeps"].append)
+    planner = WorkflowPlanner(
+        _settings(
+            openai_api_key=None,
+            planner_provider="nvidia",
+            nvidia_api_key="nvapi-test",
+        )
+    )
+
+    content = planner._call_llm("生成售后工作流", app_name="售后")
+
+    assert content == '{"nodes":[]}'
+    assert captured["posts"] == 2
+    assert captured["sleeps"] == [1]
 
 
 def test_fallback_plan_uses_semantic_titles_and_split_prompts() -> None:

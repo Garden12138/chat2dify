@@ -19,6 +19,24 @@
     </header>
 
     <main class="workspace">
+      <section class="tool-panel planner-panel" aria-labelledby="planner-title">
+        <div class="panel-heading">
+          <h2 id="planner-title">Planner Model</h2>
+          <span id="planner-status" class="panel-status status-muted">local</span>
+        </div>
+        <form id="planner-form" class="form-stack">
+          <label>
+            Provider
+            <select id="planner-provider"></select>
+          </label>
+          <label>
+            Model
+            <select id="planner-model"></select>
+          </label>
+          <div id="planner-summary" class="selection-summary"></div>
+        </form>
+      </section>
+
       <section class="tool-panel" aria-labelledby="knowledge-title">
         <div class="panel-heading">
           <h2 id="knowledge-title">Knowledge</h2>
@@ -196,6 +214,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js?v=workbench-20260605-agent-query-constant" defer></script>
+    <script src="/static/app.js?v=workbench-20260605-planner-models" defer></script>
   </body>
 </html>

@@ -7,6 +7,8 @@ const TOOL_SEARCH_KEY = "chat2dify.workbench.toolSearch.v1";
 const TOOL_TYPE_KEY = "chat2dify.workbench.toolType.v1";
 const SELECTED_AGENTS_KEY = "chat2dify.workbench.selectedAgents.v1";
 const AGENT_SEARCH_KEY = "chat2dify.workbench.agentSearch.v1";
+const PLANNER_PROVIDER_KEY = "chat2dify.workbench.plannerProvider.v1";
+const PLANNER_MODEL_KEY = "chat2dify.workbench.plannerModel.v1";
 const MAX_HISTORY_ITEMS = 12;
 const DATASET_PAGE_SIZE = 50;
 const DEFAULT_RUN_INPUTS = '{"query":"我要投诉订单配送太慢"}';
@@ -18,6 +20,13 @@ const state = {
   activeTab: "changes",
   modifyPreview: null,
   modifyPreviewDirty: false,
+  planner: {
+    providers: [],
+    provider: "",
+    model: "",
+    defaultProvider: "",
+    defaultModel: "",
+  },
   datasets: {
     items: [],
     selectedIds: [],
@@ -46,6 +55,11 @@ const state = {
 const els = {
   healthStatus: document.querySelector("#health-status"),
   refreshHealth: document.querySelector("#refresh-health"),
+  plannerForm: document.querySelector("#planner-form"),
+  plannerStatus: document.querySelector("#planner-status"),
+  plannerProvider: document.querySelector("#planner-provider"),
+  plannerModel: document.querySelector("#planner-model"),
+  plannerSummary: document.querySelector("#planner-summary"),
   resultJson: document.querySelector("#result-json"),
   summaryGrid: document.querySelector("#summary-grid"),
   resultTabs: document.querySelector("#result-tabs"),
@@ -96,6 +110,8 @@ document.addEventListener("DOMContentLoaded", () => {
   state.tools.providerType = loadToolType();
   state.agents.selected = loadSelectedAgents();
   state.agents.keyword = loadAgentSearchText();
+  state.planner.provider = loadPlannerProvider();
+  state.planner.model = loadPlannerModel();
   els.knowledgeSearch.value = state.datasets.keyword;
   els.knowledgeDatasetIds.value = loadDatasetIdsText();
   els.toolsSearch.value = state.tools.keyword;
@@ -103,9 +119,11 @@ document.addEventListener("DOMContentLoaded", () => {
   els.agentsSearch.value = state.agents.keyword;
   bindEvents();
   renderHistory();
+  renderPlannerModels();
   renderKnowledgeDatasets();
   renderTools();
   refreshHealth();
+  loadPlannerProviders();
   loadDatasets({ reset: true });
   loadTools();
   loadAgentStrategies();
@@ -114,6 +132,20 @@ document.addEventListener("DOMContentLoaded", () => {
 
 function bindEvents() {
   els.refreshHealth.addEventListener("click", refreshHealth);
+  els.plannerProvider.addEventListener("change", () => {
+    state.planner.provider = els.plannerProvider.value;
+    const provider = selectedPlannerProvider();
+    state.planner.model = provider?.models?.[0]?.id || "";
+    savePlannerSelection();
+    renderPlannerModels();
+    markModifyPreviewDirty();
+  });
+  els.plannerModel.addEventListener("change", () => {
+    state.planner.model = els.plannerModel.value;
+    savePlannerSelection();
+    renderPlannerModels();
+    markModifyPreviewDirty();
+  });
   els.knowledgeForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     saveDatasetSearchText(els.knowledgeSearch.value);
@@ -259,12 +291,96 @@ async function refreshHealth() {
     }
     const datasetCount = data?.configured_dataset_count ?? data?.dify?.configured_dataset_count;
     const datasetSuffix = datasetCount !== undefined ? ` · datasets ${datasetCount}` : "";
-    els.healthStatus.textContent = `Healthy · DSL ${version} · ${source}${datasetSuffix}`;
+    const planner = data?.planner || {};
+    const plannerSuffix = planner.provider && planner.model ? ` · planner ${planner.provider}/${planner.model}` : "";
+    els.healthStatus.textContent = `Healthy · DSL ${version} · ${source}${datasetSuffix}${plannerSuffix}`;
     els.healthStatus.className = "status-pill status-ok";
   } catch (error) {
     els.healthStatus.textContent = "Offline";
     els.healthStatus.className = "status-pill status-error";
   }
+}
+
+async function loadPlannerProviders() {
+  try {
+    setPanelStatus(els.plannerStatus, "Loading", "muted");
+    const data = await requestJson("/api/planner/providers");
+    state.planner.providers = Array.isArray(data.providers) ? data.providers : [];
+    state.planner.defaultProvider = data.default_provider || "";
+    state.planner.defaultModel = data.default_model || "";
+    selectAvailablePlanner();
+    renderPlannerModels();
+  } catch (error) {
+    state.planner.providers = [];
+    renderPlannerModels(error.message);
+    setPanelStatus(els.plannerStatus, "Unavailable", "error");
+  }
+}
+
+function selectAvailablePlanner() {
+  const providers = state.planner.providers;
+  let provider = providers.find((item) => item.id === state.planner.provider && item.configured);
+  if (!provider) {
+    provider = providers.find((item) => item.id === state.planner.defaultProvider && item.configured);
+  }
+  if (!provider) {
+    provider = providers.find((item) => item.configured);
+  }
+  state.planner.provider = provider?.id || "";
+  const models = Array.isArray(provider?.models) ? provider.models : [];
+  const selectedModel = models.find((item) => item.id === state.planner.model)
+    || models.find((item) => item.id === state.planner.defaultModel)
+    || models[0];
+  state.planner.model = selectedModel?.id || "";
+  savePlannerSelection();
+}
+
+function renderPlannerModels(errorMessage = "") {
+  const providers = state.planner.providers;
+  els.plannerProvider.replaceChildren(
+    ...providers.map((provider) => {
+      const option = document.createElement("option");
+      option.value = provider.id;
+      option.textContent = `${provider.label || provider.id}${provider.configured ? "" : " (not configured)"}`;
+      option.disabled = !provider.configured;
+      option.selected = provider.id === state.planner.provider;
+      return option;
+    })
+  );
+  if (!providers.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "No planner provider";
+    els.plannerProvider.append(option);
+  }
+  const provider = selectedPlannerProvider();
+  const models = Array.isArray(provider?.models) ? provider.models : [];
+  els.plannerModel.replaceChildren(
+    ...models.map((model) => {
+      const option = document.createElement("option");
+      option.value = model.id;
+      option.textContent = model.label || model.id;
+      option.selected = model.id === state.planner.model;
+      return option;
+    })
+  );
+  els.plannerProvider.disabled = !providers.some((item) => item.configured);
+  els.plannerModel.disabled = !provider?.configured || !models.length;
+  if (errorMessage) {
+    els.plannerSummary.textContent = errorMessage;
+    return;
+  }
+  if (!provider) {
+    els.plannerSummary.textContent = "No LLM configured · Create uses fallback";
+    setPanelStatus(els.plannerStatus, "Fallback", "warning");
+    return;
+  }
+  els.plannerSummary.textContent = `${provider.label || provider.id} · ${state.planner.model}`;
+  setPanelStatus(els.plannerStatus, "Configured", "ok");
+}
+
+function selectedPlannerProvider() {
+  return state.planner.providers.find((item) => item.id === state.planner.provider);
 }
 
 async function loadDatasets({ reset }) {
@@ -1445,6 +1561,7 @@ async function handleCreate() {
       dataset_ids: currentDatasetIds(),
       tool_selections: currentToolSelections(),
       agent_selections: currentAgentSelections(),
+      planner: currentPlannerSelection(),
     };
     ensureAgentSelectionReady(payload.message, payload.agent_selections);
     const data = await requestJson("/api/workflows/create", {
@@ -1475,6 +1592,7 @@ async function handleModify(path, mode) {
       dataset_ids: currentDatasetIds(),
       tool_selections: currentToolSelections(),
       agent_selections: currentAgentSelections(),
+      planner: currentPlannerSelection(),
     };
     ensureAgentSelectionReady(payload.message, payload.agent_selections);
     const data = await requestJson(path, {
@@ -1524,6 +1642,7 @@ async function handleReviewedPreviewApply() {
       dataset_ids: state.modifyPreview.dataset_ids,
       tool_selections: state.modifyPreview.tool_selections,
       agent_selections: state.modifyPreview.agent_selections,
+      planner: state.modifyPreview.planner,
     };
     const data = await requestJson("/api/workflows/modify/apply", {
       method: "POST",
@@ -1647,6 +1766,8 @@ function renderSummary(data) {
     ["Run OK", typeof data.ok === "boolean" ? String(data.ok) : undefined],
     ["Guard", data.guard?.risk],
     ["Planner", data.planner?.mode],
+    ["Planner provider", data.planner?.provider],
+    ["Planner model", data.planner?.model],
     ["Fallback", typeof data.planner?.used_fallback === "boolean" ? String(data.planner.used_fallback) : undefined],
     ["Attempts", data.planner?.attempts],
     ["Base hash", data.base_hash],
@@ -2199,6 +2320,7 @@ function currentModifyPayload() {
     dataset_ids: currentDatasetIds(),
     tool_selections: currentToolSelections(),
     agent_selections: currentAgentSelections(),
+    planner: currentPlannerSelection(),
   };
 }
 
@@ -2217,6 +2339,7 @@ function storeModifyPreview(data, payload) {
     dataset_ids: payload.dataset_ids || [],
     tool_selections: payload.tool_selections || [],
     agent_selections: payload.agent_selections || [],
+    planner: payload.planner || null,
   };
   state.modifyPreviewDirty = false;
 }
@@ -2233,7 +2356,8 @@ function modifyPreviewMatches(payload) {
     payload.allow_destructive === preview.allow_destructive &&
     datasetIdsEqual(payload.dataset_ids || [], preview.dataset_ids || []) &&
     toolSelectionsEqual(payload.tool_selections || [], preview.tool_selections || []) &&
-    agentSelectionsEqual(payload.agent_selections || [], preview.agent_selections || [])
+    agentSelectionsEqual(payload.agent_selections || [], preview.agent_selections || []) &&
+    plannerSelectionsEqual(payload.planner, preview.planner)
   );
 }
 
@@ -2379,6 +2503,34 @@ function currentAgentSelections() {
   }
   const loadedKeys = new Set(state.agents.items.map(agentKey));
   return selected.filter((agent) => loadedKeys.has(agentKey(agent)));
+}
+
+function currentPlannerSelection() {
+  const provider = selectedPlannerProvider();
+  if (!provider?.configured || !state.planner.model) {
+    return null;
+  }
+  return {
+    provider: provider.id,
+    model: state.planner.model,
+  };
+}
+
+function loadPlannerProvider() {
+  return localStorage.getItem(PLANNER_PROVIDER_KEY) || "";
+}
+
+function loadPlannerModel() {
+  return localStorage.getItem(PLANNER_MODEL_KEY) || "";
+}
+
+function savePlannerSelection() {
+  localStorage.setItem(PLANNER_PROVIDER_KEY, state.planner.provider || "");
+  localStorage.setItem(PLANNER_MODEL_KEY, state.planner.model || "");
+}
+
+function plannerSelectionsEqual(left, right) {
+  return JSON.stringify(left || null) === JSON.stringify(right || null);
 }
 
 function ensureAgentSelectionReady(message, agentSelections) {
@@ -2860,6 +3012,9 @@ function guardMessage(guard) {
 
 function plannerMessage(planner) {
   const parts = [`Planner: ${planner.mode || "unknown"}`];
+  if (planner.provider || planner.model) {
+    parts.push([planner.provider, planner.model].filter(Boolean).join("/"));
+  }
   if (planner.attempts !== undefined) {
     parts.push(`${planner.attempts} attempt${planner.attempts === 1 ? "" : "s"}`);
   }

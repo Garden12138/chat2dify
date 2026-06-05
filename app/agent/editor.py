@@ -4,8 +4,6 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-import httpx
-
 from app.agent.normalizer import normalize_plan_payload
 from app.agent.planner import (
     PlannerError,
@@ -14,6 +12,7 @@ from app.agent.planner import (
     _planner_agent_schemas,
     _issues_to_feedback,
     _planner_tool_schemas,
+    _post_chat_completion,
     _strip_json_fences,
     _validate_compiled_plan,
 )
@@ -82,6 +81,8 @@ class WorkflowEditResult:
     raw_plan: dict[str, Any]
     attempts: int
     repaired: bool
+    provider: str = ""
+    model: str = ""
     normalizations: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -91,6 +92,8 @@ class WorkflowEditResult:
             "attempts": self.attempts,
             "used_fallback": False,
             "repaired": self.repaired,
+            "provider": self.provider,
+            "model": self.model,
             "normalizations": self.normalizations,
             "errors": self.errors,
         }
@@ -109,8 +112,10 @@ class WorkflowEditPlanner:
         tool_selections: list[dict[str, Any]] | None = None,
         agent_selections: list[dict[str, Any]] | None = None,
     ) -> WorkflowEditResult:
-        if not self.settings.openai_api_key:
-            raise PlannerError("OPENAI_API_KEY is required to modify an existing workflow.")
+        runtime = self.settings.planner_runtime()
+        if not runtime.api_key:
+            key_name = "NVIDIA_API_KEY" if runtime.provider == "nvidia" else "OPENAI_API_KEY"
+            raise PlannerError(f"{key_name} is required to modify an existing workflow.")
 
         last_error = ""
         errors: list[str] = []
@@ -143,6 +148,8 @@ class WorkflowEditPlanner:
                     raw_plan=raw_plan,
                     attempts=attempt,
                     repaired=attempt > 1 or normalized.changed,
+                    provider=runtime.provider,
+                    model=runtime.model,
                     normalizations=normalized.changes,
                     errors=errors,
                 )
@@ -161,7 +168,8 @@ class WorkflowEditPlanner:
         tool_selections: list[dict[str, Any]] | None = None,
         agent_selections: list[dict[str, Any]] | None = None,
     ) -> str:
-        url = _chat_completions_url(self.settings.openai_base_url)
+        runtime = self.settings.planner_runtime()
+        url = _chat_completions_url(runtime.base_url)
         user_content = {
             "request": message,
             "current_plan": current_plan.model_dump(),
@@ -187,29 +195,36 @@ class WorkflowEditPlanner:
                 ],
             },
         }
+        if last_error:
+            user_content["previous_validation_error"] = last_error
         messages: list[dict[str, str]] = [
             {"role": "system", "content": EDIT_SYSTEM_PROMPT},
             {"role": "user", "content": json.dumps(user_content, ensure_ascii=False)},
         ]
-        if last_error:
-            messages.append({"role": "user", "content": f"Previous revised plan failed validation: {last_error}"})
 
         payload: dict[str, Any] = {
-            "model": self.settings.openai_model,
+            "model": runtime.model,
             "messages": messages,
             "temperature": 0.2,
             "response_format": {"type": "json_object"},
         }
-        headers = {"Authorization": f"Bearer {self.settings.openai_api_key}"}
-        try:
-            with httpx.Client(timeout=60) as client:
-                response = client.post(url, json=payload, headers=headers)
-                response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise PlannerError(
-                f"Workflow edit LLM request failed: {exc.response.status_code} {exc.response.text}"
-            ) from exc
-        except httpx.RequestError as exc:
-            raise PlannerError(f"Workflow edit LLM request failed: {exc}") from exc
-        data = response.json()
-        return str(data["choices"][0]["message"]["content"])
+        if runtime.provider == "nvidia":
+            chat_template_kwargs: dict[str, Any] = {
+                "thinking": self.settings.nvidia_thinking,
+            }
+            if self.settings.nvidia_thinking:
+                chat_template_kwargs["reasoning_effort"] = self.settings.nvidia_reasoning_effort
+            payload.update(
+                {
+                    "top_p": 0.95,
+                    "max_tokens": self.settings.nvidia_max_tokens,
+                    "chat_template_kwargs": chat_template_kwargs,
+                    "stream": True,
+                }
+            )
+        return _post_chat_completion(
+            runtime=runtime,
+            url=url,
+            payload=payload,
+            error_prefix="Workflow edit LLM",
+        )

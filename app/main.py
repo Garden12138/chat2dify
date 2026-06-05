@@ -56,12 +56,18 @@ def health() -> dict:
         version_info = read_dify_version_info(settings.dify_source_path)
     except (ConfigurationError, ValueError) as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    planner_runtime = settings.planner_runtime()
     return {
         "status": "ok",
         "configured_dataset_count": len(settings.dify_default_dataset_ids),
         "default_model": {
             "provider": settings.dify_default_model_provider,
             "name": settings.dify_default_model_name,
+        },
+        "planner": {
+            "provider": planner_runtime.provider,
+            "model": planner_runtime.model,
+            "configured": planner_runtime.configured,
         },
         "dify": {
             "source_dir": settings.dify_source_dir,
@@ -74,6 +80,20 @@ def health() -> dict:
                 "name": settings.dify_default_model_name,
             },
         },
+    }
+
+
+@app.get("/api/planner/providers")
+def list_planner_providers() -> dict:
+    settings = load_settings()
+    try:
+        runtime = settings.planner_runtime()
+    except ConfigurationError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {
+        "default_provider": runtime.provider,
+        "default_model": runtime.model,
+        "providers": settings.planner_catalog(),
     }
 
 
@@ -130,6 +150,7 @@ def list_dify_agent_strategies(keyword: str | None = Query(default=None)) -> dic
 def draft_workflow(request: WorkflowRequest) -> dict:
     settings = load_settings()
     effective_settings = _settings_with_request_dataset_ids(settings, request.dataset_ids)
+    effective_settings = _settings_with_request_planner(effective_settings, request.planner)
     version_info = read_dify_version_info(settings.dify_source_path)
     _ensure_agent_strategy_selection_for_request(request.message, request.agent_selections)
     _ensure_agent_selections_configured(request.agent_selections)
@@ -265,6 +286,11 @@ def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:
     _ensure_agent_strategy_selection_for_request(request.message, request.agent_selections)
     _ensure_agent_selections_configured(request.agent_selections)
     effective_settings = _settings_with_request_dataset_ids(settings, request.dataset_ids)
+    effective_settings = _settings_with_request_planner(
+        effective_settings,
+        request.planner,
+        require_configured=not (apply and request.plan is not None),
+    )
     version_info = read_dify_version_info(settings.dify_source_path)
     compiler = DifyDslCompiler(
         dsl_version=version_info.app_dsl_version,
@@ -299,7 +325,10 @@ def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:
                 )
                 plan = WorkflowPlan.model_validate(normalized.payload)
                 raw_plan = plan.model_dump()
-                planner_metadata = _preview_plan_planner_metadata(normalized.changes)
+                planner_metadata = _preview_plan_planner_metadata(
+                    normalized.changes,
+                    settings=effective_settings,
+                )
             else:
                 edit_kwargs = _planner_selection_kwargs(request)
                 edit_result = WorkflowEditPlanner(effective_settings).generate(
@@ -431,6 +460,36 @@ def _settings_with_request_dataset_ids(settings: Settings, dataset_ids: list[str
     if not request_dataset_ids:
         return settings
     return replace(settings, dify_default_dataset_ids=request_dataset_ids)
+
+
+def _settings_with_request_planner(
+    settings: Settings,
+    selection,
+    *,
+    require_configured: bool = True,
+) -> Settings:
+    if selection is None:
+        return settings
+    provider = getattr(selection, "provider", None)
+    model = getattr(selection, "model", None)
+    try:
+        selected = settings.with_planner(provider, model)
+    except ConfigurationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "PLANNER_SELECTION_INVALID", "message": str(exc)},
+        ) from exc
+    runtime = selected.planner_runtime()
+    if require_configured and not runtime.configured:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "PLANNER_PROVIDER_NOT_CONFIGURED",
+                "message": f"{runtime.label} is not configured on the chat2dify server.",
+                "suggestion": f"Set the API key for planner provider {runtime.provider} in .env and restart port 8000.",
+            },
+        )
+    return selected
 
 
 def _tool_selection_payloads(tool_selections) -> list[dict]:
@@ -612,8 +671,12 @@ def _datasets_by_id(dataset_result) -> dict[str, object]:
     return result
 
 
-def _preview_plan_planner_metadata(normalizations: list[str] | None = None) -> dict:
-    return {
+def _preview_plan_planner_metadata(
+    normalizations: list[str] | None = None,
+    *,
+    settings: Settings | None = None,
+) -> dict:
+    metadata = {
         "mode": "preview-plan",
         "attempts": 0,
         "used_fallback": False,
@@ -622,6 +685,11 @@ def _preview_plan_planner_metadata(normalizations: list[str] | None = None) -> d
         "normalizations": normalizations or [],
         "errors": [],
     }
+    if settings is not None:
+        runtime = settings.planner_runtime()
+        metadata["provider"] = runtime.provider
+        metadata["model"] = runtime.model
+    return metadata
 
 
 def _preserved_node_summary(

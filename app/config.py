@@ -1,17 +1,34 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Mapping
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DIFY_SOURCE_DIR = "../dify"
+DEFAULT_NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
+DEFAULT_NVIDIA_MODEL = "deepseek-ai/deepseek-v4-flash"
 
 
 class ConfigurationError(ValueError):
     """Raised when environment configuration is invalid."""
+
+
+@dataclass(frozen=True)
+class PlannerRuntime:
+    provider: str
+    label: str
+    api_key: str | None
+    base_url: str
+    model: str
+    timeout_seconds: float
+    request_retries: int
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.api_key)
 
 
 @dataclass(frozen=True)
@@ -27,9 +44,18 @@ class Settings:
     dify_default_model_provider: str
     dify_default_model_name: str
     dify_default_dataset_ids: list[str]
+    planner_default_provider: str
+    planner_timeout_seconds: float
+    planner_request_retries: int
     openai_api_key: str | None
     openai_base_url: str
     openai_model: str
+    nvidia_api_key: str | None
+    nvidia_base_url: str
+    nvidia_model: str
+    nvidia_thinking: bool
+    nvidia_reasoning_effort: str
+    nvidia_max_tokens: int
 
     @classmethod
     def from_env(
@@ -59,13 +85,90 @@ class Settings:
             dify_default_model_provider=source.get("DIFY_DEFAULT_MODEL_PROVIDER", "langgenius/openai/openai"),
             dify_default_model_name=source.get("DIFY_DEFAULT_MODEL_NAME", "gpt-4o-mini"),
             dify_default_dataset_ids=_csv_list(source.get("DIFY_DEFAULT_DATASET_IDS", "")),
+            planner_default_provider=source.get("PLANNER_DEFAULT_PROVIDER", "openai").strip().lower(),
+            planner_timeout_seconds=_positive_float(
+                source.get("PLANNER_TIMEOUT_SECONDS", "300"),
+                name="PLANNER_TIMEOUT_SECONDS",
+            ),
+            planner_request_retries=_non_negative_int(
+                source.get("PLANNER_REQUEST_RETRIES", "2"),
+                name="PLANNER_REQUEST_RETRIES",
+            ),
             openai_api_key=_empty_to_none(source.get("OPENAI_API_KEY")),
             openai_base_url=source.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
             openai_model=source.get("OPENAI_MODEL", "gpt-4o-mini"),
+            nvidia_api_key=_empty_to_none(source.get("NVIDIA_API_KEY")),
+            nvidia_base_url=source.get("NVIDIA_BASE_URL", DEFAULT_NVIDIA_BASE_URL).rstrip("/"),
+            nvidia_model=source.get("NVIDIA_MODEL", DEFAULT_NVIDIA_MODEL),
+            nvidia_thinking=_boolean(source.get("NVIDIA_THINKING", "false"), name="NVIDIA_THINKING"),
+            nvidia_reasoning_effort=_choice(
+                source.get("NVIDIA_REASONING_EFFORT", "low"),
+                name="NVIDIA_REASONING_EFFORT",
+                allowed={"low", "medium", "high"},
+            ),
+            nvidia_max_tokens=_positive_int(
+                source.get("NVIDIA_MAX_TOKENS", "8192"),
+                name="NVIDIA_MAX_TOKENS",
+            ),
         )
 
     def workflow_url(self, app_id: str) -> str:
         return f"{self.dify_console_web_base}/app/{app_id}/workflow"
+
+    def planner_runtime(self) -> PlannerRuntime:
+        provider = self.planner_default_provider
+        if provider == "openai":
+            return PlannerRuntime(
+                provider="openai",
+                label="OpenAI-compatible",
+                api_key=self.openai_api_key,
+                base_url=self.openai_base_url,
+                model=self.openai_model,
+                timeout_seconds=self.planner_timeout_seconds,
+                request_retries=self.planner_request_retries,
+            )
+        if provider == "nvidia":
+            return PlannerRuntime(
+                provider="nvidia",
+                label="NVIDIA NIM",
+                api_key=self.nvidia_api_key,
+                base_url=self.nvidia_base_url,
+                model=self.nvidia_model,
+                timeout_seconds=self.planner_timeout_seconds,
+                request_retries=self.planner_request_retries,
+            )
+        raise ConfigurationError(f"Unsupported planner provider: {provider}")
+
+    def with_planner(self, provider: str | None, model: str | None = None) -> "Settings":
+        selected_provider = (provider or self.planner_default_provider).strip().lower()
+        if selected_provider == "openai":
+            return replace(
+                self,
+                planner_default_provider="openai",
+                openai_model=(model or self.openai_model).strip(),
+            )
+        if selected_provider == "nvidia":
+            selected_model = (model or self.nvidia_model).strip()
+            if selected_model != self.nvidia_model:
+                raise ConfigurationError(f"Unsupported NVIDIA planner model: {selected_model}")
+            return replace(self, planner_default_provider="nvidia", nvidia_model=selected_model)
+        raise ConfigurationError(f"Unsupported planner provider: {selected_provider}")
+
+    def planner_catalog(self) -> list[dict[str, object]]:
+        return [
+            {
+                "id": "openai",
+                "label": "OpenAI-compatible",
+                "configured": bool(self.openai_api_key),
+                "models": [{"id": self.openai_model, "label": self.openai_model}],
+            },
+            {
+                "id": "nvidia",
+                "label": "NVIDIA NIM",
+                "configured": bool(self.nvidia_api_key),
+                "models": [{"id": self.nvidia_model, "label": "DeepSeek V4 Flash"}],
+            },
+        ]
 
 
 def load_settings(*, validate_dify: bool = True) -> Settings:
@@ -92,6 +195,50 @@ def _empty_to_none(value: str | None) -> str | None:
         return None
     value = value.strip()
     return value or None
+
+
+def _positive_float(value: str, *, name: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise ConfigurationError(f"{name} must be a number.") from exc
+    if parsed <= 0:
+        raise ConfigurationError(f"{name} must be greater than zero.")
+    return parsed
+
+
+def _non_negative_int(value: str, *, name: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ConfigurationError(f"{name} must be an integer.") from exc
+    if parsed < 0:
+        raise ConfigurationError(f"{name} must be zero or greater.")
+    return parsed
+
+
+def _positive_int(value: str, *, name: str) -> int:
+    parsed = _non_negative_int(value, name=name)
+    if parsed == 0:
+        raise ConfigurationError(f"{name} must be greater than zero.")
+    return parsed
+
+
+def _boolean(value: str, *, name: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigurationError(f"{name} must be true or false.")
+
+
+def _choice(value: str, *, name: str, allowed: set[str]) -> str:
+    normalized = value.strip().lower()
+    if normalized not in allowed:
+        choices = ", ".join(sorted(allowed))
+        raise ConfigurationError(f"{name} must be one of: {choices}.")
+    return normalized
 
 
 def _csv_list(value: str | None) -> list[str]:

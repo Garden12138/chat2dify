@@ -39,6 +39,9 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert index.status_code == 200
     assert "chat2dify" in index.text
     assert 'id="create-form"' in index.text
+    assert 'id="planner-form"' in index.text
+    assert 'id="planner-provider"' in index.text
+    assert 'id="planner-model"' in index.text
     assert 'id="history-list"' in index.text
     assert 'id="knowledge-search"' in index.text
     assert 'id="refresh-datasets"' in index.text
@@ -55,6 +58,8 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert 'id="load-draft"' in index.text
     assert script.status_code == 200
     assert "handleCreate" in script.text
+    assert "loadPlannerProviders" in script.text
+    assert "currentPlannerSelection" in script.text
     assert "handleLoadDraft" in script.text
     assert "handleReviewedPreviewApply" in script.text
     assert "modifyPreview" in script.text
@@ -99,6 +104,88 @@ def test_health_returns_configured_dataset_count(monkeypatch) -> None:
     assert data["default_model"] == {"provider": "langgenius/tongyi/tongyi", "name": "qwen3.5-plus"}
     assert data["dify"]["configured_dataset_count"] == 2
     assert data["dify"]["default_model"] == {"provider": "langgenius/tongyi/tongyi", "name": "qwen3.5-plus"}
+    assert data["planner"] == {"provider": "openai", "model": "gpt-4o-mini", "configured": True}
+
+
+def test_list_planner_providers_returns_nvidia_without_api_key(monkeypatch) -> None:
+    monkeypatch.setattr("app.main.load_settings", lambda: _test_settings(nvidia_api_key="nvapi-test"))
+
+    with TestClient(app) as client:
+        response = client.get("/api/planner/providers")
+
+    assert response.status_code == 200
+    data = response.json()
+    nvidia = next(item for item in data["providers"] if item["id"] == "nvidia")
+    assert nvidia["configured"] is True
+    assert nvidia["models"] == [
+        {"id": "deepseek-ai/deepseek-v4-flash", "label": "DeepSeek V4 Flash"}
+    ]
+    assert "nvapi-test" not in response.text
+
+
+def test_draft_rejects_unconfigured_planner_provider(monkeypatch) -> None:
+    monkeypatch.setattr("app.main.load_settings", _test_settings)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/draft",
+            json={
+                "message": "生成简单工作流",
+                "planner": {
+                    "provider": "nvidia",
+                    "model": "deepseek-ai/deepseek-v4-flash",
+                },
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "PLANNER_PROVIDER_NOT_CONFIGURED"
+
+
+def test_draft_uses_requested_nvidia_planner(monkeypatch) -> None:
+    seen = {}
+
+    class CapturingPlanner:
+        def __init__(self, settings):
+            runtime = settings.planner_runtime()
+            seen["provider"] = runtime.provider
+            seen["model"] = runtime.model
+
+        def generate(self, message, *, app_name=None, dsl_version, **_kwargs):
+            plan = fallback_plan(message, app_name=app_name)
+            return PlannerResult(
+                plan=plan,
+                raw_plan=plan.model_dump(),
+                mode="llm",
+                attempts=1,
+                used_fallback=False,
+                repaired=False,
+                provider="nvidia",
+                model="deepseek-ai/deepseek-v4-flash",
+            )
+
+    monkeypatch.setattr("app.main.load_settings", lambda: _test_settings(nvidia_api_key="nvapi-test"))
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+    monkeypatch.setattr("app.main.WorkflowPlanner", CapturingPlanner)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/draft",
+            json={
+                "message": "生成简单工作流",
+                "planner": {
+                    "provider": "nvidia",
+                    "model": "deepseek-ai/deepseek-v4-flash",
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    assert seen == {"provider": "nvidia", "model": "deepseek-ai/deepseek-v4-flash"}
+    assert response.json()["planner"]["provider"] == "nvidia"
 
 
 def test_list_dify_datasets_api_returns_slim_dataset_list(monkeypatch) -> None:
@@ -1641,15 +1728,15 @@ def _knowledge_plan(name: str, dataset_ids: list[str]) -> object:
     )
 
 
-def _test_settings(dataset_ids: str = "") -> Settings:
-    return Settings.from_env(
-        {
-            "DIFY_SOURCE_DIR": "../dify",
-            "OPENAI_API_KEY": "token",
-            "DIFY_CONSOLE_WEB_BASE": "http://dify.local",
-            "DIFY_DEFAULT_MODEL_PROVIDER": "langgenius/tongyi/tongyi",
-            "DIFY_DEFAULT_MODEL_NAME": "qwen3.5-plus",
-            "DIFY_DEFAULT_DATASET_IDS": dataset_ids,
-        },
-        validate_dify=False,
-    )
+def _test_settings(dataset_ids: str = "", *, nvidia_api_key: str = "") -> Settings:
+    env = {
+        "DIFY_SOURCE_DIR": "../dify",
+        "OPENAI_API_KEY": "token",
+        "DIFY_CONSOLE_WEB_BASE": "http://dify.local",
+        "DIFY_DEFAULT_MODEL_PROVIDER": "langgenius/tongyi/tongyi",
+        "DIFY_DEFAULT_MODEL_NAME": "qwen3.5-plus",
+        "DIFY_DEFAULT_DATASET_IDS": dataset_ids,
+    }
+    if nvidia_api_key:
+        env["NVIDIA_API_KEY"] = nvidia_api_key
+    return Settings.from_env(env, validate_dify=False)
