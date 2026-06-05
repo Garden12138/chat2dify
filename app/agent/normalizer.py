@@ -241,6 +241,7 @@ def normalize_plan_payload(
     app_name: str | None = None,
     default_dataset_ids: list[str] | None = None,
     tool_selections: list[dict[str, Any]] | None = None,
+    agent_selections: list[dict[str, Any]] | None = None,
 ) -> NormalizationResult:
     data = deepcopy(payload)
     changes: list[str] = []
@@ -319,6 +320,8 @@ def normalize_plan_payload(
                     node_id=str(node.get("id") or "iteration"),
                     workflow_name=str(data.get("name", "")),
                     default_dataset_ids=default_dataset_ids or [],
+                    tool_selections=tool_selections or [],
+                    agent_selections=agent_selections or [],
                 )
             case "loop":
                 node["params"] = _normalize_loop_params(
@@ -326,9 +329,13 @@ def normalize_plan_payload(
                     node_id=str(node.get("id") or "loop"),
                     workflow_name=str(data.get("name", "")),
                     default_dataset_ids=default_dataset_ids or [],
+                    tool_selections=tool_selections or [],
+                    agent_selections=agent_selections or [],
                 )
             case "tool":
                 node["params"] = _normalize_tool_params(params, tool_selections or [])
+            case "agent":
+                node["params"] = _normalize_agent_params(params, agent_selections or [])
             case node_type if node_type in EXTERNAL_DEPENDENCY_NODE_TYPES:
                 node["params"] = _normalize_external_dependency_params(params)
             case "iteration-start" | "loop-start" | "loop-end":
@@ -343,7 +350,9 @@ def normalize_plan_payload(
         old_title = str(node.get("title") or "")
         node_type = str(node.get("type") or "")
         node_params = node.get("params") if isinstance(node.get("params"), dict) else {}
-        if node_type in EXTERNAL_DEPENDENCY_NODE_TYPES and not (node_type == "tool" and "_raw_data" not in node_params):
+        if node_type in EXTERNAL_DEPENDENCY_NODE_TYPES and not (
+            node_type in {"tool", "agent"} and "_raw_data" not in node_params
+        ):
             continue
         if _is_generic_title(old_title, node_type):
             node["title"] = _semantic_title(node, data, node_by_id, edges)
@@ -786,6 +795,8 @@ def _normalize_iteration_params(
     node_id: str,
     workflow_name: str,
     default_dataset_ids: list[str],
+    tool_selections: list[dict[str, Any]],
+    agent_selections: list[dict[str, Any]],
 ) -> dict[str, Any]:
     result = dict(params)
     iterator_selector = (
@@ -814,6 +825,8 @@ def _normalize_iteration_params(
         start_node_id=start_node_id,
         workflow_name=workflow_name,
         default_dataset_ids=default_dataset_ids,
+        tool_selections=tool_selections,
+        agent_selections=agent_selections,
     )
     result["start_node_id"] = str(children[0].get("id") if children else start_node_id)
     result["children"] = children
@@ -853,6 +866,8 @@ def _normalize_loop_params(
     node_id: str,
     workflow_name: str,
     default_dataset_ids: list[str],
+    tool_selections: list[dict[str, Any]],
+    agent_selections: list[dict[str, Any]],
 ) -> dict[str, Any]:
     result = dict(params)
     result["loop_count"] = _positive_int(
@@ -877,6 +892,8 @@ def _normalize_loop_params(
         start_node_id=start_node_id,
         workflow_name=workflow_name,
         default_dataset_ids=default_dataset_ids,
+        tool_selections=tool_selections,
+        agent_selections=agent_selections,
     )
     result["start_node_id"] = str(children[0].get("id") if children else start_node_id)
     result["children"] = children
@@ -908,6 +925,8 @@ def _normalize_container_children(
     start_node_id: str,
     workflow_name: str,
     default_dataset_ids: list[str],
+    tool_selections: list[dict[str, Any]],
+    agent_selections: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     internal_start_type = "iteration-start" if container_type == "iteration" else "loop-start"
     raw_children = value if isinstance(value, list) else []
@@ -919,6 +938,8 @@ def _normalize_container_children(
             container_type=container_type,
             workflow_name=workflow_name,
             default_dataset_ids=default_dataset_ids,
+            tool_selections=tool_selections,
+            agent_selections=agent_selections,
             index=idx,
         )
         if child:
@@ -954,6 +975,8 @@ def _normalize_container_child(
     container_type: str,
     workflow_name: str,
     default_dataset_ids: list[str],
+    tool_selections: list[dict[str, Any]],
+    agent_selections: list[dict[str, Any]],
     index: int,
 ) -> dict[str, Any] | None:
     if isinstance(item, str):
@@ -1007,6 +1030,10 @@ def _normalize_container_child(
             child["params"] = _normalize_knowledge_retrieval_params(params, default_dataset_ids)
         case "human-input":
             child["params"] = _normalize_human_input_params(params)
+        case "tool":
+            child["params"] = _normalize_tool_params(params, tool_selections)
+        case "agent":
+            child["params"] = _normalize_agent_params(params, agent_selections)
         case child_type if child_type in EXTERNAL_DEPENDENCY_NODE_TYPES:
             child["params"] = _normalize_external_dependency_params(params)
         case "iteration-start" | "loop-start" | "loop-end":
@@ -1422,6 +1449,215 @@ def _find_selected_tool(params: dict[str, Any], tool_selections: list[dict[str, 
         if len(matches) == 1:
             return matches[0]
     return candidates[0] if len(candidates) == 1 else None
+
+
+def _normalize_agent_params(params: dict[str, Any], agent_selections: list[dict[str, Any]]) -> dict[str, Any]:
+    if isinstance(params.get("_raw_data"), dict):
+        return _normalize_external_dependency_params(params)
+
+    result = dict(params)
+    selected = _find_selected_agent(result, agent_selections)
+    if selected:
+        result.setdefault("agent_strategy_provider_name", selected.get("agent_strategy_provider_name"))
+        result.setdefault("agent_strategy_name", selected.get("agent_strategy_name"))
+        result.setdefault("agent_strategy_label", selected.get("agent_strategy_label") or selected.get("agent_strategy_name"))
+        if selected.get("plugin_unique_identifier") and not result.get("plugin_unique_identifier"):
+            result["plugin_unique_identifier"] = selected.get("plugin_unique_identifier")
+        if selected.get("meta") and not result.get("meta"):
+            result["meta"] = deepcopy(selected.get("meta"))
+        if selected.get("output_schema") and not result.get("output_schema"):
+            result["output_schema"] = deepcopy(selected.get("output_schema"))
+        if selected.get("features") and not result.get("features"):
+            result["features"] = deepcopy(selected.get("features"))
+
+    parameters = _normalize_agent_param_schemas(result.get("parameters") or (selected or {}).get("parameters") or [])
+    if parameters:
+        result["parameters"] = parameters
+
+    result["agent_strategy_provider_name"] = str(result.get("agent_strategy_provider_name") or "").strip()
+    result["agent_strategy_name"] = str(result.get("agent_strategy_name") or "").strip()
+    result["agent_strategy_label"] = str(
+        result.get("agent_strategy_label") or result.get("agent_strategy_name") or ""
+    ).strip()
+    result["tool_node_version"] = str(result.get("tool_node_version") or "2")
+
+    explicit_parameters = (selected or {}).get("agent_parameters") if isinstance(selected, dict) else {}
+    result["agent_parameters"] = _normalize_agent_runtime_inputs(
+        _merge_tool_inputs(result.get("agent_parameters") or result.get("parameters_value") or {}, explicit_parameters),
+        parameters,
+    )
+    result.pop("parameters_value", None)
+    return result
+
+
+def _find_selected_agent(params: dict[str, Any], agent_selections: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not agent_selections:
+        return None
+    provider_name = str(params.get("agent_strategy_provider_name") or params.get("provider") or "").strip()
+    strategy_name = str(params.get("agent_strategy_name") or params.get("strategy") or params.get("name") or "").strip()
+    candidates = [item for item in agent_selections if isinstance(item, dict)]
+    for item in candidates:
+        if (
+            provider_name
+            and strategy_name
+            and str(item.get("agent_strategy_provider_name") or "").strip() == provider_name
+            and str(item.get("agent_strategy_name") or "").strip() == strategy_name
+        ):
+            return item
+    if strategy_name:
+        matches = [item for item in candidates if str(item.get("agent_strategy_name") or "").strip() == strategy_name]
+        if len(matches) == 1:
+            return matches[0]
+    if provider_name:
+        matches = [
+            item for item in candidates if str(item.get("agent_strategy_provider_name") or "").strip() == provider_name
+        ]
+        if len(matches) == 1:
+            return matches[0]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _normalize_agent_param_schemas(value: Any) -> list[dict[str, Any]]:
+    parameters: list[dict[str, Any]] = []
+    for item in value or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("variable") or "").strip()
+        if not name:
+            continue
+        parameter = deepcopy(item)
+        parameter["name"] = name
+        parameter["variable"] = str(parameter.get("variable") or name)
+        parameter["type"] = str(parameter.get("type") or "text-input")
+        parameter["required"] = bool(parameter.get("required", False))
+        if "label" not in parameter or parameter.get("label") in (None, ""):
+            parameter["label"] = {"en_US": name, "zh_Hans": name}
+        parameters.append(parameter)
+    return parameters
+
+
+def _normalize_agent_runtime_inputs(value: Any, parameters: list[dict[str, Any]]) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    result: dict[str, Any] = {}
+    parameter_by_name = {
+        str(parameter.get("variable") or parameter.get("name")): parameter
+        for parameter in parameters
+        if parameter.get("variable") or parameter.get("name")
+    }
+    for name, parameter in parameter_by_name.items():
+        raw_value = raw.get(name)
+        if raw_value is None and str(parameter.get("name")) != name:
+            raw_value = raw.get(str(parameter.get("name")))
+        if _is_empty_tool_input(raw_value):
+            raw_value = None
+        if raw_value is None:
+            default = parameter.get("default")
+            if not _is_empty_tool_input(default):
+                raw_value = default
+            elif parameter.get("required") and _is_query_like_tool_parameter(name):
+                raw_value = ["start", "query"]
+        if raw_value is not None:
+            result[name] = _normalize_agent_runtime_input(raw_value, parameter)
+
+    for key, raw_value in raw.items():
+        if key in result:
+            continue
+        if _is_empty_tool_input(raw_value):
+            continue
+        parameter = next(
+            (
+                item
+                for item in parameters
+                if str(item.get("name")) == str(key) or str(item.get("variable")) == str(key)
+            ),
+            {},
+        )
+        result[str(key)] = _normalize_agent_runtime_input(raw_value, parameter)
+    return result
+
+
+def _normalize_agent_runtime_input(value: Any, parameter: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(value, dict) and value.get("type") in {"mixed", "variable", "constant"} and "value" in value:
+        result = {
+            "type": str(value.get("type") or _default_agent_value_type(parameter)),
+            "value": deepcopy(value.get("value")),
+        }
+    elif isinstance(value, list) and _looks_like_selector(value):
+        result = {"type": "variable", "value": deepcopy(value)}
+    else:
+        value_type = _default_agent_value_type(parameter)
+        result = {"type": value_type, "value": deepcopy(value)}
+
+    if result["type"] == "variable" and _agent_schema_uses_text_editor(parameter):
+        result = {"type": "constant", "value": _selector_to_dify_template(result.get("value"))}
+    elif result["type"] == "variable":
+        result["value"] = _normalize_selector(result.get("value"))
+    elif result["type"] == "mixed" and _agent_schema_uses_text_editor(parameter):
+        result = {"type": "constant", "value": normalize_template_refs(str(result.get("value") or ""))}
+    elif result["type"] == "constant":
+        result["value"] = _coerce_agent_constant(result.get("value"), parameter)
+    elif result["type"] != "mixed":
+        result["type"] = _default_agent_value_type(parameter)
+    if str(parameter.get("type") or "").strip() == "model-selector":
+        result["type"] = "constant"
+        result["value"] = _normalize_agent_model_selector(result.get("value"))
+    return result
+
+
+def _agent_schema_uses_text_editor(parameter: dict[str, Any]) -> bool:
+    parameter_type = str(parameter.get("type") or "").strip().lower()
+    return parameter_type in {"", "string", "text-input", "secret-input"}
+
+
+def _default_agent_value_type(parameter: dict[str, Any]) -> str:
+    parameter_type = str(parameter.get("type") or "").strip()
+    if parameter_type in {"any", "file", "files"}:
+        return "variable"
+    if parameter_type in {
+        "",
+        "string",
+        "text-input",
+        "secret-input",
+        "select",
+        "checkbox",
+        "boolean",
+        "number",
+        "number-input",
+        "text-number",
+        "tool-selector",
+        "multi-tool-selector",
+    }:
+        return "constant"
+    return "constant"
+
+
+def _coerce_agent_constant(value: Any, parameter: dict[str, Any]) -> Any:
+    parameter_type = str(parameter.get("type") or "").strip()
+    if parameter_type in {"boolean", "checkbox"}:
+        return _coerce_tool_bool(value)
+    if parameter_type in {"number", "number-input", "text-number"}:
+        return _coerce_tool_number(value)
+    if parameter_type == "model-selector":
+        return _normalize_agent_model_selector(value)
+    return value
+
+
+def _normalize_agent_model_selector(value: Any) -> dict[str, Any]:
+    raw = deepcopy(value) if isinstance(value, dict) else {}
+    provider = str(raw.get("provider") or "").strip()
+    model = str(raw.get("model") or raw.get("name") or "").strip()
+    result: dict[str, Any] = {
+        "provider": provider,
+        "model": model,
+        "model_type": str(raw.get("model_type") or "llm"),
+    }
+    if result["model_type"] == "llm":
+        result["mode"] = str(raw.get("mode") or "chat")
+        completion_params = raw.get("completion_params")
+        result["completion_params"] = deepcopy(completion_params) if isinstance(completion_params, dict) else {}
+    for key, item in raw.items():
+        result.setdefault(str(key), deepcopy(item))
+    return result
 
 
 def _merge_tool_inputs(generated: Any, explicit: Any) -> dict[str, Any]:

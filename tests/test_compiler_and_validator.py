@@ -1438,6 +1438,142 @@ def test_normalizer_validator_and_compiler_cover_structured_tool_node() -> None:
     assert tool_data["output_schema"]["properties"]["answer"]["type"] == "string"
 
 
+def test_normalizer_validator_and_compiler_cover_structured_agent_node() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "name": "智能体处理",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "agent",
+                    "type": "agent",
+                    "title": "调用智能体分析诉求",
+                    "params": {
+                        "agent_strategy_provider_name": "langgenius/agent/react",
+                        "agent_strategy_name": "react",
+                    },
+                },
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["agent", "answer"]}]}},
+            ],
+            "edges": [{"source": "start", "target": "agent"}, {"source": "agent", "target": "end"}],
+        },
+        agent_selections=[
+            {
+                "agent_strategy_provider_name": "langgenius/agent/react",
+                "agent_strategy_name": "react",
+                "agent_strategy_label": "ReAct",
+                "parameters": [{"name": "query", "type": "text-input", "required": True}],
+                "output_schema": {"properties": {"answer": {"type": "string"}}},
+                "plugin_unique_identifier": "langgenius/agent:1.0.0",
+                "meta": {"version": "1.0.0"},
+                "agent_parameters": {"query": {"type": "variable", "value": ["start", "query"]}},
+            }
+        ],
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    issues = validate_plan(plan)
+    dsl = _compiler().compile(plan)
+    graph = yaml.safe_load(dsl)["workflow"]["graph"]
+    agent_data = next(node["data"] for node in graph["nodes"] if node["id"] == "agent")
+
+    assert not has_errors(issues)
+    assert agent_data["type"] == "agent"
+    assert agent_data["agent_strategy_provider_name"] == "langgenius/agent/react"
+    assert agent_data["agent_strategy_name"] == "react"
+    assert agent_data["agent_strategy_label"] == "ReAct"
+    assert agent_data["agent_parameters"]["query"] == {"type": "constant", "value": "{{#start.query#}}"}
+    assert agent_data["output_schema"]["properties"]["answer"]["type"] == "string"
+    assert "parameters" not in agent_data
+
+
+def test_agent_model_selector_and_query_defaults_are_dify_runtime_compatible() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "name": "智能体模型参数",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "agent",
+                    "type": "agent",
+                    "params": {
+                        "agent_strategy_provider_name": "langgenius/agent/agent",
+                        "agent_strategy_name": "function_calling",
+                    },
+                },
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["agent", "text"]}]}},
+            ],
+            "edges": [{"source": "start", "target": "agent"}, {"source": "agent", "target": "end"}],
+        },
+        agent_selections=[
+            {
+                "agent_strategy_provider_name": "langgenius/agent/agent",
+                "agent_strategy_name": "function_calling",
+                "parameters": [
+                    {"name": "model", "type": "model-selector", "required": True},
+                    {"name": "query", "type": "string", "required": True},
+                ],
+                "agent_parameters": {
+                    "model": {
+                        "type": "constant",
+                        "value": {
+                            "provider": "langgenius/tongyi/tongyi",
+                            "model": "qwen3.5-plus",
+                        },
+                    }
+                },
+            }
+        ],
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    dsl = _compiler().compile(plan)
+    graph = yaml.safe_load(dsl)["workflow"]["graph"]
+    agent_data = next(node["data"] for node in graph["nodes"] if node["id"] == "agent")
+
+    assert agent_data["agent_parameters"]["model"] == {
+        "type": "constant",
+        "value": {
+            "provider": "langgenius/tongyi/tongyi",
+            "model": "qwen3.5-plus",
+            "model_type": "llm",
+            "mode": "chat",
+            "completion_params": {},
+        },
+    }
+    assert agent_data["agent_parameters"]["query"] == {"type": "constant", "value": "{{#start.query#}}"}
+
+
+def test_validator_blocks_agent_tool_selector_without_bound_tool() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "name": "智能体工具",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "agent",
+                    "type": "agent",
+                    "params": {
+                        "agent_strategy_provider_name": "langgenius/agent/react",
+                        "agent_strategy_name": "react",
+                    },
+                },
+                {"id": "end", "type": "end", "params": {"outputs": [{"variable": "answer", "value_selector": ["agent", "text"]}]}},
+            ],
+            "edges": [{"source": "start", "target": "agent"}, {"source": "agent", "target": "end"}],
+        },
+        agent_selections=[
+            {
+                "agent_strategy_provider_name": "langgenius/agent/react",
+                "agent_strategy_name": "react",
+                "parameters": [{"name": "tools", "type": "array[tools]", "required": True}],
+            }
+        ],
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    issues = validate_plan(plan)
+
+    assert any(issue.code == "PLAN_AGENT_REQUIRED_PARAMETER_MISSING" for issue in issues)
+
+
 def test_normalizer_treats_empty_tool_parameter_as_missing_and_uses_schema_defaults() -> None:
     normalized = normalize_plan_payload(
         {

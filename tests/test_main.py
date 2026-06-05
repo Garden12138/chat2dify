@@ -7,6 +7,8 @@ from app.agent.planner import PlannerResult, fallback_plan
 from app.compiler.dify import DifyDslCompiler
 from app.config import Settings
 from app.dify.client import (
+    DifyAgentStrategyListItem,
+    DifyAgentStrategyListResult,
     DifyAppDetail,
     DifyClientError,
     DifyDatasetListItem,
@@ -45,6 +47,10 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert 'id="tools-form"' in index.text
     assert 'id="tools-list"' in index.text
     assert 'id="tools-type"' in index.text
+    assert 'id="agents-form"' in index.text
+    assert 'id="agents-list"' in index.text
+    assert 'id="agents-search"' in index.text
+    assert "Agent Strategies" in index.text
     assert 'id="result-tabs"' in index.text
     assert 'id="load-draft"' in index.text
     assert script.status_code == 200
@@ -61,6 +67,11 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert "toolConfigurationPanel" in script.text
     assert "tool_configurations" in script.text
     assert "tool_parameters" in script.text
+    assert "loadAgentStrategies" in script.text
+    assert "currentAgentSelections" in script.text
+    assert "agentConfigurationPanel" in script.text
+    assert "agent_parameters" in script.text
+    assert "ensureAgentSelectionReady" in script.text
     assert "Applied reviewed preview" in script.text
     assert "localStorage" in script.text
     assert "renderValidationPanel" in script.text
@@ -85,7 +96,9 @@ def test_health_returns_configured_dataset_count(monkeypatch) -> None:
     assert response.status_code == 200
     data = response.json()
     assert data["configured_dataset_count"] == 2
+    assert data["default_model"] == {"provider": "langgenius/tongyi/tongyi", "name": "qwen3.5-plus"}
     assert data["dify"]["configured_dataset_count"] == 2
+    assert data["dify"]["default_model"] == {"provider": "langgenius/tongyi/tongyi", "name": "qwen3.5-plus"}
 
 
 def test_list_dify_datasets_api_returns_slim_dataset_list(monkeypatch) -> None:
@@ -256,6 +269,54 @@ def test_list_dify_tools_api_wraps_dify_errors(monkeypatch) -> None:
     assert response.json()["detail"] == "Tool list unavailable"
 
 
+def test_list_dify_agent_strategies_api_returns_slim_strategy_list(monkeypatch) -> None:
+    seen = {}
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def list_agent_strategies(self, *, keyword=None):
+            seen["keyword"] = keyword
+            return DifyAgentStrategyListResult(
+                data=[
+                    DifyAgentStrategyListItem(
+                        agent_strategy_provider_name="langgenius/agent/react",
+                        agent_strategy_name="react",
+                        agent_strategy_label="ReAct",
+                        description="多步推理",
+                        parameters=[{"name": "query", "type": "text-input", "required": True}],
+                        features=["history-messages"],
+                        output_schema={"properties": {"answer": {"type": "string"}}},
+                        plugin_unique_identifier="langgenius/agent:1.0.0",
+                        meta={"version": "1.0.0"},
+                    )
+                ],
+                count=1,
+                providers=["langgenius/agent/react"],
+            )
+
+    monkeypatch.setattr("app.main.load_settings", _test_settings)
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+
+    with TestClient(app) as client:
+        response = client.get("/api/dify/agent-strategies?keyword=react")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert seen == {"keyword": "react"}
+    assert data["count"] == 1
+    assert data["providers"] == ["langgenius/agent/react"]
+    assert data["data"][0]["agent_strategy_name"] == "react"
+    assert data["data"][0]["output_schema"] == {"properties": {"answer": {"type": "string"}}}
+
+
 def test_draft_workflow_passes_tool_selections_to_planner(monkeypatch) -> None:
     seen = {}
 
@@ -302,6 +363,123 @@ def test_draft_workflow_passes_tool_selections_to_planner(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert seen["tool_selections"][0]["tool_name"] == "search"
+
+
+def test_draft_workflow_passes_agent_selections_to_planner(monkeypatch) -> None:
+    seen = {}
+
+    class AgentAwarePlanner:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def generate(self, message, *, app_name=None, dsl_version, agent_selections=None):
+            seen["agent_selections"] = agent_selections
+            plan = fallback_plan(message, app_name=app_name)
+            return PlannerResult(
+                plan=plan,
+                raw_plan=plan.model_dump(),
+                mode="llm",
+                attempts=1,
+                used_fallback=False,
+                repaired=False,
+            )
+
+    monkeypatch.setattr("app.main.load_settings", _test_settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+    monkeypatch.setattr("app.main.WorkflowPlanner", AgentAwarePlanner)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/draft",
+            json={
+                "message": "用智能体分析问题",
+                "agent_selections": [
+                    {
+                        "agent_strategy_provider_name": "langgenius/agent/react",
+                        "agent_strategy_name": "react",
+                        "agent_strategy_label": "ReAct",
+                        "parameters": [{"name": "query", "type": "text-input", "required": True}],
+                        "agent_parameters": {"query": {"type": "variable", "value": ["start", "query"]}},
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    assert seen["agent_selections"][0]["agent_strategy_name"] == "react"
+
+
+def test_draft_workflow_requires_agent_strategy_selection_for_agent_requests(monkeypatch) -> None:
+    class FailingPlanner:
+        def __init__(self, _settings):
+            pass
+
+        def generate(self, *_args, **_kwargs):
+            raise AssertionError("planner should not run without agent selections")
+
+    monkeypatch.setattr("app.main.load_settings", _test_settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+    monkeypatch.setattr("app.main.WorkflowPlanner", FailingPlanner)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/draft",
+            json={"message": "使用 Agent 智能体分析售后问题并返回建议"},
+        )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["code"] == "AGENT_STRATEGY_SELECTION_REQUIRED"
+    assert "Agent Strategy" in detail["message"]
+
+
+def test_draft_workflow_validates_agent_selection_required_parameters_before_planner(monkeypatch) -> None:
+    class FailingPlanner:
+        def __init__(self, _settings):
+            pass
+
+        def generate(self, *_args, **_kwargs):
+            raise AssertionError("planner should not run with invalid agent selections")
+
+    monkeypatch.setattr("app.main.load_settings", _test_settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+    monkeypatch.setattr("app.main.WorkflowPlanner", FailingPlanner)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/draft",
+            json={
+                "message": "用智能体分析问题",
+                "agent_selections": [
+                    {
+                        "agent_strategy_provider_name": "langgenius/agent/agent",
+                        "agent_strategy_name": "function_calling",
+                        "agent_strategy_label": "FunctionCalling",
+                        "parameters": [
+                            {"name": "model", "type": "model-selector", "required": True},
+                            {"name": "instruction", "type": "string", "required": True},
+                        ],
+                        "agent_parameters": {
+                            "instruction": {"type": "mixed", "value": ""},
+                        },
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["code"] == "AGENT_SELECTION_REQUIRED_PARAMETER_MISSING"
+    assert detail["issues"][0]["path"] == "agent_selections.0.agent_parameters.model"
 
 
 def test_draft_response_includes_phase2_fields(monkeypatch) -> None:
@@ -544,7 +722,7 @@ def test_apply_workflow_modification_syncs_dify_draft(monkeypatch) -> None:
         def __init__(self, _settings):
             pass
 
-        def generate(self, message, *, current_plan, dsl_version):
+        def generate(self, message, *, current_plan, dsl_version, **_kwargs):
             revised = current_plan.model_copy(deep=True)
             revised.nodes[1].params["user_prompt"] = f"Changed: {message} {{{{#start.query#}}}}"
             return WorkflowEditResult(
@@ -614,7 +792,7 @@ def test_modify_draft_request_dataset_ids_fill_added_knowledge_node(monkeypatch)
         def __init__(self, planner_settings):
             self.settings = planner_settings
 
-        def generate(self, _message, *, current_plan, dsl_version):
+        def generate(self, _message, *, current_plan, dsl_version, **_kwargs):
             revised = _knowledge_plan(current_plan.name, self.settings.dify_default_dataset_ids)
             return WorkflowEditResult(plan=revised, raw_plan=revised.model_dump(), attempts=1, repaired=False)
 
@@ -985,7 +1163,7 @@ def test_apply_workflow_modification_blocks_destructive_change(monkeypatch) -> N
         def __init__(self, _settings):
             pass
 
-        def generate(self, _message, *, current_plan, dsl_version):
+        def generate(self, _message, *, current_plan, dsl_version, **_kwargs):
             revised = current_plan.model_copy(deep=True)
             revised.nodes = [revised.nodes[0], revised.nodes[2]]
             revised.edges = [type(revised.edges[0])(source=revised.nodes[0].id, target=revised.nodes[1].id)]
@@ -1058,7 +1236,7 @@ def test_apply_workflow_modification_allows_destructive_change_when_confirmed(mo
         def __init__(self, _settings):
             pass
 
-        def generate(self, _message, *, current_plan, dsl_version):
+        def generate(self, _message, *, current_plan, dsl_version, **_kwargs):
             revised = current_plan.model_copy(deep=True)
             revised.nodes = [revised.nodes[0], revised.nodes[2]]
             revised.edges = [type(revised.edges[0])(source=revised.nodes[0].id, target=revised.nodes[1].id)]
@@ -1126,7 +1304,7 @@ def test_apply_workflow_modification_noop_does_not_sync(monkeypatch) -> None:
         def __init__(self, _settings):
             pass
 
-        def generate(self, _message, *, current_plan, dsl_version):
+        def generate(self, _message, *, current_plan, dsl_version, **_kwargs):
             return WorkflowEditResult(
                 plan=current_plan,
                 raw_plan=current_plan.model_dump(),
@@ -1231,7 +1409,7 @@ def test_apply_workflow_modification_syncs_noop_when_graph_is_normalized(monkeyp
         def __init__(self, _settings):
             pass
 
-        def generate(self, _message, *, current_plan, dsl_version):
+        def generate(self, _message, *, current_plan, dsl_version, **_kwargs):
             return WorkflowEditResult(
                 plan=current_plan,
                 raw_plan=current_plan.model_dump(),
@@ -1411,7 +1589,7 @@ class _KnowledgePlanner:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
-    def generate(self, message: str, *, app_name: str | None = None, dsl_version: str) -> PlannerResult:
+    def generate(self, message: str, *, app_name: str | None = None, dsl_version: str, **_kwargs) -> PlannerResult:
         plan = _knowledge_plan(app_name or "知识库问答", self.settings.dify_default_dataset_ids)
         return PlannerResult(
             plan=plan,

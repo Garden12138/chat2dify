@@ -33,6 +33,7 @@ class FakePlanner(WorkflowPlanner):
         app_name: str | None,
         last_error: str = "",
         tool_selections: list[dict] | None = None,
+        agent_selections: list[dict] | None = None,
     ) -> str:
         self.last_errors.append(last_error)
         if not self.responses:

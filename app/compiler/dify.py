@@ -142,6 +142,8 @@ class DifyDslCompiler:
                 data.update({"title": "", "desc": "", "isInLoop": True})
             case "loop-end":
                 data.update({})
+            case "agent":
+                data.update(_agent_data(node))
             case node_type if node_type in EXTERNAL_DEPENDENCY_NODE_TYPES:
                 data.update(_external_dependency_data(node))
 
@@ -518,6 +520,35 @@ def _external_dependency_data(node: PlanNode) -> dict[str, Any]:
     data.pop("title", None)
     data.pop("desc", None)
     data.pop("selected", None)
+    return data
+
+
+def _agent_data(node: PlanNode) -> dict[str, Any]:
+    raw_data = node.params.get("_raw_data") if isinstance(node.params.get("_raw_data"), dict) else None
+    if raw_data is not None:
+        return _external_dependency_data(node)
+    params = node.params
+    agent_parameters = deepcopy(params.get("agent_parameters") or {})
+    model_input = agent_parameters.get("model") if isinstance(agent_parameters, dict) else None
+    if isinstance(model_input, dict) and isinstance(model_input.get("value"), dict):
+        model_value = model_input["value"]
+        if model_value.get("provider") and model_value.get("model"):
+            model_value.setdefault("model_type", "llm")
+            if model_value.get("model_type") == "llm":
+                model_value.setdefault("mode", "chat")
+                if not isinstance(model_value.get("completion_params"), dict):
+                    model_value["completion_params"] = {}
+    data: dict[str, Any] = {
+        "agent_strategy_provider_name": params.get("agent_strategy_provider_name", ""),
+        "agent_strategy_name": params.get("agent_strategy_name", ""),
+        "agent_strategy_label": params.get("agent_strategy_label", ""),
+        "agent_parameters": agent_parameters,
+        "output_schema": deepcopy(params.get("output_schema") or {}),
+        "tool_node_version": str(params.get("tool_node_version") or "2"),
+    }
+    for optional_key in ("plugin_unique_identifier", "meta", "memory"):
+        if params.get(optional_key) is not None:
+            data[optional_key] = deepcopy(params[optional_key])
     return data
 
 

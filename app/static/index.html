@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>chat2dify</title>
-    <link rel="stylesheet" href="/static/styles.css?v=workbench-20260529">
+    <link rel="stylesheet" href="/static/styles.css?v=workbench-20260604-agents">
   </head>
   <body>
     <header class="app-header">
@@ -65,6 +65,22 @@
           <button id="refresh-tools" type="submit" class="secondary">Refresh tools</button>
           <div id="tools-selected-summary" class="selection-summary"></div>
           <div id="tools-list" class="dataset-list"></div>
+        </form>
+      </section>
+
+      <section class="tool-panel" aria-labelledby="agents-title">
+        <div class="panel-heading">
+          <h2 id="agents-title">Agent Strategies</h2>
+          <span id="agents-status" class="panel-status status-muted">local</span>
+        </div>
+        <form id="agents-form" class="form-stack">
+          <label>
+            Search agent strategies
+            <input id="agents-search" autocomplete="off" placeholder="ReAct, planner, assistant">
+          </label>
+          <button id="refresh-agents" type="submit" class="secondary">Refresh strategies</button>
+          <div id="agents-selected-summary" class="selection-summary"></div>
+          <div id="agents-list" class="dataset-list"></div>
         </form>
       </section>
 
@@ -180,6 +196,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js?v=workbench-20260604-tools" defer></script>
+    <script src="/static/app.js?v=workbench-20260605-agent-query-constant" defer></script>
   </body>
 </html>

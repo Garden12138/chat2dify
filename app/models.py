@@ -132,12 +132,28 @@ class WorkflowToolSelection(BaseModel):
     requires_configuration: bool | None = None
 
 
+class WorkflowAgentSelection(BaseModel):
+    agent_strategy_provider_name: str = Field(min_length=1)
+    agent_strategy_name: str = Field(min_length=1)
+    agent_strategy_label: str | None = None
+    description: str | None = None
+    parameters: list[dict[str, Any]] = Field(default_factory=list)
+    features: list[str] = Field(default_factory=list)
+    output_schema: dict[str, Any] | None = None
+    plugin_id: str | None = None
+    plugin_unique_identifier: str | None = None
+    meta: dict[str, Any] | None = None
+    agent_parameters: dict[str, Any] = Field(default_factory=dict)
+    requires_configuration: bool | None = None
+
+
 class WorkflowRequest(BaseModel):
     message: str = Field(min_length=1)
     app_name: str | None = None
     dry_run: bool = False
     dataset_ids: list[str] | None = None
     tool_selections: list[WorkflowToolSelection] | None = None
+    agent_selections: list[WorkflowAgentSelection] | None = None
 
 
 class WorkflowModifyRequest(BaseModel):
@@ -148,6 +164,7 @@ class WorkflowModifyRequest(BaseModel):
     plan: WorkflowPlan | None = None
     dataset_ids: list[str] | None = None
     tool_selections: list[WorkflowToolSelection] | None = None
+    agent_selections: list[WorkflowAgentSelection] | None = None
 
 
 class WorkflowRunDraftRequest(BaseModel):

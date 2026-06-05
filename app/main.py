@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
 from pathlib import Path
+import re
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -58,12 +59,20 @@ def health() -> dict:
     return {
         "status": "ok",
         "configured_dataset_count": len(settings.dify_default_dataset_ids),
+        "default_model": {
+            "provider": settings.dify_default_model_provider,
+            "name": settings.dify_default_model_name,
+        },
         "dify": {
             "source_dir": settings.dify_source_dir,
             "resolved_source_dir": str(settings.dify_source_path),
             "git_describe": version_info.git_describe,
             "app_dsl_version": version_info.app_dsl_version,
             "configured_dataset_count": len(settings.dify_default_dataset_ids),
+            "default_model": {
+                "provider": settings.dify_default_model_provider,
+                "name": settings.dify_default_model_name,
+            },
         },
     }
 
@@ -106,13 +115,26 @@ def list_dify_tools(
     return asdict(result)
 
 
+@app.get("/api/dify/agent-strategies")
+def list_dify_agent_strategies(keyword: str | None = Query(default=None)) -> dict:
+    settings = load_settings()
+    try:
+        with DifyClient(settings) as client:
+            result = client.list_agent_strategies(keyword=keyword.strip() if keyword else None)
+    except DifyClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return asdict(result)
+
+
 @app.post("/api/workflows/draft")
 def draft_workflow(request: WorkflowRequest) -> dict:
     settings = load_settings()
     effective_settings = _settings_with_request_dataset_ids(settings, request.dataset_ids)
     version_info = read_dify_version_info(settings.dify_source_path)
+    _ensure_agent_strategy_selection_for_request(request.message, request.agent_selections)
+    _ensure_agent_selections_configured(request.agent_selections)
     try:
-        planner_kwargs = {"tool_selections": _tool_selection_payloads(request.tool_selections)} if request.tool_selections else {}
+        planner_kwargs = _planner_selection_kwargs(request)
         planner_result = WorkflowPlanner(effective_settings).generate(
             request.message,
             app_name=request.app_name,
@@ -240,6 +262,8 @@ def run_draft_workflow(request: WorkflowRunDraftRequest) -> dict:
 
 def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:
     settings = load_settings()
+    _ensure_agent_strategy_selection_for_request(request.message, request.agent_selections)
+    _ensure_agent_selections_configured(request.agent_selections)
     effective_settings = _settings_with_request_dataset_ids(settings, request.dataset_ids)
     version_info = read_dify_version_info(settings.dify_source_path)
     compiler = DifyDslCompiler(
@@ -271,12 +295,13 @@ def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:
                     app_name=before_plan.name,
                     default_dataset_ids=effective_settings.dify_default_dataset_ids,
                     tool_selections=_tool_selection_payloads(request.tool_selections),
+                    agent_selections=_agent_selection_payloads(request.agent_selections),
                 )
                 plan = WorkflowPlan.model_validate(normalized.payload)
                 raw_plan = plan.model_dump()
                 planner_metadata = _preview_plan_planner_metadata(normalized.changes)
             else:
-                edit_kwargs = {"tool_selections": _tool_selection_payloads(request.tool_selections)} if request.tool_selections else {}
+                edit_kwargs = _planner_selection_kwargs(request)
                 edit_result = WorkflowEditPlanner(effective_settings).generate(
                     request.message,
                     current_plan=before_plan,
@@ -416,6 +441,135 @@ def _tool_selection_payloads(tool_selections) -> list[dict]:
         elif isinstance(item, dict):
             result.append({key: value for key, value in item.items() if value is not None})
     return result
+
+
+def _agent_selection_payloads(agent_selections) -> list[dict]:
+    result = []
+    for item in agent_selections or []:
+        if hasattr(item, "model_dump"):
+            result.append(item.model_dump(exclude_none=True))
+        elif isinstance(item, dict):
+            result.append({key: value for key, value in item.items() if value is not None})
+    return result
+
+
+def _planner_selection_kwargs(request) -> dict:
+    kwargs: dict = {}
+    tool_selections = _tool_selection_payloads(getattr(request, "tool_selections", None))
+    agent_selections = _agent_selection_payloads(getattr(request, "agent_selections", None))
+    if tool_selections:
+        kwargs["tool_selections"] = tool_selections
+    if agent_selections:
+        kwargs["agent_selections"] = agent_selections
+    return kwargs
+
+
+def _ensure_agent_strategy_selection_for_request(message: str, agent_selections) -> None:
+    if not _message_requests_agent_strategy(message):
+        return
+    if _agent_selection_payloads(agent_selections):
+        return
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "code": "AGENT_STRATEGY_SELECTION_REQUIRED",
+            "message": (
+                "This request asks for an Agent/智能体 workflow, but no Dify Agent Strategy was selected. "
+                "The Web UI Agent panel lists Agent Strategy plugins, not Dify Agent apps. "
+                "Select an installed Agent Strategy plugin first, or rewrite the request to use LLM/Tool nodes."
+            ),
+        },
+    )
+
+
+def _message_requests_agent_strategy(message: str) -> bool:
+    text = (message or "").lower().replace("user agent", "")
+    if any(keyword in text for keyword in ("智能体", "agent strategy", "agent策略", "agent 节点", "agent节点")):
+        return True
+    if any(keyword in text for keyword in ("自主规划", "多步执行")):
+        return True
+    return bool(re.search(r"\bagent\b", text))
+
+
+def _ensure_agent_selections_configured(agent_selections) -> None:
+    payloads = _agent_selection_payloads(agent_selections)
+    issues: list[dict] = []
+    for selection_index, selection in enumerate(payloads):
+        parameters = selection.get("parameters") if isinstance(selection.get("parameters"), list) else []
+        values = selection.get("agent_parameters") if isinstance(selection.get("agent_parameters"), dict) else {}
+        strategy = selection.get("agent_strategy_label") or selection.get("agent_strategy_name") or f"#{selection_index + 1}"
+        for parameter in parameters:
+            if not isinstance(parameter, dict) or not parameter.get("required"):
+                continue
+            name = str(parameter.get("variable") or parameter.get("name") or "").strip()
+            if not name:
+                continue
+            value = values.get(name)
+            if value is None and parameter.get("name") != name:
+                value = values.get(str(parameter.get("name")))
+            parameter_type = str(parameter.get("type") or "").strip()
+            if not _agent_parameter_has_value(value, parameter_type):
+                issues.append(
+                    {
+                        "code": "AGENT_REQUIRED_PARAMETER_MISSING",
+                        "path": f"agent_selections.{selection_index}.agent_parameters.{name}",
+                        "message": f"Agent Strategy {strategy} required parameter is missing: {name}",
+                        "suggestion": "在 Web UI 的 Agent Strategies 面板补齐红色必填项后再创建。",
+                    }
+                )
+                continue
+            if parameter_type == "model-selector" and not _agent_model_selector_has_value(value):
+                issues.append(
+                    {
+                        "code": "AGENT_MODEL_PARAMETER_INVALID",
+                        "path": f"agent_selections.{selection_index}.agent_parameters.{name}",
+                        "message": f"Agent Strategy {strategy} model parameter requires provider and model.",
+                        "suggestion": "模型参数需要类似 {'type':'constant','value':{'provider':'...','model':'...'}} 的值。",
+                    }
+                )
+            if parameter_type == "array[tools]" and not _agent_tools_parameter_has_value(value):
+                issues.append(
+                    {
+                        "code": "AGENT_TOOLS_PARAMETER_MISSING",
+                        "path": f"agent_selections.{selection_index}.agent_parameters.{name}",
+                        "message": f"Agent Strategy {strategy} requires at least one enabled tool.",
+                        "suggestion": "先在 Tools 面板选择并配置工具，再在 Agent Strategy 中绑定工具列表。",
+                    }
+                )
+    if issues:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "AGENT_SELECTION_REQUIRED_PARAMETER_MISSING",
+                "message": "Agent Strategy has missing or invalid required parameters.",
+                "issues": issues,
+            },
+        )
+
+
+def _agent_parameter_has_value(value, parameter_type: str) -> bool:
+    if not isinstance(value, dict):
+        return value not in (None, "", [])
+    raw_value = value.get("value")
+    if parameter_type == "array[tools]":
+        return _agent_tools_parameter_has_value(value)
+    if parameter_type == "model-selector":
+        return _agent_model_selector_has_value(value)
+    return raw_value not in (None, "", [])
+
+
+def _agent_model_selector_has_value(value) -> bool:
+    raw_value = value.get("value") if isinstance(value, dict) else value
+    if not isinstance(raw_value, dict):
+        return False
+    provider = str(raw_value.get("provider") or "").strip()
+    model = str(raw_value.get("model") or raw_value.get("name") or "").strip()
+    return bool(provider and model)
+
+
+def _agent_tools_parameter_has_value(value) -> bool:
+    raw_value = value.get("value") if isinstance(value, dict) else value
+    return isinstance(raw_value, list) and any(isinstance(item, dict) and item.get("enabled", True) for item in raw_value)
 
 
 def _plan_with_dataset_retrieval_settings(

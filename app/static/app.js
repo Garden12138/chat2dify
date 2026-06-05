@@ -5,6 +5,8 @@ const DATASET_SEARCH_KEY = "chat2dify.workbench.datasetSearch.v1";
 const SELECTED_TOOLS_KEY = "chat2dify.workbench.selectedTools.v1";
 const TOOL_SEARCH_KEY = "chat2dify.workbench.toolSearch.v1";
 const TOOL_TYPE_KEY = "chat2dify.workbench.toolType.v1";
+const SELECTED_AGENTS_KEY = "chat2dify.workbench.selectedAgents.v1";
+const AGENT_SEARCH_KEY = "chat2dify.workbench.agentSearch.v1";
 const MAX_HISTORY_ITEMS = 12;
 const DATASET_PAGE_SIZE = 50;
 const DEFAULT_RUN_INPUTS = '{"query":"我要投诉订单配送太慢"}';
@@ -30,6 +32,15 @@ const state = {
     keyword: "",
     providerType: "all",
   },
+  agents: {
+    items: [],
+    selected: [],
+    keyword: "",
+  },
+  defaultModel: {
+    provider: "",
+    name: "",
+  },
 };
 
 const els = {
@@ -54,6 +65,11 @@ const els = {
   toolsType: document.querySelector("#tools-type"),
   toolsList: document.querySelector("#tools-list"),
   toolsSelectedSummary: document.querySelector("#tools-selected-summary"),
+  agentsForm: document.querySelector("#agents-form"),
+  agentsStatus: document.querySelector("#agents-status"),
+  agentsSearch: document.querySelector("#agents-search"),
+  agentsList: document.querySelector("#agents-list"),
+  agentsSelectedSummary: document.querySelector("#agents-selected-summary"),
   modifyForm: document.querySelector("#modify-form"),
   modifyStatus: document.querySelector("#modify-status"),
   runForm: document.querySelector("#run-form"),
@@ -78,10 +94,13 @@ document.addEventListener("DOMContentLoaded", () => {
   state.tools.selected = loadSelectedTools();
   state.tools.keyword = loadToolSearchText();
   state.tools.providerType = loadToolType();
+  state.agents.selected = loadSelectedAgents();
+  state.agents.keyword = loadAgentSearchText();
   els.knowledgeSearch.value = state.datasets.keyword;
   els.knowledgeDatasetIds.value = loadDatasetIdsText();
   els.toolsSearch.value = state.tools.keyword;
   els.toolsType.value = state.tools.providerType;
+  els.agentsSearch.value = state.agents.keyword;
   bindEvents();
   renderHistory();
   renderKnowledgeDatasets();
@@ -89,6 +108,7 @@ document.addEventListener("DOMContentLoaded", () => {
   refreshHealth();
   loadDatasets({ reset: true });
   loadTools();
+  loadAgentStrategies();
   renderResult({});
 });
 
@@ -143,6 +163,31 @@ function bindEvents() {
     const field = event.target.closest("[data-tool-config-key]");
     if (field) {
       handleToolConfigInput(field);
+    }
+  });
+  els.agentsForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    saveAgentSearchText(els.agentsSearch.value);
+    await loadAgentStrategies();
+  });
+  els.agentsSearch.addEventListener("input", () => {
+    saveAgentSearchText(els.agentsSearch.value);
+  });
+  els.agentsList.addEventListener("change", (event) => {
+    const checkbox = event.target.closest("input[type='checkbox'][data-agent-key]");
+    if (checkbox) {
+      toggleAgentSelection(checkbox.dataset.agentKey, checkbox.checked);
+      return;
+    }
+    const field = event.target.closest("[data-agent-config-key]");
+    if (field) {
+      handleAgentConfigInput(field);
+    }
+  });
+  els.agentsList.addEventListener("input", (event) => {
+    const field = event.target.closest("[data-agent-config-key]");
+    if (field) {
+      handleAgentConfigInput(field);
     }
   });
 
@@ -203,6 +248,15 @@ async function refreshHealth() {
     const data = await requestJson("/health");
     const version = data?.dify?.app_dsl_version || "unknown";
     const source = data?.dify?.git_describe || "source";
+    const defaultModel = data?.default_model || data?.dify?.default_model || {};
+    const modelProvider = defaultModel.provider || "";
+    const modelName = defaultModel.name || defaultModel.model || "";
+    if (modelProvider || modelName) {
+      state.defaultModel = { provider: modelProvider, name: modelName };
+      state.agents.selected = uniqueAgents(state.agents.selected);
+      saveSelectedAgents();
+      renderAgentStrategies();
+    }
     const datasetCount = data?.configured_dataset_count ?? data?.dify?.configured_dataset_count;
     const datasetSuffix = datasetCount !== undefined ? ` · datasets ${datasetCount}` : "";
     els.healthStatus.textContent = `Healthy · DSL ${version} · ${source}${datasetSuffix}`;
@@ -387,6 +441,154 @@ function renderTools(errorMessage = "") {
   );
 }
 
+async function loadAgentStrategies() {
+  const params = new URLSearchParams();
+  const keyword = els.agentsSearch.value.trim();
+  if (keyword) {
+    params.set("keyword", keyword);
+  }
+
+  try {
+    setPanelStatus(els.agentsStatus, "Loading", "muted");
+    const suffix = params.toString() ? `?${params.toString()}` : "";
+    const data = await requestJson(`/api/dify/agent-strategies${suffix}`);
+    state.agents.items = Array.isArray(data.data) ? data.data : [];
+    hydrateSelectedAgentsFromLoaded();
+    state.agents.keyword = keyword;
+    renderAgentStrategies();
+    setPanelStatus(els.agentsStatus, `${data.count ?? state.agents.items.length} found`, "ok");
+  } catch (error) {
+    state.agents.items = [];
+    renderAgentStrategies(error.message);
+    setPanelStatus(els.agentsStatus, "List failed", "error");
+  }
+}
+
+function renderAgentStrategies(errorMessage = "") {
+  const loadedCount = state.agents.items.length;
+  const selectedCount = currentAgentSelections().length;
+  els.agentsSelectedSummary.textContent = [
+    `${selectedCount} selected`,
+    loadedCount ? `${loadedCount} loaded` : "",
+  ].filter(Boolean).join(" · ");
+
+  if (errorMessage) {
+    els.agentsList.replaceChildren(renderMessageRow({ tone: "error", text: errorMessage }));
+    return;
+  }
+  if (state.agents.items.length === 0) {
+    if (state.agents.selected.length === 0) {
+      els.agentsList.replaceChildren(emptyState("No agent strategies loaded."));
+      return;
+    }
+    els.agentsList.replaceChildren(
+      renderMessageRow({
+        tone: "warning",
+        text: "Saved Agent Strategy selections are not available in the current Dify list, so they will not be sent. Refresh strategies or clear the search.",
+      }),
+      ...state.agents.selected.map((agent) => agentOption(agent, false))
+    );
+    return;
+  }
+  const selectedKeys = new Set(state.agents.selected.map(agentKey));
+  const renderedAgents = uniqueAgents([...state.agents.selected, ...state.agents.items]);
+  els.agentsList.replaceChildren(
+    ...renderedAgents.map((agent) => agentOption(agent, selectedKeys.has(agentKey(agent))))
+  );
+}
+
+function agentOption(agent, checked) {
+  const key = agentKey(agent);
+  const configuredAgent = checked ? selectedAgentByKey(key) || compactAgentSelection(agent) : compactAgentSelection(agent);
+  const label = document.createElement("div");
+  label.className = `dataset-option tool-option${checked ? " is-selected" : ""}`;
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = checked;
+  checkbox.dataset.agentKey = key;
+
+  const body = document.createElement("span");
+  body.className = "dataset-option-body";
+  const name = document.createElement("span");
+  name.className = "dataset-name";
+  name.textContent = agent.agent_strategy_label || agent.agent_strategy_name;
+  const meta = document.createElement("span");
+  meta.className = "dataset-meta";
+  meta.textContent = agentMeta(agent);
+  const description = document.createElement("span");
+  description.className = "dataset-description";
+  description.textContent = agent.description || agent.agent_strategy_provider_name;
+  body.append(name, meta, description);
+  if (checked) {
+    body.append(agentConfigurationPanel(configuredAgent));
+  }
+  label.append(checkbox, body);
+  return label;
+}
+
+function agentMeta(agent) {
+  const outputProperties = agent.output_schema?.properties && typeof agent.output_schema.properties === "object"
+    ? Object.keys(agent.output_schema.properties).length
+    : 0;
+  return [
+    agent.agent_strategy_provider_name,
+    Array.isArray(agent.parameters) ? `${agent.parameters.length} params` : "",
+    outputProperties ? `${outputProperties} outputs` : "",
+    agent.requires_configuration ? "needs config" : "",
+  ].filter(Boolean).join(" · ") || "agent";
+}
+
+function agentConfigurationPanel(agent) {
+  const panel = document.createElement("div");
+  panel.className = "tool-config";
+  if (agent.requires_configuration) {
+    panel.append(renderMessageRow({ tone: "warning", text: "This Agent Strategy has required parameters. Configure them before creating a workflow." }));
+  }
+  const parameters = Array.isArray(agent.parameters) ? agent.parameters : [];
+  const section = document.createElement("div");
+  section.className = "tool-config-section";
+  const heading = document.createElement("div");
+  heading.className = "tool-config-heading";
+  heading.textContent = `Agent parameters · ${parameters.length || 0}`;
+  section.append(heading);
+  if (!parameters.length) {
+    section.append(emptyState("No agent parameters."));
+  } else {
+    section.append(...parameters.map((schema) => agentConfigField(agent, schema)));
+  }
+  panel.append(section);
+  return panel;
+}
+
+function agentConfigField(agent, schema) {
+  const variable = schemaVariable(schema);
+  const key = agentKey(agent);
+  const value = agent.agent_parameters?.[variable] || defaultAgentInputForSchema(schema);
+  const row = document.createElement("div");
+  row.className = `tool-config-field${schema.required && !agentInputHasValue(value, schema) ? " is-missing" : ""}`;
+
+  const label = document.createElement("div");
+  label.className = "tool-config-label";
+  label.textContent = `${localizedLabel(schema.label) || variable}${schema.required ? " *" : ""}`;
+  const meta = document.createElement("div");
+  meta.className = "tool-config-meta";
+  meta.textContent = [
+    variable,
+    schema.type || "text-input",
+    schema.default !== undefined && schema.default !== null && schema.default !== "" ? `default ${String(schema.default)}` : "",
+  ].filter(Boolean).join(" · ");
+  const controls = document.createElement("div");
+  controls.className = "tool-config-controls";
+  if (agentParameterIsToolSelector(schema)) {
+    controls.append(agentToolSelectorControl(key, variable, value, schema));
+  } else {
+    controls.append(agentConfigModeControl(key, variable, value, schema));
+    controls.append(agentConfigValueControl(key, variable, value, schema));
+  }
+  row.append(label, meta, controls);
+  return row;
+}
+
 function toolOption(tool, checked) {
   const key = toolKey(tool);
   const configuredTool = checked ? selectedToolByKey(key) || compactToolSelection(tool) : compactToolSelection(tool);
@@ -541,6 +743,110 @@ function toolConfigValueControl(key, group, variable, value, schema) {
   return control;
 }
 
+function agentConfigModeControl(key, variable, value, schema) {
+  const select = document.createElement("select");
+  select.className = "tool-config-mode";
+  select.dataset.agentConfigKey = key;
+  select.dataset.agentParamName = variable;
+  select.dataset.agentParamPart = "type";
+  select.dataset.agentParamSchemaType = String(schema.type || "text-input");
+  const modes = agentAllowedValueTypes(schema);
+  for (const mode of modes) {
+    const option = document.createElement("option");
+    option.value = mode;
+    option.textContent = mode;
+    select.append(option);
+  }
+  select.value = modes.includes(value?.type) ? value.type : modes[0];
+  return select;
+}
+
+function agentConfigValueControl(key, variable, value, schema) {
+  const type = value?.type || defaultAgentValueType(schema);
+  const schemaType = normalizedSchemaType(schema);
+  const options = Array.isArray(schema.options) ? schema.options : [];
+  let control;
+  if (type === "constant" && schemaType === "boolean") {
+    control = document.createElement("select");
+    for (const item of [
+      ["true", "True"],
+      ["false", "False"],
+    ]) {
+      const option = document.createElement("option");
+      option.value = item[0];
+      option.textContent = item[1];
+      control.append(option);
+    }
+    control.value = String(Boolean(value?.value));
+  } else if (type === "constant" && options.length) {
+    control = document.createElement("select");
+    for (const item of options) {
+      const option = document.createElement("option");
+      option.value = String(item.value ?? "");
+      option.textContent = localizedLabel(item.label) || String(item.value ?? "");
+      control.append(option);
+    }
+    control.value = String(value?.value ?? "");
+  } else {
+    control = document.createElement("input");
+    control.type = type === "constant" && isNumberSchema(schema) ? "number" : "text";
+    control.placeholder = agentValuePlaceholder(type, schema);
+    control.value = toolValueToDisplay(value, schema);
+  }
+  control.className = "tool-config-value";
+  control.dataset.agentConfigKey = key;
+  control.dataset.agentParamName = variable;
+  control.dataset.agentParamPart = "value";
+  control.dataset.agentParamSchemaType = String(schema.type || "text-input");
+  return control;
+}
+
+function agentToolSelectorControl(key, variable, value, schema) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "tool-selector-control";
+  const selectedTools = currentToolSelections();
+  if (!selectedTools.length) {
+    wrapper.append(renderMessageRow({ tone: "warning", text: "Select and configure at least one Tool before binding this Agent parameter." }));
+    return wrapper;
+  }
+
+  if (agentParameterIsMultiToolSelector(schema)) {
+    selectedTools.forEach((tool) => {
+      const optionLabel = document.createElement("label");
+      optionLabel.className = "checkbox-line compact-checkbox";
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.dataset.agentConfigKey = key;
+      checkbox.dataset.agentParamName = variable;
+      checkbox.dataset.agentParamPart = "tool";
+      checkbox.dataset.agentToolKey = toolKey(tool);
+      checkbox.checked = agentToolValueIncludes(value, tool);
+      optionLabel.append(checkbox, document.createTextNode(tool.tool_label || tool.tool_name));
+      wrapper.append(optionLabel);
+    });
+    return wrapper;
+  }
+
+  const select = document.createElement("select");
+  select.className = "tool-config-value";
+  select.dataset.agentConfigKey = key;
+  select.dataset.agentParamName = variable;
+  select.dataset.agentParamPart = "tool";
+  const empty = document.createElement("option");
+  empty.value = "";
+  empty.textContent = "Select tool";
+  select.append(empty);
+  for (const tool of selectedTools) {
+    const option = document.createElement("option");
+    option.value = toolKey(tool);
+    option.textContent = tool.tool_label || tool.tool_name;
+    select.append(option);
+  }
+  select.value = agentSingleToolKey(value) || "";
+  wrapper.append(select);
+  return wrapper;
+}
+
 function toggleToolSelection(key, selected) {
   if (!key) {
     return;
@@ -552,6 +858,9 @@ function toggleToolSelection(key, selected) {
     }
   } else {
     state.tools.selected = state.tools.selected.filter((item) => toolKey(item) !== key);
+    state.agents.selected = state.agents.selected.map((agent) => pruneAgentToolBindings(agent, key));
+    saveSelectedAgents();
+    renderAgentStrategies();
   }
   saveSelectedTools();
   renderTools();
@@ -595,6 +904,65 @@ function handleToolConfigInput(field) {
   markModifyPreviewDirty();
 }
 
+function toggleAgentSelection(key, selected) {
+  if (!key) {
+    return;
+  }
+  if (selected) {
+    const agent = state.agents.items.find((item) => agentKey(item) === key);
+    if (agent) {
+      state.agents.selected = uniqueAgents([...state.agents.selected, compactAgentSelection(agent)]);
+    }
+  } else {
+    state.agents.selected = state.agents.selected.filter((item) => agentKey(item) !== key);
+  }
+  saveSelectedAgents();
+  renderAgentStrategies();
+  markModifyPreviewDirty();
+}
+
+function handleAgentConfigInput(field) {
+  const key = field.dataset.agentConfigKey;
+  const name = field.dataset.agentParamName;
+  const part = field.dataset.agentParamPart;
+  if (!key || !name || !part) {
+    return;
+  }
+  const agent = selectedAgentByKey(key);
+  if (!agent) {
+    return;
+  }
+  const schema = (agent.parameters || []).find((item) => schemaVariable(item) === name) || { name, type: field.dataset.agentParamSchemaType };
+  if (!agent.agent_parameters || typeof agent.agent_parameters !== "object") {
+    agent.agent_parameters = {};
+  }
+  const current = agent.agent_parameters[name] || defaultAgentInputForSchema(schema) || { type: defaultAgentValueType(schema), value: "" };
+  if (part === "type") {
+    const nextType = field.value;
+    agent.agent_parameters[name] = {
+      type: nextType,
+      value: defaultValueForToolInputType(nextType, schema, "agent_parameters"),
+    };
+    saveSelectedAgents();
+    renderAgentStrategies();
+    markModifyPreviewDirty();
+    return;
+  }
+  if (part === "tool") {
+    agent.agent_parameters[name] = nextAgentToolSelectorValue(field, current, schema);
+    saveSelectedAgents();
+    renderAgentStrategies();
+    markModifyPreviewDirty();
+    return;
+  }
+  agent.agent_parameters[name] = {
+    type: current.type || defaultAgentValueType(schema),
+    value: parseToolConfigValue(field.value, current.type || defaultAgentValueType(schema), schema),
+  };
+  saveSelectedAgents();
+  markModifyPreviewDirty();
+}
+
 function hydrateSelectedToolsFromLoaded() {
   if (!state.tools.selected.length || !state.tools.items.length) {
     return;
@@ -613,8 +981,29 @@ function hydrateSelectedToolsFromLoaded() {
   saveSelectedTools();
 }
 
+function hydrateSelectedAgentsFromLoaded() {
+  if (!state.agents.selected.length || !state.agents.items.length) {
+    return;
+  }
+  state.agents.selected = uniqueAgents(state.agents.selected.map((selected) => {
+    const latest = state.agents.items.find((item) => agentKey(item) === agentKey(selected));
+    if (!latest) {
+      return selected;
+    }
+    return {
+      ...latest,
+      agent_parameters: selected.agent_parameters || {},
+    };
+  }));
+  saveSelectedAgents();
+}
+
 function selectedToolByKey(key) {
   return state.tools.selected.find((tool) => toolKey(tool) === key);
+}
+
+function selectedAgentByKey(key) {
+  return state.agents.selected.find((agent) => agentKey(agent) === key);
 }
 
 function schemaVariable(schema = {}) {
@@ -721,8 +1110,19 @@ function parseToolConfigValue(value, type, schema) {
     return normalizeSelectorValue(value);
   }
   if (type === "constant") {
-    if (normalizedSchemaType(schema) === "boolean") {
+    const schemaType = normalizedSchemaType(schema);
+    if (schemaType === "boolean") {
       return String(value).toLowerCase() === "true" || value === true || value === 1;
+    }
+    if (schemaType === "model-selector" || schemaType === "app-selector") {
+      if (value && typeof value === "object") {
+        return value;
+      }
+      try {
+        return JSON.parse(String(value || "{}"));
+      } catch (error) {
+        return value;
+      }
     }
     if (isNumberSchema(schema) && value !== "") {
       const parsed = Number(value);
@@ -742,6 +1142,9 @@ function toolValueToDisplay(value, schema) {
   }
   if (value.type === "constant" && normalizedSchemaType(schema) === "boolean") {
     return String(Boolean(value.value));
+  }
+  if (value.value && typeof value.value === "object") {
+    return JSON.stringify(value.value);
   }
   return value.value === undefined || value.value === null ? "" : String(value.value);
 }
@@ -792,6 +1195,248 @@ function toolInputHasValue(value) {
   return !(Array.isArray(value.value) && value.value.length === 0);
 }
 
+function agentAllowedValueTypes(schema) {
+  const type = normalizedSchemaType(schema);
+  if (type === "model-selector" || type === "app-selector") {
+    return ["constant"];
+  }
+  if (type === "any" || type === "file" || type === "files") {
+    return ["variable", "constant", "mixed"];
+  }
+  if (["boolean", "checkbox", "select", "number", "number-input", "text-number"].includes(type)) {
+    return ["constant", "variable", "mixed"];
+  }
+  return ["mixed", "variable", "constant"];
+}
+
+function defaultAgentValueType(schema) {
+  const type = normalizedSchemaType(schema);
+  if (type === "model-selector" || type === "app-selector") {
+    return "constant";
+  }
+  if (type === "any" || type === "file" || type === "files") {
+    return "variable";
+  }
+  if (["boolean", "checkbox", "select", "number", "number-input", "text-number"].includes(type)) {
+    return "constant";
+  }
+  return "constant";
+}
+
+function defaultAgentInputForSchema(schema) {
+  const variable = schemaVariable(schema);
+  const type = normalizedSchemaType(schema);
+  if (type === "model-selector" && state.defaultModel.provider && state.defaultModel.name) {
+    return {
+      type: "constant",
+      value: {
+        provider: state.defaultModel.provider,
+        model: state.defaultModel.name,
+        model_type: "llm",
+        mode: "chat",
+        completion_params: {},
+      },
+    };
+  }
+  const defaultValue = schema.default;
+  if (defaultValue !== undefined && defaultValue !== null && defaultValue !== "") {
+    return normalizeAgentInputValue(defaultValue, schema);
+  }
+  const options = Array.isArray(schema.options) ? schema.options : [];
+  if (schema.required && options.length && options[0]?.value !== undefined && options[0]?.value !== "") {
+    return normalizeAgentInputValue(options[0].value, schema);
+  }
+  if (agentParameterIsToolSelector(schema)) {
+    const tools = currentToolSelections();
+    if (!tools.length) {
+      return { type: "constant", value: agentParameterIsMultiToolSelector(schema) ? [] : null };
+    }
+    return {
+      type: "constant",
+      value: agentParameterIsMultiToolSelector(schema)
+        ? tools.map(agentToolValueFromSelection)
+        : agentToolValueFromSelection(tools[0]),
+    };
+  }
+  if (schema.required && variable === "instruction") {
+    return {
+      type: "constant",
+      value: "你是售后分析智能体。请基于用户输入和已绑定工具的结果进行多步分析，识别售后问题类型、关键信息、风险等级和处理建议；不要编造未查询到的信息；最终给出清晰、可执行、礼貌的售后处理建议。",
+    };
+  }
+  if (schema.required && isQueryLikeToolParameter(variable)) {
+    return { type: "constant", value: DEFAULT_TOOL_QUERY_TEMPLATE };
+  }
+  return null;
+}
+
+function normalizeAgentInputValue(value, schema) {
+  if (value && typeof value === "object" && "type" in value && "value" in value) {
+    return {
+      type: value.type || defaultAgentValueType(schema),
+      value: value.type === "variable" ? normalizeSelectorValue(value.value) : value.value,
+    };
+  }
+  const type = defaultAgentValueType(schema);
+  return {
+    type,
+    value: parseToolConfigValue(value, type, schema),
+  };
+}
+
+function agentValuePlaceholder(type, schema) {
+  if (normalizedSchemaType(schema) === "model-selector") {
+    return state.defaultModel.provider && state.defaultModel.name
+      ? JSON.stringify({
+          provider: state.defaultModel.provider,
+          model: state.defaultModel.name,
+          model_type: "llm",
+          mode: "chat",
+          completion_params: {},
+        })
+      : '{"provider":"...","model":"...","model_type":"llm","mode":"chat","completion_params":{}}';
+  }
+  if (type === "variable") {
+    return "start.query";
+  }
+  if (type === "mixed") {
+    return isQueryLikeToolParameter(schemaVariable(schema)) ? DEFAULT_TOOL_QUERY_TEMPLATE : "constant text or {{#start.query#}}";
+  }
+  return schema.default !== undefined && schema.default !== null ? String(schema.default) : "constant value";
+}
+
+function agentInputHasValue(value, schema) {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  if (normalizedSchemaType(schema) === "model-selector") {
+    return Boolean(
+      value.value
+      && typeof value.value === "object"
+      && value.value.provider
+      && (value.value.model || value.value.name)
+    );
+  }
+  if (agentParameterIsToolSelector(schema)) {
+    if (agentParameterIsMultiToolSelector(schema)) {
+      return Array.isArray(value.value) && value.value.length > 0;
+    }
+    return Boolean(value.value && typeof value.value === "object");
+  }
+  return toolInputHasValue(value);
+}
+
+function agentParameterIsToolSelector(schema = {}) {
+  return ["tool-selector", "multi-tool-selector", "array[tools]"].includes(normalizedSchemaType(schema));
+}
+
+function agentParameterIsMultiToolSelector(schema = {}) {
+  return ["multi-tool-selector", "array[tools]"].includes(normalizedSchemaType(schema));
+}
+
+function nextAgentToolSelectorValue(field, current, schema) {
+  const tools = currentToolSelections();
+  if (agentParameterIsMultiToolSelector(schema)) {
+    const currentValues = Array.isArray(current?.value) ? current.value : [];
+    const byKey = new Map(currentValues.map((tool) => [agentToolKeyFromValue(tool), tool]));
+    const selectedTool = tools.find((tool) => toolKey(tool) === field.dataset.agentToolKey);
+    if (field.checked && selectedTool) {
+      byKey.set(toolKey(selectedTool), agentToolValueFromSelection(selectedTool));
+    } else {
+      byKey.delete(field.dataset.agentToolKey || "");
+    }
+    return { type: "constant", value: Array.from(byKey.values()) };
+  }
+  const selectedTool = tools.find((tool) => toolKey(tool) === field.value);
+  return { type: "constant", value: selectedTool ? agentToolValueFromSelection(selectedTool) : null };
+}
+
+function agentToolValueFromSelection(tool = {}) {
+  const schemas = Array.isArray(tool.parameters) ? tool.parameters : [];
+  return {
+    enabled: true,
+    type: tool.provider_type || "builtin",
+    provider_name: tool.provider_id || tool.provider_name || "",
+    provider_id: tool.provider_id || "",
+    tool_name: tool.tool_name || "",
+    tool_label: tool.tool_label || tool.tool_name || "",
+    tool_description: tool.description || "",
+    plugin_unique_identifier: tool.plugin_unique_identifier || undefined,
+    credential_id: tool.credential_id || undefined,
+    schemas,
+    settings: wrapAgentToolSettings(tool.tool_configurations || {}, schemas),
+    parameters: wrapAgentToolParameters(tool.tool_parameters || {}, schemas),
+    output_schema: tool.output_schema && typeof tool.output_schema === "object" ? tool.output_schema : {},
+  };
+}
+
+function wrapAgentToolSettings(values, schemas) {
+  const result = {};
+  schemas.filter((schema) => schemaForm(schema) !== "llm").forEach((schema) => {
+    const variable = schemaVariable(schema);
+    const value = values[variable] || defaultToolInputForSchema(schema, "tool_configurations");
+    if (value) {
+      result[variable] = { value };
+    }
+  });
+  Object.entries(values || {}).forEach(([key, value]) => {
+    if (!result[key]) {
+      result[key] = { value };
+    }
+  });
+  return result;
+}
+
+function wrapAgentToolParameters(values, schemas) {
+  const result = {};
+  schemas.filter((schema) => schemaForm(schema) === "llm").forEach((schema) => {
+    const variable = schemaVariable(schema);
+    const value = values[variable] || defaultToolInputForSchema(schema, "tool_parameters");
+    if (value) {
+      result[variable] = { auto: 0, value };
+    }
+  });
+  Object.entries(values || {}).forEach(([key, value]) => {
+    if (!result[key]) {
+      result[key] = { auto: 0, value };
+    }
+  });
+  return result;
+}
+
+function agentToolValueIncludes(value, tool) {
+  if (!value || !Array.isArray(value.value)) {
+    return false;
+  }
+  return value.value.some((item) => agentToolKeyFromValue(item) === toolKey(tool));
+}
+
+function agentSingleToolKey(value) {
+  return value?.value && typeof value.value === "object" ? agentToolKeyFromValue(value.value) : "";
+}
+
+function agentToolKeyFromValue(value = {}) {
+  return [value.type || "", value.provider_name || value.provider_id || "", value.tool_name || ""].join("::");
+}
+
+function pruneAgentToolBindings(agent, removedToolKey) {
+  if (!agent?.agent_parameters || typeof agent.agent_parameters !== "object") {
+    return agent;
+  }
+  const next = compactAgentSelection(agent);
+  for (const [name, value] of Object.entries(next.agent_parameters || {})) {
+    if (Array.isArray(value?.value)) {
+      next.agent_parameters[name] = {
+        ...value,
+        value: value.value.filter((item) => agentToolKeyFromValue(item) !== removedToolKey),
+      };
+    } else if (value?.value && typeof value.value === "object" && agentToolKeyFromValue(value.value) === removedToolKey) {
+      next.agent_parameters[name] = { ...value, value: null };
+    }
+  }
+  return next;
+}
+
 async function handleCreate() {
   await withBusy(els.createForm, els.createStatus, "Creating", async () => {
     const payload = {
@@ -799,7 +1444,9 @@ async function handleCreate() {
       app_name: optionalValue("#create-app-name"),
       dataset_ids: currentDatasetIds(),
       tool_selections: currentToolSelections(),
+      agent_selections: currentAgentSelections(),
     };
+    ensureAgentSelectionReady(payload.message, payload.agent_selections);
     const data = await requestJson("/api/workflows/create", {
       method: "POST",
       body: payload,
@@ -827,7 +1474,9 @@ async function handleModify(path, mode) {
       allow_destructive: document.querySelector("#modify-allow-destructive").checked,
       dataset_ids: currentDatasetIds(),
       tool_selections: currentToolSelections(),
+      agent_selections: currentAgentSelections(),
     };
+    ensureAgentSelectionReady(payload.message, payload.agent_selections);
     const data = await requestJson(path, {
       method: "POST",
       body: payload,
@@ -874,6 +1523,7 @@ async function handleReviewedPreviewApply() {
       plan: state.modifyPreview.plan,
       dataset_ids: state.modifyPreview.dataset_ids,
       tool_selections: state.modifyPreview.tool_selections,
+      agent_selections: state.modifyPreview.agent_selections,
     };
     const data = await requestJson("/api/workflows/modify/apply", {
       method: "POST",
@@ -1322,6 +1972,17 @@ function nodeDetails(node) {
       nodeLine("Outputs", externalOutputSummary(params)),
     ];
   }
+  if (node.type === "agent" && !params._raw_data) {
+    const agentParameters = params.agent_parameters && typeof params.agent_parameters === "object" ? params.agent_parameters : {};
+    const schemas = Array.isArray(params.parameters) ? params.parameters : [];
+    return [
+      nodeLine("Provider", params.agent_strategy_provider_name || "not configured"),
+      nodeLine("Strategy", params.agent_strategy_label || params.agent_strategy_name || "not configured"),
+      nodeLine("Parameters", toolBindingSummary(agentParameters)),
+      nodeLine("Schema", schemas.map((item) => `${item.name || item.variable}:${item.type || "text-input"}${item.required ? "*" : ""}`).join(", ") || "from Dify strategy"),
+      nodeLine("Outputs", externalOutputSummary(params)),
+    ];
+  }
   if (isExternalDependencyNode(node.type)) {
     const raw = params._raw_data || params;
     return [
@@ -1537,6 +2198,7 @@ function currentModifyPayload() {
     allow_destructive: document.querySelector("#modify-allow-destructive").checked,
     dataset_ids: currentDatasetIds(),
     tool_selections: currentToolSelections(),
+    agent_selections: currentAgentSelections(),
   };
 }
 
@@ -1554,6 +2216,7 @@ function storeModifyPreview(data, payload) {
     plan: data.plan,
     dataset_ids: payload.dataset_ids || [],
     tool_selections: payload.tool_selections || [],
+    agent_selections: payload.agent_selections || [],
   };
   state.modifyPreviewDirty = false;
 }
@@ -1569,7 +2232,8 @@ function modifyPreviewMatches(payload) {
     payload.expected_hash === preview.base_hash &&
     payload.allow_destructive === preview.allow_destructive &&
     datasetIdsEqual(payload.dataset_ids || [], preview.dataset_ids || []) &&
-    toolSelectionsEqual(payload.tool_selections || [], preview.tool_selections || [])
+    toolSelectionsEqual(payload.tool_selections || [], preview.tool_selections || []) &&
+    agentSelectionsEqual(payload.agent_selections || [], preview.agent_selections || [])
   );
 }
 
@@ -1672,6 +2336,31 @@ function saveToolType(value) {
   localStorage.setItem(TOOL_TYPE_KEY, value || "all");
 }
 
+function loadSelectedAgents() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SELECTED_AGENTS_KEY) || "[]");
+    return Array.isArray(parsed) ? uniqueAgents(parsed) : [];
+  } catch (error) {
+    return [];
+  }
+}
+
+function saveSelectedAgents() {
+  localStorage.setItem(SELECTED_AGENTS_KEY, JSON.stringify(uniqueAgents(state.agents.selected)));
+}
+
+function loadAgentSearchText() {
+  try {
+    return localStorage.getItem(AGENT_SEARCH_KEY) || "";
+  } catch (error) {
+    return "";
+  }
+}
+
+function saveAgentSearchText(value) {
+  localStorage.setItem(AGENT_SEARCH_KEY, value || "");
+}
+
 function currentDatasetIds() {
   return uniqueDatasetIds([
     ...state.datasets.selectedIds,
@@ -1681,6 +2370,38 @@ function currentDatasetIds() {
 
 function currentToolSelections() {
   return uniqueTools(state.tools.selected);
+}
+
+function currentAgentSelections() {
+  const selected = uniqueAgents(state.agents.selected);
+  if (!state.agents.items.length) {
+    return [];
+  }
+  const loadedKeys = new Set(state.agents.items.map(agentKey));
+  return selected.filter((agent) => loadedKeys.has(agentKey(agent)));
+}
+
+function ensureAgentSelectionReady(message, agentSelections) {
+  if (!messageRequestsAgentStrategy(message) || agentSelections.length) {
+    return;
+  }
+  throw new Error(
+    "This request asks for Agent/智能体, but no Dify Agent Strategy is selected. The Agent Strategies panel lists strategy plugins, not Dify Agent apps. Select an installed strategy plugin first, or rewrite the request to use LLM/Tool nodes."
+  );
+}
+
+function messageRequestsAgentStrategy(message) {
+  const text = String(message || "").toLowerCase().replaceAll("user agent", "");
+  return (
+    text.includes("智能体") ||
+    text.includes("agent strategy") ||
+    text.includes("agent策略") ||
+    text.includes("agent 节点") ||
+    text.includes("agent节点") ||
+    text.includes("自主规划") ||
+    text.includes("多步执行") ||
+    /\bagent\b/.test(text)
+  );
 }
 
 function compactToolSelection(tool = {}) {
@@ -1702,6 +2423,73 @@ function compactToolSelection(tool = {}) {
     is_team_authorization: item.is_team_authorization,
     requires_configuration: Boolean(item.requires_configuration),
   };
+}
+
+function compactAgentSelection(agent = {}) {
+  const item = agent || {};
+  const parameters = Array.isArray(item.parameters) ? item.parameters : [];
+  return {
+    agent_strategy_provider_name: item.agent_strategy_provider_name,
+    agent_strategy_name: item.agent_strategy_name,
+    agent_strategy_label: item.agent_strategy_label,
+    description: item.description,
+    parameters,
+    features: Array.isArray(item.features) ? item.features : [],
+    output_schema: item.output_schema && typeof item.output_schema === "object" ? item.output_schema : {},
+    plugin_id: item.plugin_id || undefined,
+    plugin_unique_identifier: item.plugin_unique_identifier || undefined,
+    meta: item.meta && typeof item.meta === "object" ? item.meta : undefined,
+    agent_parameters: configuredAgentValues(parameters, item.agent_parameters),
+    requires_configuration: Boolean(item.requires_configuration),
+  };
+}
+
+function configuredAgentValues(parameters, current) {
+  const configured = current && typeof current === "object" ? { ...current } : {};
+  for (const schema of parameters) {
+    const variable = schemaVariable(schema);
+    if (!variable) {
+      continue;
+    }
+    if (normalizedSchemaType(schema) === "model-selector" && configured[variable]?.value) {
+      const model = configured[variable].value;
+      if (model && typeof model === "object" && model.provider && (model.model || model.name)) {
+        configured[variable] = {
+          type: "constant",
+          value: {
+            ...model,
+            model: model.model || model.name,
+            model_type: model.model_type || "llm",
+            mode: model.mode || "chat",
+            completion_params: model.completion_params && typeof model.completion_params === "object"
+              ? model.completion_params
+              : {},
+          },
+        };
+      }
+    }
+    if (toolSchemaUsesMixedText(schema) && configured[variable]?.type === "variable") {
+      const selector = normalizeSelectorValue(configured[variable].value);
+      configured[variable] = {
+        type: "constant",
+        value: selector.length ? `{{#${selector.join(".")}#}}` : DEFAULT_TOOL_QUERY_TEMPLATE,
+      };
+    }
+    if (toolSchemaUsesMixedText(schema) && configured[variable]?.type === "mixed") {
+      configured[variable] = {
+        type: "constant",
+        value: configured[variable].value,
+      };
+    }
+    if (configured[variable] && agentInputHasValue(configured[variable], schema)) {
+      continue;
+    }
+    const value = defaultAgentInputForSchema(schema);
+    if (value) {
+      configured[variable] = value;
+    }
+  }
+  return configured;
 }
 
 function configuredToolValues(parameters, current, group) {
@@ -1743,6 +2531,24 @@ function toolKey(tool) {
   return [tool?.provider_type || "", tool?.provider_id || "", tool?.tool_name || ""].join("::");
 }
 
+function uniqueAgents(agents) {
+  const seen = new Set();
+  return (agents || [])
+    .map(compactAgentSelection)
+    .filter((agent) => {
+      const key = agentKey(agent);
+      if (!agent.agent_strategy_provider_name || !agent.agent_strategy_name || seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+}
+
+function agentKey(agent) {
+  return [agent?.agent_strategy_provider_name || "", agent?.agent_strategy_name || ""].join("::");
+}
+
 function parseDatasetIds(value) {
   return uniqueDatasetIds(String(value || "")
     .split(/[\n,]/)
@@ -1768,6 +2574,10 @@ function datasetIdsEqual(left, right) {
 
 function toolSelectionsEqual(left, right) {
   return JSON.stringify(uniqueTools(left || [])) === JSON.stringify(uniqueTools(right || []));
+}
+
+function agentSelectionsEqual(left, right) {
+  return JSON.stringify(uniqueAgents(left || [])) === JSON.stringify(uniqueAgents(right || []));
 }
 
 function rememberApp(data, meta = {}) {

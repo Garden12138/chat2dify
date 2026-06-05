@@ -125,6 +125,13 @@ those explicit bindings are sent in `tool_selections[].tool_parameters` and
 `tool_selections[].tool_configurations` and take precedence over LLM-generated
 values.
 
+Agent nodes require Agent Strategy plugins that are already installed and
+configured in Dify. Use the Web UI Agents panel to search and select strategies,
+then configure their required parameters. If a strategy parameter requires a
+Tool, bind one of the tools already selected in the Tools panel. Only selected
+agent strategies are exposed to the planner; chat2dify does not install plugins,
+edit credentials, or create Agent Roster records.
+
 ## Run
 
 ```bash
@@ -164,6 +171,12 @@ List installed Dify tools for the Web UI selector:
 curl 'http://127.0.0.1:8000/api/dify/tools?keyword=search&provider_type=all'
 ```
 
+List installed Dify Agent Strategies for the Web UI selector:
+
+```bash
+curl 'http://127.0.0.1:8000/api/dify/agent-strategies?keyword=react'
+```
+
 Draft a workflow without importing it:
 
 ```bash
@@ -192,6 +205,30 @@ tool object returned by `/api/dify/tools`:
         "query": {"type": "mixed", "value": "{{#start.query#}}"}
       },
       "tool_configurations": {}
+    }
+  ]
+}
+```
+
+Create or draft a workflow that may use a selected Dify Agent Strategy by
+passing the strategy object returned by `/api/dify/agent-strategies`:
+
+```json
+{
+  "message": "用所选智能体分析客户问题并生成处理建议，最后返回 answer",
+  "app_name": "Agent support workflow",
+  "agent_selections": [
+    {
+      "agent_strategy_provider_name": "PROVIDER_FROM_DIFY",
+      "agent_strategy_name": "STRATEGY_FROM_DIFY",
+      "agent_strategy_label": "Strategy label",
+      "parameters": [],
+      "output_schema": {},
+      "agent_parameters": {
+        "query": {"type": "variable", "value": ["start", "query"]}
+      },
+      "plugin_unique_identifier": "PLUGIN_UNIQUE_IDENTIFIER_FROM_DIFY",
+      "meta": {"version": "1.0.0"}
     }
   ]
 }
@@ -292,10 +329,16 @@ from the Web UI/API and the user asks to call a tool. String tool inputs such as
 `url`, `query`, and `text` are represented as Dify mixed text values like
 `{{#start.query#}}`; boolean, number, and select settings use Dify ToolInput
 constant/variable structures. Existing `_raw_data` tool nodes are still
-preserved as passthrough for draft compatibility. `agent`、
-`datasource`、`datasource-empty`、`knowledge-index` 和 `trigger-*` 节点目前仍作为
-外部依赖节点兼容层：chat2dify 可以读取已有 Dify 草稿并尽量原样写回这些节点，
-Web UI 会展示 warning 诊断；新建 workflow 时 planner 不主动生成它们。
+preserved as passthrough for draft compatibility. `agent` can be generated when
+the request includes explicit `agent_selections` from the Web UI/API and the
+user explicitly asks for an Agent/智能体/autonomous multi-step flow. Agent
+parameters use the same Dify `{type,value}` input structure, and Agent
+tool-selector parameters must bind tools selected in the Web UI Tools panel.
+Existing `_raw_data` agent nodes are still preserved as passthrough for old
+draft compatibility. `datasource`、`datasource-empty`、`knowledge-index` 和
+`trigger-*` 节点目前仍作为外部依赖节点兼容层：chat2dify 可以读取已有 Dify 草稿并
+尽量原样写回这些节点，Web UI 会展示 warning 诊断；新建 workflow 时 planner 不主动
+生成它们。
 
 Example file workflow request:
 
@@ -339,9 +382,15 @@ Example selected tool workflow request:
 创建工具查询总结工作流。先调用我在 Web UI 勾选的搜索工具查询客户问题相关信息，再用模型总结查询结果并生成客服回复，最后返回 answer。
 ```
 
+Example selected agent workflow request:
+
+```text
+创建智能体售后分析工作流。使用我在 Web UI 勾选的 Agent Strategy 对客户问题进行多步分析，必要时调用已绑定工具，最后生成处理建议并返回 answer。
+```
+
 Answer/chatflow nodes, plugin installation, credential editing, automatic
-creation of agent/trigger/data-source nodes, and model capability registry sync
-remain out of scope for now.
+creation of trigger/data-source nodes, Agent Roster management, and model
+capability registry sync remain out of scope for now.
 
 ## Test
 

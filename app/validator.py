@@ -829,6 +829,8 @@ def _validate_node_params(plan: WorkflowPlan) -> list[ValidationIssue]:
                     )
             case "tool":
                 issues.extend(_validate_tool_node(node))
+            case "agent":
+                issues.extend(_validate_agent_node(node))
             case node_type if node_type in EXTERNAL_DEPENDENCY_NODE_TYPES:
                 issues.append(
                     _node_issue(
@@ -938,6 +940,111 @@ def _validate_tool_node(node: PlanNode) -> list[ValidationIssue]:
                 )
             )
     return issues
+
+
+def _validate_agent_node(node: PlanNode) -> list[ValidationIssue]:
+    params = node.params
+    if isinstance(params.get("_raw_data"), dict):
+        return [
+            _node_issue(
+                "PLAN_EXTERNAL_DEPENDENCY_NODE_PASSTHROUGH",
+                "agent node is preserved as an external-dependency Dify node.",
+                node.id,
+                "type",
+                suggestion="该 agent 节点来自 Dify 既有草稿；chat2dify 会尽量原样保留，但不会替你校验插件策略或鉴权是否可用。",
+            ).model_copy(update={"severity": "warning"})
+        ]
+
+    issues: list[ValidationIssue] = []
+    for field in ("agent_strategy_provider_name", "agent_strategy_name"):
+        if not str(params.get(field) or "").strip():
+            issues.append(
+                _node_issue(
+                    f"PLAN_AGENT_{field.upper()}_MISSING",
+                    f"agent node requires {field}.",
+                    node.id,
+                    f"params.{field}",
+                    suggestion="在 Web UI 选择已安装 Agent Strategy，或让 planner 使用 agent_selections 中的真实策略元数据。",
+                )
+            )
+
+    agent_parameters = params.get("agent_parameters") if isinstance(params.get("agent_parameters"), dict) else {}
+    schemas = params.get("parameters") if isinstance(params.get("parameters"), list) else []
+    for idx, schema in enumerate(schemas):
+        if not isinstance(schema, dict):
+            continue
+        name = str(schema.get("variable") or schema.get("name") or "").strip()
+        if not name:
+            continue
+        if not schema.get("required"):
+            continue
+        value = agent_parameters.get(name)
+        if not _tool_var_input_has_value(value):
+            issues.append(
+                _node_issue(
+                    "PLAN_AGENT_REQUIRED_PARAMETER_MISSING",
+                    f"agent required parameter is missing: {name}",
+                    node.id,
+                    f"params.agent_parameters.{name}",
+                    suggestion="为 Agent Strategy 必填参数提供 Dify 输入；字符串变量绑定使用 {'type':'constant','value':'{{#start.query#}}'}。",
+                )
+            )
+            continue
+        parameter_type = str(schema.get("type") or "").strip()
+        if parameter_type in {"tool-selector", "multi-tool-selector"} and not _agent_tool_selector_has_value(value):
+            issues.append(
+                _node_issue(
+                    "PLAN_AGENT_TOOL_SELECTOR_MISSING",
+                    f"agent tool selector parameter is not bound to a selected tool: {name}",
+                    node.id,
+                    f"params.agent_parameters.{name}",
+                    suggestion="在 Web UI 中为该 Agent 参数绑定已选择且已配置的 Tool；chat2dify 不会猜测嵌套工具。",
+                )
+            )
+        if not schema.get("name") and not schema.get("variable"):
+            issues.append(
+                _node_issue(
+                    "PLAN_AGENT_PARAMETER_SCHEMA_INVALID",
+                    "agent parameter schema requires name or variable.",
+                    node.id,
+                    f"params.parameters.{idx}",
+                )
+            )
+    return issues
+
+
+def _agent_tool_selector_has_value(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    raw = value.get("value")
+    if isinstance(raw, list):
+        return bool(raw) and all(_agent_tool_selector_has_value({"value": item}) for item in raw)
+    if not isinstance(raw, dict):
+        return False
+    if raw.get("enabled") is False:
+        return False
+    schemas = raw.get("schemas") if isinstance(raw.get("schemas"), list) else []
+    settings = raw.get("settings") if isinstance(raw.get("settings"), dict) else {}
+    parameters = raw.get("parameters") if isinstance(raw.get("parameters"), dict) else {}
+    for schema in schemas:
+        if not isinstance(schema, dict) or not schema.get("required"):
+            continue
+        name = str(schema.get("variable") or schema.get("name") or "").strip()
+        if not name:
+            continue
+        if str(schema.get("form") or "") == "llm":
+            nested = parameters.get(name)
+            nested_value = nested.get("value") if isinstance(nested, dict) and "value" in nested else nested
+            if isinstance(nested, dict) and nested.get("auto") == 1:
+                continue
+            if not _tool_var_input_has_value(nested_value):
+                return False
+        else:
+            nested = settings.get(name)
+            nested_value = nested.get("value") if isinstance(nested, dict) and "value" in nested else nested
+            if not _tool_var_input_has_value(nested_value):
+                return False
+    return bool(raw.get("provider_id") or raw.get("tool_name") or raw.get("name"))
 
 
 def _tool_var_input_has_value(value: Any) -> bool:

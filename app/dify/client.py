@@ -180,6 +180,57 @@ class DifyToolListResult:
 
 
 @dataclass(frozen=True)
+class DifyAgentStrategyListItem:
+    agent_strategy_provider_name: str
+    agent_strategy_name: str
+    agent_strategy_label: str
+    description: str
+    parameters: list[dict[str, Any]]
+    features: list[str]
+    output_schema: dict[str, Any]
+    plugin_id: str | None = None
+    plugin_unique_identifier: str | None = None
+    meta: dict[str, Any] | None = None
+    requires_configuration: bool = False
+
+
+@dataclass(frozen=True)
+class DifyAgentStrategyListResult:
+    data: list[DifyAgentStrategyListItem]
+    count: int
+    providers: list[str]
+
+    @classmethod
+    def from_provider_payloads(
+        cls,
+        providers: list[dict[str, Any]],
+        *,
+        keyword: str | None = None,
+    ) -> "DifyAgentStrategyListResult":
+        items: list[DifyAgentStrategyListItem] = []
+        for provider in providers:
+            if isinstance(provider, dict):
+                items.extend(_agent_strategy_items_from_provider(provider))
+        if keyword:
+            needle = keyword.strip().lower()
+            items = [
+                item
+                for item in items
+                if needle
+                in " ".join(
+                    [
+                        item.agent_strategy_provider_name,
+                        item.agent_strategy_name,
+                        item.agent_strategy_label,
+                        item.description,
+                    ]
+                ).lower()
+            ]
+        providers_seen = sorted({item.agent_strategy_provider_name for item in items})
+        return cls(data=items, count=len(items), providers=providers_seen)
+
+
+@dataclass(frozen=True)
 class DifyDraftWorkflow:
     id: str
     graph: dict[str, Any]
@@ -398,6 +449,37 @@ class DifyClient:
                 raise DifyClientError(f"Dify tools response for {item_type} must be a JSON list.")
             payloads.append((str(item_type), [item for item in payload if isinstance(item, dict)]))
         return DifyToolListResult.from_provider_payloads(payloads, keyword=keyword)
+
+    def list_agent_strategies(self, *, keyword: str | None = None) -> DifyAgentStrategyListResult:
+        self._ensure_logged_in()
+        response = self._get_with_auth_retry("/workspaces/current/agent-providers")
+        self._raise_for_response(response)
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise DifyClientError(f"Invalid Dify JSON response: {response.text}") from exc
+        if not isinstance(payload, list):
+            raise DifyClientError("Dify agent providers response must be a JSON list.")
+
+        providers: list[dict[str, Any]] = []
+        for provider in payload:
+            if not isinstance(provider, dict):
+                continue
+            provider_name = _agent_provider_name(provider)
+            if not provider_name:
+                providers.append(provider)
+                continue
+            detail_response = self._get_with_auth_retry(f"/workspaces/current/agent-provider/{provider_name}")
+            self._raise_for_response(detail_response)
+            try:
+                detail_payload = detail_response.json()
+            except ValueError as exc:
+                raise DifyClientError(f"Invalid Dify JSON response: {detail_response.text}") from exc
+            if not isinstance(detail_payload, dict):
+                raise DifyClientError("Dify agent provider detail response must be a JSON object.")
+            providers.append(detail_payload)
+
+        return DifyAgentStrategyListResult.from_provider_payloads(providers, keyword=keyword)
 
     def get_draft_workflow(self, app_id: str) -> DifyDraftWorkflow:
         self._ensure_logged_in()
@@ -697,6 +779,86 @@ def _tool_parameter_payload(parameter: dict[str, Any]) -> dict[str, Any]:
         "max": parameter.get("max"),
     }
     return {key: value for key, value in result.items() if value is not None}
+
+
+def _agent_provider_name(provider: dict[str, Any]) -> str:
+    declaration = provider.get("declaration") if isinstance(provider.get("declaration"), dict) else {}
+    identity = declaration.get("identity") if isinstance(declaration.get("identity"), dict) else {}
+    return str(identity.get("name") or provider.get("provider") or provider.get("id") or "").strip()
+
+
+def _agent_strategy_items_from_provider(provider: dict[str, Any]) -> list[DifyAgentStrategyListItem]:
+    declaration = provider.get("declaration") if isinstance(provider.get("declaration"), dict) else {}
+    identity = declaration.get("identity") if isinstance(declaration.get("identity"), dict) else {}
+    provider_name = str(identity.get("name") or provider.get("provider") or "").strip()
+    plugin_id = _string_or_none(provider.get("plugin_id") or declaration.get("plugin_id"))
+    plugin_unique_identifier = _string_or_none(provider.get("plugin_unique_identifier"))
+    meta = provider.get("meta") if isinstance(provider.get("meta"), dict) else None
+    strategies = declaration.get("strategies") if isinstance(declaration.get("strategies"), list) else []
+    items: list[DifyAgentStrategyListItem] = []
+    for strategy in strategies:
+        if not isinstance(strategy, dict):
+            continue
+        strategy_identity = strategy.get("identity") if isinstance(strategy.get("identity"), dict) else {}
+        strategy_name = str(strategy_identity.get("name") or "").strip()
+        strategy_provider_name = str(strategy_identity.get("provider") or provider_name).strip()
+        if not strategy_provider_name or not strategy_name:
+            continue
+        parameters = [
+            _agent_parameter_payload(parameter)
+            for parameter in strategy.get("parameters") or []
+            if isinstance(parameter, dict)
+        ]
+        output_schema = strategy.get("output_schema") if isinstance(strategy.get("output_schema"), dict) else {}
+        features = [str(item) for item in strategy.get("features") or [] if item]
+        items.append(
+            DifyAgentStrategyListItem(
+                agent_strategy_provider_name=strategy_provider_name,
+                agent_strategy_name=strategy_name,
+                agent_strategy_label=_localized_text(strategy_identity.get("label")) or strategy_name,
+                description=_localized_text(strategy.get("description")) or _localized_text(identity.get("description")) or "",
+                parameters=parameters,
+                features=features,
+                output_schema=deepcopy(output_schema),
+                plugin_id=plugin_id,
+                plugin_unique_identifier=plugin_unique_identifier,
+                meta=deepcopy(meta) if meta is not None else None,
+                requires_configuration=_requires_agent_configuration(parameters),
+            )
+        )
+    return items
+
+
+def _agent_parameter_payload(parameter: dict[str, Any]) -> dict[str, Any]:
+    result = {
+        "name": str(parameter.get("name") or parameter.get("variable") or ""),
+        "variable": str(parameter.get("variable") or parameter.get("name") or ""),
+        "label": parameter.get("label"),
+        "type": parameter.get("type"),
+        "help": parameter.get("help"),
+        "required": bool(parameter.get("required", False)),
+        "default": parameter.get("default"),
+        "options": deepcopy(parameter.get("options")) if isinstance(parameter.get("options"), list) else None,
+        "scope": deepcopy(parameter.get("scope")) if parameter.get("scope") is not None else None,
+        "template": deepcopy(parameter.get("template")) if parameter.get("template") is not None else None,
+        "auto_generate": deepcopy(parameter.get("auto_generate")) if parameter.get("auto_generate") is not None else None,
+        "min": parameter.get("min"),
+        "max": parameter.get("max"),
+    }
+    return {key: value for key, value in result.items() if value is not None}
+
+
+def _requires_agent_configuration(parameters: list[dict[str, Any]]) -> bool:
+    for parameter in parameters:
+        if not parameter.get("required"):
+            continue
+        parameter_type = str(parameter.get("type") or "").strip()
+        if parameter_type in {"tool-selector", "multi-tool-selector", "array[tools]"}:
+            return True
+        default = parameter.get("default")
+        if default is None or default == "":
+            return True
+    return False
 
 
 def _requires_tool_configuration(

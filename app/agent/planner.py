@@ -21,8 +21,18 @@ question-classifier, parameter-extractor, variable-aggregator,
 document-extractor, list-operator, knowledge-retrieval, human-input,
 iteration, loop. iteration-start, loop-start, and loop-end are internal
 container children only; never place them in top-level nodes.
-Do not generate agent, datasource, datasource-empty, trigger-webhook,
-trigger-plugin, trigger-schedule, or knowledge-index nodes in new workflows.
+Do not generate datasource, datasource-empty, trigger-webhook, trigger-plugin,
+trigger-schedule, or knowledge-index nodes in new workflows.
+Generate agent nodes only when the user explicitly asks for an Agent, 智能体,
+autonomous planning, multi-step execution, or self-directed reasoning, and
+selected_agents is non-empty in the user message. Never invent agent strategy
+provider names or strategy names. When generating an agent node, copy
+agent_strategy_provider_name, agent_strategy_name, agent_strategy_label,
+parameters, output_schema, plugin_unique_identifier, and meta from one selected
+agent. Use agent_parameters with Dify ToolInput values, for example
+{"query":{"type":"variable","value":["start","query"]}}. If an agent parameter
+has type tool-selector or multi-tool-selector, use only the tool value already
+provided in selected_agents[].agent_parameters; do not invent nested tools.
 Generate tool nodes only when the user explicitly asks to call/use a selected
 tool and selected_tools is non-empty in the user message. Never invent tool
 provider IDs or tool names. When generating a tool node, copy provider_id,
@@ -123,6 +133,7 @@ class WorkflowPlanner:
         app_name: str | None = None,
         dsl_version: str,
         tool_selections: list[dict[str, Any]] | None = None,
+        agent_selections: list[dict[str, Any]] | None = None,
     ) -> PlannerResult:
         if not self.settings.openai_api_key:
             plan = fallback_plan(message, app_name=app_name)
@@ -144,6 +155,7 @@ class WorkflowPlanner:
                 app_name=app_name,
                 last_error=last_error if attempt else "",
                 tool_selections=tool_selections or [],
+                agent_selections=agent_selections or [],
             )
             try:
                 payload = json.loads(_strip_json_fences(content))
@@ -154,6 +166,7 @@ class WorkflowPlanner:
                     app_name=app_name,
                     default_dataset_ids=self.settings.dify_default_dataset_ids,
                     tool_selections=tool_selections or [],
+                    agent_selections=agent_selections or [],
                 )
                 plan = WorkflowPlan.model_validate(normalized.payload)
                 issues = _validate_compiled_plan(plan, settings=self.settings, dsl_version=dsl_version)
@@ -182,12 +195,14 @@ class WorkflowPlanner:
         app_name: str | None,
         last_error: str = "",
         tool_selections: list[dict[str, Any]] | None = None,
+        agent_selections: list[dict[str, Any]] | None = None,
     ) -> str:
         url = _chat_completions_url(self.settings.openai_base_url)
         user_content = {
             "app_name": app_name or "Generated Workflow",
             "request": message,
             "selected_tools": _planner_tool_schemas(tool_selections or []),
+            "selected_agents": _planner_agent_schemas(agent_selections or []),
         }
         messages: list[dict[str, str]] = [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -314,6 +329,28 @@ def _planner_tool_schemas(tool_selections: list[dict[str, Any]]) -> list[dict[st
                 "output_schema": item.get("output_schema") or {},
                 "plugin_id": item.get("plugin_id"),
                 "plugin_unique_identifier": item.get("plugin_unique_identifier"),
+            }
+        )
+    return result
+
+
+def _planner_agent_schemas(agent_selections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result = []
+    for item in agent_selections:
+        if not isinstance(item, dict):
+            continue
+        result.append(
+            {
+                "agent_strategy_provider_name": item.get("agent_strategy_provider_name"),
+                "agent_strategy_name": item.get("agent_strategy_name"),
+                "agent_strategy_label": item.get("agent_strategy_label"),
+                "description": item.get("description"),
+                "parameters": item.get("parameters") or [],
+                "features": item.get("features") or [],
+                "output_schema": item.get("output_schema") or {},
+                "plugin_unique_identifier": item.get("plugin_unique_identifier"),
+                "meta": item.get("meta") or {},
+                "agent_parameters": item.get("agent_parameters") or {},
             }
         )
     return result

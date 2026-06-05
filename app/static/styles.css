@@ -241,6 +241,27 @@ h2 {
   padding: 7px 8px;
 }
 
+.tool-selector-control {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 7px;
+}
+
+.compact-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.compact-checkbox input {
+  width: 15px;
+  height: 15px;
+}
+
 label {
   display: grid;
   gap: 6px;

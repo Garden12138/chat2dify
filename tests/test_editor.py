@@ -24,7 +24,7 @@ class FakeEditPlanner(WorkflowEditPlanner):
         self.responses = responses
         self.last_errors: list[str] = []
 
-    def _call_llm(self, message, *, current_plan, last_error="", tool_selections=None) -> str:
+    def _call_llm(self, message, *, current_plan, last_error="", tool_selections=None, agent_selections=None) -> str:
         self.last_errors.append(last_error)
         if not self.responses:
             raise PlannerError("no fake response")

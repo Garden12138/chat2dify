@@ -440,6 +440,91 @@ def test_list_tools_invalid_json_is_wrapped() -> None:
         client.list_tools(provider_type="builtin")
 
 
+def test_list_agent_strategies_returns_flattened_strategies() -> None:
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/console/api/login":
+            return httpx.Response(200, json={"result": "success"}, headers=[("set-cookie", "csrf_token=csrf123; Path=/")])
+        if request.url.path == "/console/api/workspaces/current/agent-providers":
+            seen["csrf"] = request.headers.get(CSRF_HEADER_NAME, "")
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "provider": "langgenius/agent/react",
+                        "plugin_id": "langgenius/agent",
+                        "plugin_unique_identifier": "langgenius/agent:1.0.0",
+                        "declaration": {"identity": {"name": "langgenius/agent/react"}, "strategies": []},
+                    }
+                ],
+            )
+        if request.url.path == "/console/api/workspaces/current/agent-provider/langgenius/agent/react":
+            return httpx.Response(
+                200,
+                json={
+                    "provider": "react",
+                    "plugin_id": "langgenius/agent",
+                    "plugin_unique_identifier": "langgenius/agent:1.0.0",
+                    "meta": {"version": "1.0.0"},
+                    "declaration": {
+                        "identity": {"name": "langgenius/agent/react", "label": {"zh_Hans": "智能体"}},
+                        "strategies": [
+                            {
+                                "identity": {
+                                    "provider": "langgenius/agent/react",
+                                    "name": "react",
+                                    "label": {"zh_Hans": "ReAct"},
+                                },
+                                "description": {"zh_Hans": "多步推理"},
+                                "parameters": [
+                                    {"name": "query", "type": "text-input", "required": True},
+                                    {"name": "tools", "type": "array[tools]", "required": True},
+                                ],
+                                "features": ["history-messages"],
+                                "output_schema": {"properties": {"answer": {"type": "string"}}},
+                            }
+                        ],
+                    },
+                },
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+    result = client.list_agent_strategies(keyword="react")
+
+    assert seen["csrf"] == "csrf123"
+    assert result.count == 1
+    assert result.providers == ["langgenius/agent/react"]
+    assert result.data[0].agent_strategy_name == "react"
+    assert result.data[0].agent_strategy_label == "ReAct"
+    assert result.data[0].parameters[1]["type"] == "array[tools]"
+    assert result.data[0].output_schema == {"properties": {"answer": {"type": "string"}}}
+
+
+def test_list_agent_strategies_refreshes_after_401() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(f"{request.method} {request.url.path}")
+        if request.url.path == "/console/api/login":
+            return httpx.Response(200, json={"result": "success"}, headers=[("set-cookie", "csrf_token=csrf123; Path=/")])
+        if request.url.path == "/console/api/refresh-token":
+            return httpx.Response(200, json={"result": "success"})
+        if request.url.path == "/console/api/workspaces/current/agent-providers":
+            if calls.count("GET /console/api/workspaces/current/agent-providers") == 1:
+                return httpx.Response(401, json={"message": "expired"})
+            return httpx.Response(200, json=[])
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+    result = client.list_agent_strategies()
+
+    assert result.data == []
+    assert calls.count("GET /console/api/workspaces/current/agent-providers") == 2
+    assert "POST /console/api/refresh-token" in calls
+
+
 def test_sync_draft_workflow_conflict_is_typed() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/console/api/login":

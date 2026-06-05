@@ -404,6 +404,59 @@ def test_decompile_rejects_unsupported_existing_node_type() -> None:
         decompile_dify_graph(graph)
 
 
+def test_decompile_and_compile_structured_agent_node() -> None:
+    graph = {
+        "nodes": [
+            {
+                "id": "start",
+                "type": "custom",
+                "position": {"x": 0, "y": 0},
+                "data": {"type": "start", "title": "开始", "variables": [{"name": "query", "type": "paragraph"}]},
+            },
+            {
+                "id": "agent",
+                "type": "custom",
+                "position": {"x": 300, "y": 0},
+                "data": {
+                    "type": "agent",
+                    "title": "调用智能体",
+                    "agent_strategy_provider_name": "langgenius/agent/react",
+                    "agent_strategy_name": "react",
+                    "agent_strategy_label": "ReAct",
+                    "agent_parameters": {"query": {"type": "variable", "value": ["start", "query"]}},
+                    "output_schema": {"properties": {"answer": {"type": "string"}}},
+                    "tool_node_version": "2",
+                    "plugin_unique_identifier": "langgenius/agent:1.0.0",
+                    "meta": {"version": "1.0.0"},
+                },
+            },
+            {
+                "id": "end",
+                "type": "custom",
+                "position": {"x": 600, "y": 0},
+                "data": {"type": "end", "title": "结束", "outputs": [{"variable": "answer", "value_selector": ["agent", "answer"]}]},
+            },
+        ],
+        "edges": [
+            {"id": "start-agent", "source": "start", "target": "agent", "sourceHandle": "source", "targetHandle": "target", "data": {}},
+            {"id": "agent-end", "source": "agent", "target": "end", "sourceHandle": "source", "targetHandle": "target", "data": {}},
+        ],
+    }
+
+    plan = decompile_dify_graph(graph, name="Agent")
+    nodes = {node.id: node for node in plan.nodes}
+    compiled = compile_plan_to_dify_graph(plan, compiler=_compiler(), base_graph=graph)
+    compiled_agent = next(node["data"] for node in compiled["nodes"] if node["id"] == "agent")
+
+    assert nodes["agent"].type == "agent"
+    assert nodes["agent"].params["agent_strategy_name"] == "react"
+    assert nodes["agent"].params["agent_parameters"]["query"] == {"type": "constant", "value": "{{#start.query#}}"}
+    assert compiled_agent["agent_strategy_provider_name"] == "langgenius/agent/react"
+    assert compiled_agent["agent_strategy_name"] == "react"
+    assert compiled_agent["agent_parameters"]["query"] == {"type": "constant", "value": "{{#start.query#}}"}
+    assert compiled_agent["output_schema"]["properties"]["answer"]["type"] == "string"
+
+
 def _seven_type_plan() -> WorkflowPlan:
     return WorkflowPlan.model_validate(
         {

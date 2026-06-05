@@ -361,6 +361,18 @@ def _params_from_dify_node_data(node_type: str, data: dict[str, Any]) -> dict[st
                 for key, value in data.items()
                 if key not in COMMON_DATA_KEYS
             }
+        case "agent":
+            return {
+                "agent_strategy_provider_name": data.get("agent_strategy_provider_name", ""),
+                "agent_strategy_name": data.get("agent_strategy_name", ""),
+                "agent_strategy_label": data.get("agent_strategy_label", ""),
+                "agent_parameters": deepcopy(data.get("agent_parameters") or {}),
+                "output_schema": deepcopy(data.get("output_schema") or {}),
+                "tool_node_version": str(data.get("tool_node_version") or "2"),
+                "plugin_unique_identifier": data.get("plugin_unique_identifier"),
+                "meta": deepcopy(data.get("meta")) if data.get("meta") is not None else None,
+                "memory": deepcopy(data.get("memory")) if data.get("memory") is not None else None,
+            }
         case node_type if node_type in EXTERNAL_DEPENDENCY_NODE_TYPES:
             return {
                 "_raw_data": {
