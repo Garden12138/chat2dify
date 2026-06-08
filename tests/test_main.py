@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+import time
 import yaml
 
 from app.agent.editor import WorkflowEditResult
@@ -43,8 +44,14 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert 'id="planner-provider"' in index.text
     assert 'id="planner-model"' in index.text
     assert 'id="create-duration"' in index.text
+    assert 'id="create-task-progress"' in index.text
+    assert 'id="create-cancel-task"' in index.text
     assert 'id="modify-duration"' in index.text
+    assert 'id="modify-task-progress"' in index.text
+    assert 'id="modify-cancel-task"' in index.text
     assert 'id="run-duration"' in index.text
+    assert 'id="run-task-progress"' in index.text
+    assert 'id="run-cancel-task"' in index.text
     assert 'id="history-list"' in index.text
     assert 'id="knowledge-search"' in index.text
     assert 'id="refresh-datasets"' in index.text
@@ -65,6 +72,13 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert "currentPlannerSelection" in script.text
     assert "formatTaskDuration" in script.text
     assert "setTaskDuration" in script.text
+    assert "submitBackgroundTask" in script.text
+    assert "pollBackgroundTask" in script.text
+    assert "ACTIVE_TASKS_KEY" in script.text
+    assert "TERMINAL_TASKS_KEY" in script.text
+    assert "retryTerminalTask" in script.text
+    assert "restoreTerminalTasks" in script.text
+    assert "Retry starts a new task" in script.text
     assert "handleLoadDraft" in script.text
     assert "handleReviewedPreviewApply" in script.text
     assert "modifyPreview" in script.text
@@ -1675,6 +1689,55 @@ def test_run_draft_workflow_api_can_return_timeout(monkeypatch) -> None:
     data = response.json()
     assert data["ok"] is False
     assert data["status"] == "timeout"
+
+
+def test_background_create_task_returns_202_and_can_be_polled(monkeypatch, tmp_path) -> None:
+    settings = _test_settings()
+    settings = Settings.from_env(
+        {
+            "DIFY_SOURCE_DIR": "../dify",
+            "OPENAI_API_KEY": "token",
+            "CHAT2DIFY_TASK_DB": str(tmp_path / "tasks.sqlite3"),
+        },
+        validate_dify=False,
+    )
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+
+    def fake_create(request, *, task_context=None):
+        assert task_context is not None
+        task_context.update("planning", 50, "Halfway")
+        return {
+            "status": "completed",
+            "app_id": "app-background",
+            "workflow_url": "http://dify.local/app/app-background/workflow",
+            "plan": {"name": request.app_name},
+        }
+
+    monkeypatch.setattr("app.main._create_workflow", fake_create)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/tasks/workflows/create",
+            json={"message": "create a workflow", "app_name": "Background"},
+        )
+        assert response.status_code == 202
+        task_id = response.json()["task_id"]
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            task_response = client.get(f"/api/tasks/{task_id}")
+            if task_response.json()["status"] == "succeeded":
+                break
+            time.sleep(0.01)
+
+    assert task_response.status_code == 200
+    task = task_response.json()
+    assert task["status"] == "succeeded"
+    assert task["progress"] == 100
+    assert task["result"]["app_id"] == "app-background"
 
 
 class _KnowledgePlanner:

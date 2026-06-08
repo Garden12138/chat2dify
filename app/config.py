@@ -56,6 +56,8 @@ class Settings:
     nvidia_thinking: bool
     nvidia_reasoning_effort: str
     nvidia_max_tokens: int
+    task_db_path: Path
+    task_workers: int
 
     @classmethod
     def from_env(
@@ -109,6 +111,14 @@ class Settings:
             nvidia_max_tokens=_positive_int(
                 source.get("NVIDIA_MAX_TOKENS", "8192"),
                 name="NVIDIA_MAX_TOKENS",
+            ),
+            task_db_path=resolve_path_from_project_root(
+                source.get("CHAT2DIFY_TASK_DB", "data/tasks.sqlite3"),
+                root,
+            ),
+            task_workers=_positive_int(
+                source.get("CHAT2DIFY_TASK_WORKERS", "2"),
+                name="CHAT2DIFY_TASK_WORKERS",
             ),
         )
 

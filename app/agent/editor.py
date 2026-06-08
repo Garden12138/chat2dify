@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.agent.normalizer import normalize_plan_payload
 from app.agent.planner import (
@@ -19,6 +19,9 @@ from app.agent.planner import (
 from app.config import Settings
 from app.models import WorkflowPlan
 from app.validator import has_errors
+
+if TYPE_CHECKING:
+    from app.tasks import TaskContext
 
 
 EDIT_SYSTEM_PROMPT = """You revise an existing Dify WorkflowPlan.
@@ -111,6 +114,7 @@ class WorkflowEditPlanner:
         dsl_version: str,
         tool_selections: list[dict[str, Any]] | None = None,
         agent_selections: list[dict[str, Any]] | None = None,
+        task_context: TaskContext | None = None,
     ) -> WorkflowEditResult:
         runtime = self.settings.planner_runtime()
         if not runtime.api_key:
@@ -121,14 +125,28 @@ class WorkflowEditPlanner:
         errors: list[str] = []
         final_raw_plan: dict[str, Any] | None = None
         for attempt in range(1, 4):
-            content = self._call_llm(
-                message,
-                current_plan=current_plan,
-                last_error=last_error,
-                tool_selections=tool_selections or [],
-                agent_selections=agent_selections or [],
-            )
+            if task_context is not None:
+                task_context.update(
+                    "planning-revision",
+                    35 + ((attempt - 1) * 10),
+                    f"Generating workflow revision, semantic attempt {attempt}/3.",
+                )
+            call_kwargs = {
+                "current_plan": current_plan,
+                "last_error": last_error,
+                "tool_selections": tool_selections or [],
+                "agent_selections": agent_selections or [],
+            }
+            if task_context is not None:
+                call_kwargs["task_context"] = task_context
+            content = self._call_llm(message, **call_kwargs)
             try:
+                if task_context is not None:
+                    task_context.update(
+                        "validating-revision",
+                        58 + ((attempt - 1) * 7),
+                        f"Normalizing and validating revision attempt {attempt}/3.",
+                    )
                 payload = json.loads(_strip_json_fences(content))
                 raw_plan = _extract_plan_payload(payload)
                 final_raw_plan = raw_plan
@@ -167,6 +185,7 @@ class WorkflowEditPlanner:
         last_error: str = "",
         tool_selections: list[dict[str, Any]] | None = None,
         agent_selections: list[dict[str, Any]] | None = None,
+        task_context: TaskContext | None = None,
     ) -> str:
         runtime = self.settings.planner_runtime()
         url = _chat_completions_url(runtime.base_url)
@@ -227,4 +246,5 @@ class WorkflowEditPlanner:
             url=url,
             payload=payload,
             error_prefix="Workflow edit LLM",
+            task_context=task_context,
         )

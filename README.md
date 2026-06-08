@@ -176,6 +176,23 @@ Open the local Web UI:
 http://127.0.0.1:8000/
 ```
 
+Create, Modify Preview/Apply, and Run Draft execute as persistent background
+tasks in the Web UI. Each panel shows the current phase, elapsed time, progress,
+and a cooperative Cancel action. Active task IDs are restored after a browser
+refresh. Task records and results use SQLite by default:
+
+```env
+CHAT2DIFY_TASK_DB=data/tasks.sqlite3
+CHAT2DIFY_TASK_WORKERS=2
+```
+
+Tasks interrupted by a sidecar restart are marked `interrupted`. Completed
+records are retained for seven days, capped at 200 records. Existing blocking
+workflow API endpoints remain available for compatible scripts and curl calls.
+Cancelled, failed, and interrupted tasks cannot resume an in-flight LLM or Dify
+HTTP request. Their panel offers Retry, which starts a new task from the
+beginning using the saved request.
+
 The Planner Model panel lists only server-registered providers and disables
 providers whose API key is not configured. Create and Modify Preview send the
 selected provider/model in an optional request field:
@@ -299,6 +316,26 @@ curl -X POST http://127.0.0.1:8000/api/workflows/create \
   -H 'Content-Type: application/json' \
   -d '{"message":"Summarize the user input","app_name":"Summary MVP","dataset_ids":["OPTIONAL_DATASET_ID"]}'
 ```
+
+Start the same create operation as a background task:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/tasks/workflows/create \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"Summarize the user input","app_name":"Summary MVP"}'
+```
+
+Poll or cancel the returned `task_id`:
+
+```bash
+curl http://127.0.0.1:8000/api/tasks/TASK_ID
+curl -X POST http://127.0.0.1:8000/api/tasks/TASK_ID/cancel
+```
+
+The corresponding background endpoints for the other Web UI operations are
+`/api/tasks/workflows/modify/draft`,
+`/api/tasks/workflows/modify/apply`, and
+`/api/tasks/workflows/run/draft`.
 
 Preview a change to an existing Dify workflow draft:
 

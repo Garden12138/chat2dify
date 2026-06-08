@@ -5,7 +5,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 import re
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -27,6 +27,7 @@ from app.dify.graph import (
 from app.dify.knowledge_retrieval import apply_dataset_retrieval_settings, knowledge_dataset_ids
 from app.dify.version import read_dify_version_info
 from app.models import WorkflowModifyRequest, WorkflowPlan, WorkflowRequest, WorkflowRunDraftRequest
+from app.tasks import TaskContext, TaskManager, TaskNotFound, TaskRepository
 from app.validator import has_errors, validate_dsl, validate_plan
 
 
@@ -34,10 +35,15 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(application: FastAPI):
     settings = load_settings()
     read_dify_version_info(settings.dify_source_path)
-    yield
+    task_manager = TaskManager(TaskRepository(settings.task_db_path), workers=settings.task_workers)
+    application.state.task_manager = task_manager
+    try:
+        yield
+    finally:
+        task_manager.close()
 
 
 app = FastAPI(title="chat2dify", version="0.1.0", lifespan=lifespan)
@@ -148,6 +154,12 @@ def list_dify_agent_strategies(keyword: str | None = Query(default=None)) -> dic
 
 @app.post("/api/workflows/draft")
 def draft_workflow(request: WorkflowRequest) -> dict:
+    return _draft_workflow(request)
+
+
+def _draft_workflow(request: WorkflowRequest, *, task_context: TaskContext | None = None) -> dict:
+    if task_context is not None:
+        task_context.update("loading-config", 5, "Loading Dify and planner configuration.")
     settings = load_settings()
     effective_settings = _settings_with_request_dataset_ids(settings, request.dataset_ids)
     effective_settings = _settings_with_request_planner(effective_settings, request.planner)
@@ -156,6 +168,8 @@ def draft_workflow(request: WorkflowRequest) -> dict:
     _ensure_agent_selections_configured(request.agent_selections)
     try:
         planner_kwargs = _planner_selection_kwargs(request)
+        if task_context is not None:
+            planner_kwargs["task_context"] = task_context
         planner_result = WorkflowPlanner(effective_settings).generate(
             request.message,
             app_name=request.app_name,
@@ -164,6 +178,8 @@ def draft_workflow(request: WorkflowRequest) -> dict:
         )
     except PlannerError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if task_context is not None:
+        task_context.update("compiling", 70, "Compiling the validated plan into Dify DSL.")
     plan = _plan_with_dataset_retrieval_settings(planner_result.plan, effective_settings)
     compiler = DifyDslCompiler(
         dsl_version=version_info.app_dsl_version,
@@ -189,11 +205,17 @@ def draft_workflow(request: WorkflowRequest) -> dict:
 
 @app.post("/api/workflows/create")
 def create_workflow(request: WorkflowRequest) -> dict:
-    draft = draft_workflow(request)
+    return _create_workflow(request)
+
+
+def _create_workflow(request: WorkflowRequest, *, task_context: TaskContext | None = None) -> dict:
+    draft = _draft_workflow(request, task_context=task_context)
     if not draft["validation"]["ok"]:
         raise HTTPException(status_code=422, detail=draft["validation"]["issues"])
 
     settings = load_settings()
+    if task_context is not None:
+        task_context.update("importing", 85, "Importing the workflow into Dify.")
     try:
         with DifyClient(settings) as client:
             result = client.import_yaml(draft["dsl"], name=request.app_name or draft["plan"]["name"])
@@ -267,21 +289,45 @@ def apply_workflow_modification(request: WorkflowModifyRequest) -> dict:
 
 @app.post("/api/workflows/run/draft")
 def run_draft_workflow(request: WorkflowRunDraftRequest) -> dict:
+    return _run_draft_workflow(request)
+
+
+def _run_draft_workflow(
+    request: WorkflowRunDraftRequest,
+    *,
+    task_context: TaskContext | None = None,
+) -> dict:
     settings = load_settings()
+    if task_context is not None:
+        task_context.update("connecting", None, "Connecting to the Dify draft run stream.")
     try:
         with DifyClient(settings) as client:
-            result = client.run_draft_workflow(
-                request.app_id,
-                inputs=request.inputs,
-                files=request.files,
-                timeout_seconds=request.timeout_seconds,
-            )
+            run_kwargs = {
+                "inputs": request.inputs,
+                "files": request.files,
+                "timeout_seconds": request.timeout_seconds,
+            }
+            if task_context is not None:
+                run_kwargs["cancellation_check"] = task_context.raise_if_cancelled
+                run_kwargs["event_callback"] = lambda event, summary: _update_run_task(
+                    task_context,
+                    event,
+                    summary,
+                )
+            result = client.run_draft_workflow(request.app_id, **run_kwargs)
     except DifyClientError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return asdict(result)
 
 
-def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:
+def _modify_workflow(
+    request: WorkflowModifyRequest,
+    *,
+    apply: bool,
+    task_context: TaskContext | None = None,
+) -> dict:
+    if task_context is not None:
+        task_context.update("loading-draft", 10, "Loading the current Dify draft.")
     settings = load_settings()
     _ensure_agent_strategy_selection_for_request(request.message, request.agent_selections)
     _ensure_agent_selections_configured(request.agent_selections)
@@ -315,7 +361,15 @@ def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:
                 )
 
             before_plan = decompile_dify_graph(draft.graph, name=_draft_plan_name(app_detail, request.app_id))
+            if task_context is not None:
+                task_context.update("decompiling", 25, "Converted the current Dify graph into Plan IR.")
             if apply and request.plan is not None:
+                if task_context is not None:
+                    task_context.update(
+                        "validating-preview",
+                        45,
+                        "Validating the reviewed preview plan without replanning.",
+                    )
                 normalized = normalize_plan_payload(
                     request.plan.model_dump(),
                     app_name=before_plan.name,
@@ -331,6 +385,8 @@ def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:
                 )
             else:
                 edit_kwargs = _planner_selection_kwargs(request)
+                if task_context is not None:
+                    edit_kwargs["task_context"] = task_context
                 edit_result = WorkflowEditPlanner(effective_settings).generate(
                     request.message,
                     current_plan=before_plan,
@@ -342,6 +398,8 @@ def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:
                 planner_metadata = edit_result.metadata()
 
             plan = _plan_with_dataset_retrieval_settings(plan, effective_settings, client=client)
+            if task_context is not None:
+                task_context.update("validating-change", 72, "Compiling, validating, and checking change risk.")
             response, graph = _build_modify_response(
                 settings=settings,
                 version_info=version_info,
@@ -378,6 +436,8 @@ def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:
                     },
                 )
 
+            if task_context is not None:
+                task_context.update("syncing", 88, "Writing the reviewed draft back to Dify.")
             sync = client.sync_draft_workflow(
                 request.app_id,
                 graph=graph,
@@ -409,6 +469,87 @@ def _modify_workflow(request: WorkflowModifyRequest, *, apply: bool) -> dict:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except DifyClientError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/api/tasks/workflows/create", status_code=status.HTTP_202_ACCEPTED)
+def create_workflow_task(request: WorkflowRequest, http_request: Request) -> dict:
+    return _submit_task(
+        http_request,
+        "workflow.create",
+        request.model_dump(mode="json"),
+        lambda context: _create_workflow(request, task_context=context),
+    )
+
+
+@app.post("/api/tasks/workflows/modify/draft", status_code=status.HTTP_202_ACCEPTED)
+def modify_workflow_draft_task(request: WorkflowModifyRequest, http_request: Request) -> dict:
+    return _submit_task(
+        http_request,
+        "workflow.modify.draft",
+        request.model_dump(mode="json"),
+        lambda context: _modify_workflow(request, apply=False, task_context=context),
+    )
+
+
+@app.post("/api/tasks/workflows/modify/apply", status_code=status.HTTP_202_ACCEPTED)
+def modify_workflow_apply_task(request: WorkflowModifyRequest, http_request: Request) -> dict:
+    return _submit_task(
+        http_request,
+        "workflow.modify.apply",
+        request.model_dump(mode="json"),
+        lambda context: _modify_workflow(request, apply=True, task_context=context),
+    )
+
+
+@app.post("/api/tasks/workflows/run/draft", status_code=status.HTTP_202_ACCEPTED)
+def run_draft_workflow_task(request: WorkflowRunDraftRequest, http_request: Request) -> dict:
+    return _submit_task(
+        http_request,
+        "workflow.run.draft",
+        request.model_dump(mode="json"),
+        lambda context: _run_draft_workflow(request, task_context=context),
+    )
+
+
+@app.get("/api/tasks/{task_id}")
+def get_task(task_id: str, request: Request) -> dict:
+    try:
+        return _task_manager(request).get(task_id).to_dict()
+    except TaskNotFound as exc:
+        raise HTTPException(status_code=404, detail={"code": "TASK_NOT_FOUND", "task_id": task_id}) from exc
+
+
+@app.post("/api/tasks/{task_id}/cancel")
+def cancel_task(task_id: str, request: Request) -> dict:
+    try:
+        record, accepted = _task_manager(request).cancel(task_id)
+    except TaskNotFound as exc:
+        raise HTTPException(status_code=404, detail={"code": "TASK_NOT_FOUND", "task_id": task_id}) from exc
+    payload = record.to_dict()
+    payload["accepted"] = accepted
+    return payload
+
+
+def _submit_task(request: Request, operation: str, payload: dict, callback) -> dict:
+    return _task_manager(request).submit(operation, payload, callback).to_dict()
+
+
+def _task_manager(request: Request) -> TaskManager:
+    manager = getattr(request.app.state, "task_manager", None)
+    if manager is None:
+        raise HTTPException(status_code=503, detail="Background task manager is not available.")
+    return manager
+
+
+def _update_run_task(task_context: TaskContext, event: dict, summary: dict) -> None:
+    event_type = str(event.get("event") or "event")
+    node_finished = int(summary.get("node_finished") or 0)
+    total_events = int(summary.get("events") or 0)
+    task_context.update(
+        "running-workflow",
+        None,
+        f"Dify event {event_type}; {node_finished} nodes finished, {total_events} events received.",
+    )
 
 
 def _build_modify_response(

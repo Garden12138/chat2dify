@@ -9,6 +9,8 @@ const SELECTED_AGENTS_KEY = "chat2dify.workbench.selectedAgents.v1";
 const AGENT_SEARCH_KEY = "chat2dify.workbench.agentSearch.v1";
 const PLANNER_PROVIDER_KEY = "chat2dify.workbench.plannerProvider.v1";
 const PLANNER_MODEL_KEY = "chat2dify.workbench.plannerModel.v1";
+const ACTIVE_TASKS_KEY = "chat2dify.workbench.activeTasks.v1";
+const TERMINAL_TASKS_KEY = "chat2dify.workbench.terminalTasks.v1";
 const MAX_HISTORY_ITEMS = 12;
 const DATASET_PAGE_SIZE = 50;
 const DEFAULT_RUN_INPUTS = '{"query":"我要投诉订单配送太慢"}';
@@ -50,6 +52,9 @@ const state = {
     provider: "",
     name: "",
   },
+  activeTasks: {},
+  terminalTasks: {},
+  taskPollTimers: {},
 };
 
 const els = {
@@ -67,6 +72,10 @@ const els = {
   createForm: document.querySelector("#create-form"),
   createStatus: document.querySelector("#create-status"),
   createDuration: document.querySelector("#create-duration"),
+  createTaskProgress: document.querySelector("#create-task-progress"),
+  createTaskMessage: document.querySelector("#create-task-message"),
+  createTaskBar: document.querySelector("#create-task-bar"),
+  createCancelTask: document.querySelector("#create-cancel-task"),
   knowledgeForm: document.querySelector("#knowledge-form"),
   knowledgeStatus: document.querySelector("#knowledge-status"),
   knowledgeSearch: document.querySelector("#knowledge-search"),
@@ -88,9 +97,17 @@ const els = {
   modifyForm: document.querySelector("#modify-form"),
   modifyStatus: document.querySelector("#modify-status"),
   modifyDuration: document.querySelector("#modify-duration"),
+  modifyTaskProgress: document.querySelector("#modify-task-progress"),
+  modifyTaskMessage: document.querySelector("#modify-task-message"),
+  modifyTaskBar: document.querySelector("#modify-task-bar"),
+  modifyCancelTask: document.querySelector("#modify-cancel-task"),
   runForm: document.querySelector("#run-form"),
   runStatus: document.querySelector("#run-status"),
   runDuration: document.querySelector("#run-duration"),
+  runTaskProgress: document.querySelector("#run-task-progress"),
+  runTaskMessage: document.querySelector("#run-task-message"),
+  runTaskBar: document.querySelector("#run-task-bar"),
+  runCancelTask: document.querySelector("#run-cancel-task"),
   createAppName: document.querySelector("#create-app-name"),
   modifyAppId: document.querySelector("#modify-app-id"),
   modifyExpectedHash: document.querySelector("#modify-expected-hash"),
@@ -115,6 +132,8 @@ document.addEventListener("DOMContentLoaded", () => {
   state.agents.keyword = loadAgentSearchText();
   state.planner.provider = loadPlannerProvider();
   state.planner.model = loadPlannerModel();
+  state.activeTasks = loadActiveTasks();
+  state.terminalTasks = loadTerminalTasks();
   els.knowledgeSearch.value = state.datasets.keyword;
   els.knowledgeDatasetIds.value = loadDatasetIdsText();
   els.toolsSearch.value = state.tools.keyword;
@@ -131,6 +150,8 @@ document.addEventListener("DOMContentLoaded", () => {
   loadTools();
   loadAgentStrategies();
   renderResult({});
+  restoreActiveTasks();
+  restoreTerminalTasks();
 });
 
 function bindEvents() {
@@ -230,6 +251,9 @@ function bindEvents() {
     event.preventDefault();
     await handleCreate();
   });
+  els.createCancelTask.addEventListener("click", () => handleTaskAction("create"));
+  els.modifyCancelTask.addEventListener("click", () => handleTaskAction("modify"));
+  els.runCancelTask.addEventListener("click", () => handleTaskAction("run"));
 
   document.querySelector("#preview-modify").addEventListener("click", async () => {
     await handleModify("/api/workflows/modify/draft", "preview");
@@ -1557,7 +1581,7 @@ function pruneAgentToolBindings(agent, removedToolKey) {
 }
 
 async function handleCreate() {
-  await withBusy(els.createForm, els.createStatus, els.createDuration, "Creating", async () => {
+  try {
     const payload = {
       message: valueOf("#create-message"),
       app_name: optionalValue("#create-app-name"),
@@ -1567,60 +1591,41 @@ async function handleCreate() {
       planner: currentPlannerSelection(),
     };
     ensureAgentSelectionReady(payload.message, payload.agent_selections);
-    const data = await requestJson("/api/workflows/create", {
-      method: "POST",
-      body: payload,
+    await submitBackgroundTask("create", "/api/tasks/workflows/create", payload, {
+      kind: "create",
+      payload,
     });
-    syncAppContext(data);
-    rememberApp(data, {
-      operation: "create",
-      request: payload.message,
-      appName: payload.app_name,
-    });
-    setPanelStatus(els.createStatus, data.status || "Created", "ok");
-    renderResult(data, "changes");
-  });
+  } catch (error) {
+    renderTaskSubmissionError("create", error);
+  }
 }
 
 async function handleModify(path, mode) {
   if (!els.modifyForm.reportValidity()) {
     return;
   }
-  await withBusy(
-    els.modifyForm,
-    els.modifyStatus,
-    els.modifyDuration,
-    mode === "apply" ? "Applying" : "Previewing",
-    async () => {
-      const payload = {
-        app_id: valueOf("#modify-app-id"),
-        message: valueOf("#modify-message"),
-        expected_hash: optionalValue("#modify-expected-hash"),
-        allow_destructive: document.querySelector("#modify-allow-destructive").checked,
-        dataset_ids: currentDatasetIds(),
-        tool_selections: currentToolSelections(),
-        agent_selections: currentAgentSelections(),
-        planner: currentPlannerSelection(),
-      };
-      ensureAgentSelectionReady(payload.message, payload.agent_selections);
-      const data = await requestJson(path, {
-        method: "POST",
-        body: payload,
-      });
-      syncAppContext(data, payload.app_id);
-      if (mode === "preview") {
-        storeModifyPreview(data, payload);
-      }
-      rememberApp(data, {
-        operation: mode === "apply" ? "modify apply" : "modify preview",
-        request: payload.message,
-        appId: payload.app_id,
-      });
-      const guard = data.guard?.risk ? `Guard ${data.guard.risk}` : "Ready";
-      setPanelStatus(els.modifyStatus, mode === "apply" ? "Applied" : guard, guardClass(data.guard));
-      renderResult(data, "changes");
-    }
-  );
+  try {
+    const payload = {
+      app_id: valueOf("#modify-app-id"),
+      message: valueOf("#modify-message"),
+      expected_hash: optionalValue("#modify-expected-hash"),
+      allow_destructive: document.querySelector("#modify-allow-destructive").checked,
+      dataset_ids: currentDatasetIds(),
+      tool_selections: currentToolSelections(),
+      agent_selections: currentAgentSelections(),
+      planner: currentPlannerSelection(),
+    };
+    ensureAgentSelectionReady(payload.message, payload.agent_selections);
+    const taskPath = mode === "apply"
+      ? "/api/tasks/workflows/modify/apply"
+      : "/api/tasks/workflows/modify/draft";
+    await submitBackgroundTask("modify", taskPath, payload, {
+      kind: mode === "apply" ? "modify-apply" : "modify-preview",
+      payload,
+    });
+  } catch (error) {
+    renderTaskSubmissionError("modify", error);
+  }
 }
 
 async function handleReviewedPreviewApply() {
@@ -1641,7 +1646,7 @@ async function handleReviewedPreviewApply() {
     return;
   }
 
-  await withBusy(els.modifyForm, els.modifyStatus, els.modifyDuration, "Applying preview", async () => {
+  try {
     const payload = {
       app_id: state.modifyPreview.app_id,
       message: state.modifyPreview.message,
@@ -1653,21 +1658,13 @@ async function handleReviewedPreviewApply() {
       agent_selections: state.modifyPreview.agent_selections,
       planner: state.modifyPreview.planner,
     };
-    const data = await requestJson("/api/workflows/modify/apply", {
-      method: "POST",
-      body: payload,
+    await submitBackgroundTask("modify", "/api/tasks/workflows/modify/apply", payload, {
+      kind: "modify-apply",
+      payload,
     });
-    syncAppContext(data, payload.app_id);
-    rememberApp(data, {
-      operation: "modify apply reviewed preview",
-      request: payload.message,
-      appId: payload.app_id,
-    });
-    state.modifyPreview = null;
-    state.modifyPreviewDirty = false;
-    setPanelStatus(els.modifyStatus, "Applied preview", "ok");
-    renderResult(data, "changes");
-  });
+  } catch (error) {
+    renderTaskSubmissionError("modify", error);
+  }
 }
 
 async function handleLoadDraft() {
@@ -1693,16 +1690,195 @@ async function handleLoadDraft() {
 }
 
 async function handleRun() {
-  await withBusy(els.runForm, els.runStatus, els.runDuration, "Running", async () => {
+  try {
     const payload = {
       app_id: valueOf("#run-app-id"),
       inputs: parseJsonField("#run-inputs", "Inputs JSON"),
       timeout_seconds: Number(valueOf("#run-timeout") || 120),
     };
-    const data = await requestJson("/api/workflows/run/draft", {
+    await submitBackgroundTask("run", "/api/tasks/workflows/run/draft", payload, {
+      kind: "run",
+      payload,
+    });
+  } catch (error) {
+    renderTaskSubmissionError("run", error);
+  }
+}
+
+async function submitBackgroundTask(panelName, path, payload, metadata) {
+  if (state.activeTasks[panelName]) {
+    throw new Error("This panel already has an active task.");
+  }
+  delete state.terminalTasks[panelName];
+  saveTerminalTasks();
+  const panel = taskPanel(panelName);
+  setTaskPanelBusy(panelName, true);
+  showTaskProgress(panel, {
+    status: "queued",
+    phase: "queued",
+    progress: 0,
+    message: "Submitting background task.",
+    created_at: new Date().toISOString(),
+  });
+  try {
+    const record = await requestJson(path, {
       method: "POST",
       body: payload,
     });
+    state.activeTasks[panelName] = {
+      task_id: record.task_id,
+      panel: panelName,
+      ...metadata,
+    };
+    saveActiveTasks();
+    await pollBackgroundTask(panelName, true);
+  } catch (error) {
+    setTaskPanelBusy(panelName, false);
+    hideTaskProgress(panel);
+    throw error;
+  }
+}
+
+async function pollBackgroundTask(panelName, immediate = false) {
+  window.clearTimeout(state.taskPollTimers[panelName]);
+  const active = state.activeTasks[panelName];
+  if (!active?.task_id) {
+    return;
+  }
+  const poll = async () => {
+    const current = state.activeTasks[panelName];
+    if (!current?.task_id) {
+      return;
+    }
+    try {
+      const record = await requestJson(`/api/tasks/${encodeURIComponent(current.task_id)}`);
+      showTaskProgress(taskPanel(panelName), record);
+      if (isTerminalTaskStatus(record.status)) {
+        finishBackgroundTask(panelName, record, current);
+        return;
+      }
+    } catch (error) {
+      setPanelStatus(taskPanel(panelName).status, "Polling failed", "error");
+      taskPanel(panelName).message.textContent = error.message;
+    }
+    state.taskPollTimers[panelName] = window.setTimeout(poll, 1000);
+  };
+  if (immediate) {
+    await poll();
+  } else {
+    state.taskPollTimers[panelName] = window.setTimeout(poll, 0);
+  }
+}
+
+function finishBackgroundTask(panelName, record, metadata) {
+  window.clearTimeout(state.taskPollTimers[panelName]);
+  delete state.taskPollTimers[panelName];
+  delete state.activeTasks[panelName];
+  saveActiveTasks();
+  setTaskPanelBusy(panelName, false);
+  if (["failed", "cancelled", "interrupted"].includes(record.status)) {
+    state.terminalTasks[panelName] = {
+      record,
+      metadata: {
+        ...metadata,
+        payload: metadata.payload || record.request || {},
+      },
+    };
+  } else {
+    delete state.terminalTasks[panelName];
+  }
+  saveTerminalTasks();
+  showTaskProgress(taskPanel(panelName), record);
+
+  if (record.status === "succeeded") {
+    completeBackgroundTask(
+      {
+        ...metadata,
+        payload: metadata.payload || record.request || {},
+      },
+      record.result || {}
+    );
+    return;
+  }
+  const tone = record.status === "cancelled" || record.status === "interrupted" ? "warning" : "error";
+  setPanelStatus(taskPanel(panelName).status, taskStatusLabel(record.status), tone);
+  const errorPayload = record.error || {
+    error: record.message || `Task ${record.status}.`,
+    status: record.status,
+    task_id: record.task_id,
+  };
+  renderResult(errorPayload, "raw");
+}
+
+async function handleTaskAction(panelName) {
+  if (state.activeTasks[panelName]) {
+    await cancelActiveTask(panelName);
+    return;
+  }
+  await retryTerminalTask(panelName);
+}
+
+async function retryTerminalTask(panelName) {
+  const terminal = state.terminalTasks[panelName];
+  const operation = terminal?.record?.operation;
+  const path = backgroundTaskPath(operation);
+  const payload = terminal?.record?.request || terminal?.metadata?.payload;
+  if (!path || !payload) {
+    setPanelStatus(taskPanel(panelName).status, "Retry unavailable", "error");
+    return;
+  }
+  delete state.terminalTasks[panelName];
+  saveTerminalTasks();
+  try {
+    await submitBackgroundTask(panelName, path, payload, {
+      kind: terminal.metadata?.kind || backgroundTaskKind(operation),
+      payload,
+    });
+  } catch (error) {
+    renderTaskSubmissionError(panelName, error);
+  }
+}
+
+function completeBackgroundTask(metadata, data) {
+  const payload = metadata.payload || {};
+  if (metadata.kind === "create") {
+    syncAppContext(data);
+    rememberApp(data, {
+      operation: "create",
+      request: payload.message,
+      appName: payload.app_name,
+    });
+    setPanelStatus(els.createStatus, data.status || "Created", "ok");
+    renderResult(data, "changes");
+    return;
+  }
+  if (metadata.kind === "modify-preview") {
+    syncAppContext(data, payload.app_id);
+    storeModifyPreview(data, payload);
+    rememberApp(data, {
+      operation: "modify preview",
+      request: payload.message,
+      appId: payload.app_id,
+    });
+    const guard = data.guard?.risk ? `Guard ${data.guard.risk}` : "Ready";
+    setPanelStatus(els.modifyStatus, guard, guardClass(data.guard));
+    renderResult(data, "changes");
+    return;
+  }
+  if (metadata.kind === "modify-apply") {
+    syncAppContext(data, payload.app_id);
+    rememberApp(data, {
+      operation: payload.plan ? "modify apply reviewed preview" : "modify apply",
+      request: payload.message,
+      appId: payload.app_id,
+    });
+    state.modifyPreview = null;
+    state.modifyPreviewDirty = false;
+    setPanelStatus(els.modifyStatus, payload.plan ? "Applied preview" : "Applied", "ok");
+    renderResult(data, "changes");
+    return;
+  }
+  if (metadata.kind === "run") {
     syncAppContext(data, payload.app_id);
     rememberApp(data, {
       operation: "run draft",
@@ -1712,7 +1888,218 @@ async function handleRun() {
     });
     setPanelStatus(els.runStatus, data.status || "Done", runStatusTone(data));
     renderResult(data, "outputs");
+  }
+}
+
+async function cancelActiveTask(panelName) {
+  const active = state.activeTasks[panelName];
+  if (!active?.task_id) {
+    return;
+  }
+  const panel = taskPanel(panelName);
+  panel.cancel.disabled = true;
+  setPanelStatus(panel.status, "Cancelling", "warning");
+  try {
+    const record = await requestJson(`/api/tasks/${encodeURIComponent(active.task_id)}/cancel`, {
+      method: "POST",
+    });
+    showTaskProgress(panel, record);
+    await pollBackgroundTask(panelName, true);
+  } catch (error) {
+    panel.cancel.disabled = false;
+    setPanelStatus(panel.status, "Cancel failed", "error");
+    renderResult(error.payload || { error: error.message }, "raw");
+  }
+}
+
+function restoreActiveTasks() {
+  for (const panelName of ["create", "modify", "run"]) {
+    const active = state.activeTasks[panelName];
+    if (!active?.task_id) {
+      continue;
+    }
+    setTaskPanelBusy(panelName, true);
+    pollBackgroundTask(panelName);
+  }
+}
+
+function restoreTerminalTasks() {
+  for (const panelName of ["create", "modify", "run"]) {
+    if (state.activeTasks[panelName]) {
+      continue;
+    }
+    const terminal = state.terminalTasks[panelName];
+    if (!terminal?.task_id) {
+      continue;
+    }
+    requestJson(`/api/tasks/${encodeURIComponent(terminal.task_id)}`)
+      .then((record) => {
+        if (!isTerminalTaskStatus(record.status) || record.status === "succeeded") {
+          delete state.terminalTasks[panelName];
+          saveTerminalTasks();
+          return;
+        }
+        state.terminalTasks[panelName] = {
+          record,
+          metadata: {
+            kind: terminal.kind || backgroundTaskKind(record.operation),
+            payload: record.request || {},
+          },
+        };
+        showTaskProgress(taskPanel(panelName), record);
+      })
+      .catch(() => {
+        delete state.terminalTasks[panelName];
+        saveTerminalTasks();
+      });
+  }
+}
+
+function taskPanel(panelName) {
+  const panels = {
+    create: {
+      form: els.createForm,
+      status: els.createStatus,
+      duration: els.createDuration,
+      progress: els.createTaskProgress,
+      message: els.createTaskMessage,
+      bar: els.createTaskBar,
+      cancel: els.createCancelTask,
+    },
+    modify: {
+      form: els.modifyForm,
+      status: els.modifyStatus,
+      duration: els.modifyDuration,
+      progress: els.modifyTaskProgress,
+      message: els.modifyTaskMessage,
+      bar: els.modifyTaskBar,
+      cancel: els.modifyCancelTask,
+    },
+    run: {
+      form: els.runForm,
+      status: els.runStatus,
+      duration: els.runDuration,
+      progress: els.runTaskProgress,
+      message: els.runTaskMessage,
+      bar: els.runTaskBar,
+      cancel: els.runCancelTask,
+    },
+  };
+  return panels[panelName];
+}
+
+function setTaskPanelBusy(panelName, busy) {
+  const panel = taskPanel(panelName);
+  Array.from(panel.form.querySelectorAll("button")).forEach((button) => {
+    button.disabled = busy;
   });
+  panel.cancel.disabled = !busy;
+}
+
+function showTaskProgress(panel, record) {
+  panel.progress.classList.remove("is-hidden");
+  panel.message.textContent = taskProgressMessage(record);
+  if (Number.isFinite(record.progress)) {
+    panel.bar.value = Number(record.progress);
+  } else {
+    panel.bar.removeAttribute("value");
+  }
+  const active = !isTerminalTaskStatus(record.status);
+  const retryable = ["failed", "cancelled", "interrupted"].includes(record.status);
+  panel.bar.classList.toggle("is-hidden", !active && record.status !== "succeeded");
+  panel.cancel.classList.toggle("is-hidden", !active && !retryable);
+  panel.cancel.textContent = active ? "Cancel" : "Retry";
+  panel.cancel.title = active ? "Cancel this task" : "Start a new task with the same request";
+  panel.cancel.disabled = record.status === "cancel_requested";
+  setPanelStatus(panel.status, taskStatusLabel(record.status), taskStatusTone(record.status));
+  updateTaskDurationFromRecord(panel.duration, record, active);
+}
+
+function hideTaskProgress(panel) {
+  panel.progress.classList.add("is-hidden");
+  panel.bar.classList.remove("is-hidden");
+  panel.cancel.classList.add("is-hidden");
+  panel.cancel.textContent = "Cancel";
+  panel.cancel.title = "";
+}
+
+function updateTaskDurationFromRecord(element, record, running) {
+  const startedAt = Date.parse(record.started_at || record.created_at || "");
+  const finishedAt = Date.parse(record.finished_at || "");
+  if (!Number.isFinite(startedAt)) {
+    resetTaskDuration(element);
+    return;
+  }
+  const endAt = Number.isFinite(finishedAt) ? finishedAt : Date.now();
+  setTaskDuration(element, Math.max(0, endAt - startedAt), running);
+}
+
+function isTerminalTaskStatus(status) {
+  return ["succeeded", "failed", "cancelled", "interrupted"].includes(status);
+}
+
+function taskStatusLabel(status) {
+  return {
+    queued: "Queued",
+    running: "Running",
+    cancel_requested: "Cancelling",
+    succeeded: "Completed",
+    failed: "Error",
+    cancelled: "Cancelled",
+    interrupted: "Interrupted",
+  }[status] || status || "Working";
+}
+
+function taskStatusTone(status) {
+  if (status === "succeeded") {
+    return "ok";
+  }
+  if (["cancel_requested", "cancelled", "interrupted"].includes(status)) {
+    return "warning";
+  }
+  if (status === "failed") {
+    return "error";
+  }
+  return "muted";
+}
+
+function taskProgressMessage(record) {
+  if (record.status === "cancel_requested") {
+    return "Cancellation requested · Waiting for the current external call to return.";
+  }
+  if (record.status === "cancelled") {
+    return "Task cancelled · Retry starts a new task from the beginning.";
+  }
+  if (record.status === "interrupted") {
+    return "Interrupted by service restart · Retry starts a new task from the beginning.";
+  }
+  if (record.status === "failed") {
+    return "Task failed · Retry starts a new task with the same request.";
+  }
+  return [record.phase, record.message].filter(Boolean).join(" · ");
+}
+
+function backgroundTaskPath(operation) {
+  return {
+    "workflow.create": "/api/tasks/workflows/create",
+    "workflow.modify.draft": "/api/tasks/workflows/modify/draft",
+    "workflow.modify.apply": "/api/tasks/workflows/modify/apply",
+    "workflow.run.draft": "/api/tasks/workflows/run/draft",
+  }[operation] || "";
+}
+
+function backgroundTaskKind(operation) {
+  return {
+    "workflow.create": "create",
+    "workflow.modify.draft": "modify-preview",
+    "workflow.modify.apply": "modify-apply",
+    "workflow.run.draft": "run",
+  }[operation] || "";
+}
+
+function renderTaskSubmissionError(panelName, error) {
+  setPanelStatus(taskPanel(panelName).status, "Error", "error");
+  renderResult(error.payload || { error: error.message }, "raw");
 }
 
 async function withBusy(container, statusElement, durationElement, label, action) {
@@ -2429,6 +2816,63 @@ function loadHistory() {
   }
 }
 
+function loadActiveTasks() {
+  try {
+    const raw = localStorage.getItem(ACTIVE_TASKS_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch (error) {
+    return {};
+  }
+}
+
+function saveActiveTasks() {
+  const persisted = Object.fromEntries(
+    Object.entries(state.activeTasks).map(([panelName, task]) => [
+      panelName,
+      {
+        task_id: task.task_id,
+        panel: task.panel,
+        kind: task.kind,
+      },
+    ])
+  );
+  try {
+    localStorage.setItem(ACTIVE_TASKS_KEY, JSON.stringify(persisted));
+  } catch (error) {
+    // The in-memory task remains usable even when browser storage is unavailable.
+  }
+}
+
+function loadTerminalTasks() {
+  try {
+    const raw = localStorage.getItem(TERMINAL_TASKS_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch (error) {
+    return {};
+  }
+}
+
+function saveTerminalTasks() {
+  const persisted = Object.fromEntries(
+    Object.entries(state.terminalTasks)
+      .map(([panelName, task]) => [
+        panelName,
+        {
+          task_id: task?.record?.task_id || task?.task_id,
+          kind: task?.metadata?.kind || task?.kind || "",
+        },
+      ])
+      .filter(([, task]) => task.task_id)
+  );
+  try {
+    localStorage.setItem(TERMINAL_TASKS_KEY, JSON.stringify(persisted));
+  } catch (error) {
+    // Retry remains available in memory when browser storage is unavailable.
+  }
+}
+
 function saveHistory() {
   localStorage.setItem(HISTORY_KEY, JSON.stringify(state.history.slice(0, MAX_HISTORY_ITEMS)));
 }
@@ -2877,12 +3321,21 @@ function clearHistory() {
 
 function clearResult() {
   renderResult({});
-  setPanelStatus(els.createStatus, "");
-  setPanelStatus(els.modifyStatus, "");
-  setPanelStatus(els.runStatus, "");
-  resetTaskDuration(els.createDuration);
-  resetTaskDuration(els.modifyDuration);
-  resetTaskDuration(els.runDuration);
+  if (!state.activeTasks.create) {
+    setPanelStatus(els.createStatus, "");
+    resetTaskDuration(els.createDuration);
+    hideTaskProgress(taskPanel("create"));
+  }
+  if (!state.activeTasks.modify) {
+    setPanelStatus(els.modifyStatus, "");
+    resetTaskDuration(els.modifyDuration);
+    hideTaskProgress(taskPanel("modify"));
+  }
+  if (!state.activeTasks.run) {
+    setPanelStatus(els.runStatus, "");
+    resetTaskDuration(els.runDuration);
+    hideTaskProgress(taskPanel("run"));
+  }
 }
 
 function formatRunInputs() {

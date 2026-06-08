@@ -4,8 +4,9 @@ from uuid import UUID
 import httpx
 import pytest
 
-from app.agent.planner import PlannerError, WorkflowPlanner, fallback_plan
+from app.agent.planner import PlannerError, WorkflowPlanner, _read_streamed_chat_completion, fallback_plan
 from app.config import Settings
+from app.tasks import TaskCancelled
 
 
 def _settings(
@@ -176,6 +177,24 @@ def test_planner_retries_transient_server_disconnect(monkeypatch) -> None:
     assert content == '{"nodes":[]}'
     assert captured["posts"] == 2
     assert captured["sleeps"] == [1]
+
+
+def test_streamed_planner_response_honors_cancellation() -> None:
+    class FakeResponse:
+        def iter_lines(self):
+            yield 'data: {"choices":[{"delta":{"content":"{"}}]}'
+            yield 'data: {"choices":[{"delta":{"content":"}"}}]}'
+
+    class CancellingContext:
+        calls = 0
+
+        def raise_if_cancelled(self):
+            self.calls += 1
+            if self.calls > 1:
+                raise TaskCancelled("cancelled")
+
+    with pytest.raises(TaskCancelled):
+        _read_streamed_chat_completion(FakeResponse(), task_context=CancellingContext())
 
 
 def test_fallback_plan_uses_semantic_titles_and_split_prompts() -> None:

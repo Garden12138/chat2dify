@@ -7,3 +7,6 @@ venv/
 .env
 *.py[cod]
 *.egg-info/
+data/*.sqlite3
+data/*.sqlite3-shm
+data/*.sqlite3-wal

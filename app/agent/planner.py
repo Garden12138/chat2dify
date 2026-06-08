@@ -4,7 +4,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -13,6 +13,9 @@ from app.compiler.dify import DifyDslCompiler
 from app.config import PlannerRuntime, Settings
 from app.models import ValidationIssue, WorkflowPlan
 from app.validator import has_errors, validate_dsl, validate_plan
+
+if TYPE_CHECKING:
+    from app.tasks import TaskContext
 
 
 SYSTEM_PROMPT = """You turn a user's workflow request into a compact JSON WorkflowPlan.
@@ -139,9 +142,12 @@ class WorkflowPlanner:
         dsl_version: str,
         tool_selections: list[dict[str, Any]] | None = None,
         agent_selections: list[dict[str, Any]] | None = None,
+        task_context: TaskContext | None = None,
     ) -> PlannerResult:
         runtime = self.settings.planner_runtime()
         if not runtime.api_key:
+            if task_context is not None:
+                task_context.update("planning", 35, "Using the fallback workflow template.")
             plan = fallback_plan(message, app_name=app_name)
             return PlannerResult(
                 plan=plan,
@@ -158,14 +164,28 @@ class WorkflowPlanner:
         errors: list[str] = []
         final_raw_plan: dict[str, Any] | None = None
         for attempt in range(1, 4):
-            content = self._call_llm(
-                message,
-                app_name=app_name,
-                last_error=last_error if attempt else "",
-                tool_selections=tool_selections or [],
-                agent_selections=agent_selections or [],
-            )
+            if task_context is not None:
+                task_context.update(
+                    "planning",
+                    10 + ((attempt - 1) * 12),
+                    f"Generating workflow plan, semantic attempt {attempt}/3.",
+                )
+            call_kwargs = {
+                "app_name": app_name,
+                "last_error": last_error if attempt else "",
+                "tool_selections": tool_selections or [],
+                "agent_selections": agent_selections or [],
+            }
+            if task_context is not None:
+                call_kwargs["task_context"] = task_context
+            content = self._call_llm(message, **call_kwargs)
             try:
+                if task_context is not None:
+                    task_context.update(
+                        "validating-plan",
+                        48 + ((attempt - 1) * 8),
+                        f"Normalizing and validating semantic attempt {attempt}/3.",
+                    )
                 payload = json.loads(_strip_json_fences(content))
                 raw_plan = _extract_plan_payload(payload)
                 final_raw_plan = raw_plan
@@ -206,6 +226,7 @@ class WorkflowPlanner:
         last_error: str = "",
         tool_selections: list[dict[str, Any]] | None = None,
         agent_selections: list[dict[str, Any]] | None = None,
+        task_context: TaskContext | None = None,
     ) -> str:
         runtime = self.settings.planner_runtime()
         url = _chat_completions_url(runtime.base_url)
@@ -247,6 +268,7 @@ class WorkflowPlanner:
             url=url,
             payload=payload,
             error_prefix="Planner LLM",
+            task_context=task_context,
         )
 
 
@@ -256,6 +278,7 @@ def _post_chat_completion(
     url: str,
     payload: dict[str, Any],
     error_prefix: str,
+    task_context: TaskContext | None = None,
 ) -> str:
     headers = {
         "Authorization": f"Bearer {runtime.api_key}",
@@ -271,14 +294,23 @@ def _post_chat_completion(
     total_attempts = runtime.request_retries + 1
     last_error: Exception | None = None
     for request_attempt in range(1, total_attempts + 1):
+        if task_context is not None:
+            task_context.raise_if_cancelled()
+            task_context.update(
+                "planner-request",
+                None,
+                f"Calling {runtime.label}, network attempt {request_attempt}/{total_attempts}.",
+            )
         try:
             with httpx.Client(timeout=timeout) as client:
                 if payload.get("stream"):
                     with client.stream("POST", url, json=payload, headers=headers) as response:
                         response.raise_for_status()
-                        return _read_streamed_chat_completion(response)
+                        return _read_streamed_chat_completion(response, task_context=task_context)
                 response = client.post(url, json=payload, headers=headers)
                 response.raise_for_status()
+                if task_context is not None:
+                    task_context.raise_if_cancelled()
                 data = response.json()
                 return str(data["choices"][0]["message"]["content"])
         except httpx.HTTPStatusError as exc:
@@ -293,7 +325,10 @@ def _post_chat_completion(
             raise PlannerError(f"{error_prefix} returned an invalid chat completion response.") from exc
 
         if request_attempt < total_attempts:
-            time.sleep(min(2 ** (request_attempt - 1), 4))
+            delay = min(2 ** (request_attempt - 1), 4)
+            if task_context is not None:
+                task_context.raise_if_cancelled()
+            time.sleep(delay)
 
     if isinstance(last_error, httpx.ReadTimeout):
         message = f"timed out after {runtime.timeout_seconds:g} seconds while waiting for a response"
@@ -306,9 +341,15 @@ def _post_chat_completion(
     ) from last_error
 
 
-def _read_streamed_chat_completion(response: httpx.Response) -> str:
+def _read_streamed_chat_completion(
+    response: httpx.Response,
+    *,
+    task_context: TaskContext | None = None,
+) -> str:
     content_parts: list[str] = []
     for raw_line in response.iter_lines():
+        if task_context is not None:
+            task_context.raise_if_cancelled()
         line = raw_line.strip()
         if not line or line.startswith(":") or not line.startswith("data:"):
             continue

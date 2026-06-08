@@ -55,6 +55,21 @@ def test_default_dataset_ids_are_parsed_from_env(tmp_path: Path) -> None:
     assert settings.dify_default_dataset_ids == ["dataset-a", "dataset-b"]
 
 
+def test_background_task_settings_resolve_from_project_root(tmp_path: Path) -> None:
+    settings = Settings.from_env(
+        {
+            "DIFY_SOURCE_DIR": "../dify",
+            "CHAT2DIFY_TASK_DB": "runtime/workflow-tasks.sqlite3",
+            "CHAT2DIFY_TASK_WORKERS": "3",
+        },
+        project_root=tmp_path,
+        validate_dify=False,
+    )
+
+    assert settings.task_db_path == (tmp_path / "runtime" / "workflow-tasks.sqlite3").resolve()
+    assert settings.task_workers == 3
+
+
 def test_nvidia_planner_configuration_and_catalog(tmp_path: Path) -> None:
     settings = Settings.from_env(
         {

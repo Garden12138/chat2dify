@@ -5,6 +5,7 @@ import httpx
 
 from app.config import Settings
 from app.dify.client import CSRF_HEADER_NAME, DifyClient, DifyClientError, DifyConflictError
+from app.tasks import TaskCancelled
 
 
 def _settings() -> Settings:
@@ -584,6 +585,42 @@ def test_run_draft_workflow_consumes_sse_and_sends_csrf_cookie() -> None:
     assert seen["files"] == [{"type": "image"}]
     assert seen["csrf"] == "csrf123"
     assert "csrf_token=csrf123" in seen["cookie"]
+
+
+def test_run_draft_workflow_reports_events_and_honors_cancellation() -> None:
+    seen_events: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/console/api/login":
+            return httpx.Response(200, json={"result": "success"}, headers=[("set-cookie", "csrf_token=csrf123; Path=/")])
+        if request.url.path == "/console/api/apps/app-1/workflows/draft/run":
+            return httpx.Response(
+                200,
+                content=(
+                    'data: {"event":"workflow_started","task_id":"task-1"}\n\n'
+                    'data: {"event":"node_started","data":{"node_id":"llm"}}\n\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    def on_event(event, _summary):
+        seen_events.append(event["event"])
+
+    def cancellation_check():
+        if seen_events:
+            raise TaskCancelled("cancelled")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+    with pytest.raises(TaskCancelled):
+        client.run_draft_workflow(
+            "app-1",
+            inputs={},
+            cancellation_check=cancellation_check,
+            event_callback=on_event,
+        )
+
+    assert seen_events == ["workflow_started"]
 
 
 def test_run_draft_workflow_failed_status_is_not_ok() -> None:

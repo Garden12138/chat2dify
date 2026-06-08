@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>chat2dify</title>
-    <link rel="stylesheet" href="/static/styles.css?v=workbench-20260605-task-duration">
+    <link rel="stylesheet" href="/static/styles.css?v=workbench-20260608-background-tasks">
   </head>
   <body>
     <header class="app-header">
@@ -110,6 +110,13 @@
             <span id="create-status" class="panel-status"></span>
           </div>
         </div>
+        <div id="create-task-progress" class="task-progress is-hidden">
+          <div class="task-progress-row">
+            <span id="create-task-message">Waiting</span>
+            <button id="create-cancel-task" type="button" class="secondary task-cancel">Cancel</button>
+          </div>
+          <progress id="create-task-bar" max="100"></progress>
+        </div>
         <form id="create-form" class="form-stack">
           <label>
             App name
@@ -130,6 +137,13 @@
             <span id="modify-duration" class="task-duration">耗时 --</span>
             <span id="modify-status" class="panel-status"></span>
           </div>
+        </div>
+        <div id="modify-task-progress" class="task-progress is-hidden">
+          <div class="task-progress-row">
+            <span id="modify-task-message">Waiting</span>
+            <button id="modify-cancel-task" type="button" class="secondary task-cancel">Cancel</button>
+          </div>
+          <progress id="modify-task-bar" max="100"></progress>
         </div>
         <form id="modify-form" class="form-stack">
           <label>
@@ -163,6 +177,13 @@
             <span id="run-duration" class="task-duration">耗时 --</span>
             <span id="run-status" class="panel-status"></span>
           </div>
+        </div>
+        <div id="run-task-progress" class="task-progress is-hidden">
+          <div class="task-progress-row">
+            <span id="run-task-message">Waiting</span>
+            <button id="run-cancel-task" type="button" class="secondary task-cancel">Cancel</button>
+          </div>
+          <progress id="run-task-bar" max="100"></progress>
         </div>
         <form id="run-form" class="form-stack">
           <label>
@@ -223,6 +244,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js?v=workbench-20260605-task-duration" defer></script>
+    <script src="/static/app.js?v=workbench-20260608-background-task-retry-v2" defer></script>
   </body>
 </html>

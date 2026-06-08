@@ -4,7 +4,7 @@ import base64
 from copy import deepcopy
 from dataclasses import dataclass
 import time
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -528,20 +528,42 @@ class DifyClient:
         inputs: dict[str, Any],
         files: list[dict[str, Any]] | None = None,
         timeout_seconds: float = 120,
+        cancellation_check: Callable[[], None] | None = None,
+        event_callback: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
     ) -> DifyDraftRunResult:
+        if cancellation_check is not None:
+            cancellation_check()
         self._ensure_logged_in()
         payload: dict[str, Any] = {"inputs": inputs}
         if files is not None:
             payload["files"] = files
-        result = self._run_draft_workflow_once(app_id, payload=payload, timeout_seconds=timeout_seconds)
+        result = self._run_draft_workflow_once(
+            app_id,
+            payload=payload,
+            timeout_seconds=timeout_seconds,
+            cancellation_check=cancellation_check,
+            event_callback=event_callback,
+        )
         if result is not None:
             return result
         if self.refresh_token():
-            result = self._run_draft_workflow_once(app_id, payload=payload, timeout_seconds=timeout_seconds)
+            result = self._run_draft_workflow_once(
+                app_id,
+                payload=payload,
+                timeout_seconds=timeout_seconds,
+                cancellation_check=cancellation_check,
+                event_callback=event_callback,
+            )
             if result is not None:
                 return result
         self.login()
-        result = self._run_draft_workflow_once(app_id, payload=payload, timeout_seconds=timeout_seconds)
+        result = self._run_draft_workflow_once(
+            app_id,
+            payload=payload,
+            timeout_seconds=timeout_seconds,
+            cancellation_check=cancellation_check,
+            event_callback=event_callback,
+        )
         if result is None:
             raise DifyClientError("Dify draft run authorization failed after login.")
         return result
@@ -569,6 +591,8 @@ class DifyClient:
         *,
         payload: dict[str, Any],
         timeout_seconds: float,
+        cancellation_check: Callable[[], None] | None = None,
+        event_callback: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
     ) -> DifyDraftRunResult | None:
         path = f"/apps/{app_id}/workflows/draft/run"
         try:
@@ -588,6 +612,8 @@ class DifyClient:
                     app_id=app_id,
                     lines=response.iter_lines(),
                     timeout_seconds=timeout_seconds,
+                    cancellation_check=cancellation_check,
+                    event_callback=event_callback,
                 )
         except DifyRunTimeoutError:
             return _timeout_run_result(app_id=app_id, workflow_url=self.settings.workflow_url(app_id))
@@ -602,6 +628,8 @@ class DifyClient:
         app_id: str,
         lines: Any,
         timeout_seconds: float,
+        cancellation_check: Callable[[], None] | None = None,
+        event_callback: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
     ) -> DifyDraftRunResult:
         events: list[dict[str, Any]] = []
         parse_errors: list[SseParseIssue] = []
@@ -609,10 +637,14 @@ class DifyClient:
         deadline = time.monotonic() + timeout_seconds
         try:
             for parsed in iter_sse_events(_lines_until_deadline(lines, deadline)):
+                if cancellation_check is not None:
+                    cancellation_check()
                 if isinstance(parsed, SseParseIssue):
                     parse_errors.append(parsed)
                     continue
                 events.append(parsed)
+                if event_callback is not None:
+                    event_callback(parsed, summarize_events(events, parse_errors))
                 final = terminal_event(events)
                 if final is not None:
                     break
