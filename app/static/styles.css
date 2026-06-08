@@ -80,6 +80,28 @@ h2 {
   margin-bottom: 14px;
 }
 
+.task-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.task-duration {
+  min-width: 72px;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 720;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.task-duration.is-running {
+  color: var(--accent);
+}
+
 .workspace {
   display: grid;
   grid-template-columns: repeat(4, minmax(220px, 1fr));
@@ -696,6 +718,15 @@ button:disabled {
 
   .header-actions {
     justify-content: flex-start;
+  }
+
+  .task-meta {
+    gap: 6px;
+  }
+
+  .task-duration {
+    min-width: 64px;
+    font-size: 11px;
   }
 
   .workspace {

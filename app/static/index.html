@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>chat2dify</title>
-    <link rel="stylesheet" href="/static/styles.css?v=workbench-20260604-agents">
+    <link rel="stylesheet" href="/static/styles.css?v=workbench-20260605-task-duration">
   </head>
   <body>
     <header class="app-header">
@@ -105,7 +105,10 @@
       <section class="tool-panel" aria-labelledby="create-title">
         <div class="panel-heading">
           <h2 id="create-title">Create</h2>
-          <span id="create-status" class="panel-status"></span>
+          <div class="task-meta">
+            <span id="create-duration" class="task-duration">耗时 --</span>
+            <span id="create-status" class="panel-status"></span>
+          </div>
         </div>
         <form id="create-form" class="form-stack">
           <label>
@@ -123,7 +126,10 @@
       <section class="tool-panel" aria-labelledby="modify-title">
         <div class="panel-heading">
           <h2 id="modify-title">Modify Draft</h2>
-          <span id="modify-status" class="panel-status"></span>
+          <div class="task-meta">
+            <span id="modify-duration" class="task-duration">耗时 --</span>
+            <span id="modify-status" class="panel-status"></span>
+          </div>
         </div>
         <form id="modify-form" class="form-stack">
           <label>
@@ -153,7 +159,10 @@
       <section class="tool-panel" aria-labelledby="run-title">
         <div class="panel-heading">
           <h2 id="run-title">Run Draft</h2>
-          <span id="run-status" class="panel-status"></span>
+          <div class="task-meta">
+            <span id="run-duration" class="task-duration">耗时 --</span>
+            <span id="run-status" class="panel-status"></span>
+          </div>
         </div>
         <form id="run-form" class="form-stack">
           <label>
@@ -214,6 +223,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js?v=workbench-20260605-planner-models" defer></script>
+    <script src="/static/app.js?v=workbench-20260605-task-duration" defer></script>
   </body>
 </html>

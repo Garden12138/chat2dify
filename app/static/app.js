@@ -66,6 +66,7 @@ const els = {
   tabPanels: Array.from(document.querySelectorAll("[data-tab-panel]")),
   createForm: document.querySelector("#create-form"),
   createStatus: document.querySelector("#create-status"),
+  createDuration: document.querySelector("#create-duration"),
   knowledgeForm: document.querySelector("#knowledge-form"),
   knowledgeStatus: document.querySelector("#knowledge-status"),
   knowledgeSearch: document.querySelector("#knowledge-search"),
@@ -86,8 +87,10 @@ const els = {
   agentsSelectedSummary: document.querySelector("#agents-selected-summary"),
   modifyForm: document.querySelector("#modify-form"),
   modifyStatus: document.querySelector("#modify-status"),
+  modifyDuration: document.querySelector("#modify-duration"),
   runForm: document.querySelector("#run-form"),
   runStatus: document.querySelector("#run-status"),
+  runDuration: document.querySelector("#run-duration"),
   createAppName: document.querySelector("#create-app-name"),
   modifyAppId: document.querySelector("#modify-app-id"),
   modifyExpectedHash: document.querySelector("#modify-expected-hash"),
@@ -1554,7 +1557,7 @@ function pruneAgentToolBindings(agent, removedToolKey) {
 }
 
 async function handleCreate() {
-  await withBusy(els.createForm, els.createStatus, "Creating", async () => {
+  await withBusy(els.createForm, els.createStatus, els.createDuration, "Creating", async () => {
     const payload = {
       message: valueOf("#create-message"),
       app_name: optionalValue("#create-app-name"),
@@ -1583,35 +1586,41 @@ async function handleModify(path, mode) {
   if (!els.modifyForm.reportValidity()) {
     return;
   }
-  await withBusy(els.modifyForm, els.modifyStatus, mode === "apply" ? "Applying" : "Previewing", async () => {
-    const payload = {
-      app_id: valueOf("#modify-app-id"),
-      message: valueOf("#modify-message"),
-      expected_hash: optionalValue("#modify-expected-hash"),
-      allow_destructive: document.querySelector("#modify-allow-destructive").checked,
-      dataset_ids: currentDatasetIds(),
-      tool_selections: currentToolSelections(),
-      agent_selections: currentAgentSelections(),
-      planner: currentPlannerSelection(),
-    };
-    ensureAgentSelectionReady(payload.message, payload.agent_selections);
-    const data = await requestJson(path, {
-      method: "POST",
-      body: payload,
-    });
-    syncAppContext(data, payload.app_id);
-    if (mode === "preview") {
-      storeModifyPreview(data, payload);
+  await withBusy(
+    els.modifyForm,
+    els.modifyStatus,
+    els.modifyDuration,
+    mode === "apply" ? "Applying" : "Previewing",
+    async () => {
+      const payload = {
+        app_id: valueOf("#modify-app-id"),
+        message: valueOf("#modify-message"),
+        expected_hash: optionalValue("#modify-expected-hash"),
+        allow_destructive: document.querySelector("#modify-allow-destructive").checked,
+        dataset_ids: currentDatasetIds(),
+        tool_selections: currentToolSelections(),
+        agent_selections: currentAgentSelections(),
+        planner: currentPlannerSelection(),
+      };
+      ensureAgentSelectionReady(payload.message, payload.agent_selections);
+      const data = await requestJson(path, {
+        method: "POST",
+        body: payload,
+      });
+      syncAppContext(data, payload.app_id);
+      if (mode === "preview") {
+        storeModifyPreview(data, payload);
+      }
+      rememberApp(data, {
+        operation: mode === "apply" ? "modify apply" : "modify preview",
+        request: payload.message,
+        appId: payload.app_id,
+      });
+      const guard = data.guard?.risk ? `Guard ${data.guard.risk}` : "Ready";
+      setPanelStatus(els.modifyStatus, mode === "apply" ? "Applied" : guard, guardClass(data.guard));
+      renderResult(data, "changes");
     }
-    rememberApp(data, {
-      operation: mode === "apply" ? "modify apply" : "modify preview",
-      request: payload.message,
-      appId: payload.app_id,
-    });
-    const guard = data.guard?.risk ? `Guard ${data.guard.risk}` : "Ready";
-    setPanelStatus(els.modifyStatus, mode === "apply" ? "Applied" : guard, guardClass(data.guard));
-    renderResult(data, "changes");
-  });
+  );
 }
 
 async function handleReviewedPreviewApply() {
@@ -1632,7 +1641,7 @@ async function handleReviewedPreviewApply() {
     return;
   }
 
-  await withBusy(els.modifyForm, els.modifyStatus, "Applying preview", async () => {
+  await withBusy(els.modifyForm, els.modifyStatus, els.modifyDuration, "Applying preview", async () => {
     const payload = {
       app_id: state.modifyPreview.app_id,
       message: state.modifyPreview.message,
@@ -1668,7 +1677,7 @@ async function handleLoadDraft() {
     els.modifyAppId.focus();
     return;
   }
-  await withBusy(els.modifyForm, els.modifyStatus, "Loading", async () => {
+  await withBusy(els.modifyForm, els.modifyStatus, els.modifyDuration, "Loading", async () => {
     const data = await requestJson(`/api/workflows/${encodeURIComponent(appId)}/draft`);
     syncAppContext(data, appId);
     rememberApp(data, {
@@ -1684,7 +1693,7 @@ async function handleLoadDraft() {
 }
 
 async function handleRun() {
-  await withBusy(els.runForm, els.runStatus, "Running", async () => {
+  await withBusy(els.runForm, els.runStatus, els.runDuration, "Running", async () => {
     const payload = {
       app_id: valueOf("#run-app-id"),
       inputs: parseJsonField("#run-inputs", "Inputs JSON"),
@@ -1706,8 +1715,14 @@ async function handleRun() {
   });
 }
 
-async function withBusy(container, statusElement, label, action) {
+async function withBusy(container, statusElement, durationElement, label, action) {
   const buttons = Array.from(container.querySelectorAll("button"));
+  const startedAt = performance.now();
+  const updateDuration = () => {
+    setTaskDuration(durationElement, performance.now() - startedAt, true);
+  };
+  updateDuration();
+  const durationTimer = window.setInterval(updateDuration, 100);
   try {
     buttons.forEach((button) => {
       button.disabled = true;
@@ -1718,10 +1733,43 @@ async function withBusy(container, statusElement, label, action) {
     setPanelStatus(statusElement, "Error", "error");
     renderResult(error.payload || { error: error.message }, "raw");
   } finally {
+    window.clearInterval(durationTimer);
+    setTaskDuration(durationElement, performance.now() - startedAt, false);
     buttons.forEach((button) => {
       button.disabled = false;
     });
   }
+}
+
+function setTaskDuration(element, elapsedMilliseconds, running = false) {
+  if (!element) {
+    return;
+  }
+  element.textContent = `耗时 ${formatTaskDuration(elapsedMilliseconds)}`;
+  element.classList.toggle("is-running", running);
+}
+
+function resetTaskDuration(element) {
+  if (!element) {
+    return;
+  }
+  element.textContent = "耗时 --";
+  element.classList.remove("is-running");
+}
+
+function formatTaskDuration(elapsedMilliseconds) {
+  const totalSeconds = Math.max(0, elapsedMilliseconds) / 1000;
+  if (totalSeconds < 60) {
+    return `${totalSeconds.toFixed(1)}秒`;
+  }
+  const totalWholeSeconds = Math.floor(totalSeconds);
+  const hours = Math.floor(totalWholeSeconds / 3600);
+  const minutes = Math.floor((totalWholeSeconds % 3600) / 60);
+  const seconds = totalWholeSeconds % 60;
+  if (hours > 0) {
+    return `${hours}小时${minutes}分${seconds}秒`;
+  }
+  return `${minutes}分${seconds}秒`;
 }
 
 async function requestJson(path, options = {}) {
@@ -2832,6 +2880,9 @@ function clearResult() {
   setPanelStatus(els.createStatus, "");
   setPanelStatus(els.modifyStatus, "");
   setPanelStatus(els.runStatus, "");
+  resetTaskDuration(els.createDuration);
+  resetTaskDuration(els.modifyDuration);
+  resetTaskDuration(els.runDuration);
 }
 
 function formatRunInputs() {

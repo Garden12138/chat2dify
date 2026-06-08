@@ -42,6 +42,9 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert 'id="planner-form"' in index.text
     assert 'id="planner-provider"' in index.text
     assert 'id="planner-model"' in index.text
+    assert 'id="create-duration"' in index.text
+    assert 'id="modify-duration"' in index.text
+    assert 'id="run-duration"' in index.text
     assert 'id="history-list"' in index.text
     assert 'id="knowledge-search"' in index.text
     assert 'id="refresh-datasets"' in index.text
@@ -60,6 +63,8 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert "handleCreate" in script.text
     assert "loadPlannerProviders" in script.text
     assert "currentPlannerSelection" in script.text
+    assert "formatTaskDuration" in script.text
+    assert "setTaskDuration" in script.text
     assert "handleLoadDraft" in script.text
     assert "handleReviewedPreviewApply" in script.text
     assert "modifyPreview" in script.text
