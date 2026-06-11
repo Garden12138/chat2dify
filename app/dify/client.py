@@ -273,6 +273,67 @@ class DifyDraftSyncResult:
 
 
 @dataclass(frozen=True)
+class DifyPublishResult:
+    result: str
+    created_at: str
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "DifyPublishResult":
+        return cls(
+            result=str(payload.get("result", "")),
+            created_at=str(payload.get("created_at", "")),
+        )
+
+
+@dataclass(frozen=True)
+class DifyWorkflowTrigger:
+    id: str
+    trigger_type: str
+    title: str
+    node_id: str
+    provider_name: str
+    icon: str
+    status: str
+    created_at: str | None = None
+    updated_at: str | None = None
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "DifyWorkflowTrigger":
+        return cls(
+            id=str(payload.get("id", "")),
+            trigger_type=str(payload.get("trigger_type", "")),
+            title=str(payload.get("title", "")),
+            node_id=str(payload.get("node_id", "")),
+            provider_name=str(payload.get("provider_name", "")),
+            icon=str(payload.get("icon", "")),
+            status=str(payload.get("status", "")),
+            created_at=_string_or_none(payload.get("created_at")),
+            updated_at=_string_or_none(payload.get("updated_at")),
+        )
+
+
+@dataclass(frozen=True)
+class DifyWebhookTrigger:
+    id: str
+    webhook_id: str
+    webhook_url: str
+    webhook_debug_url: str
+    node_id: str
+    created_at: str | None = None
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "DifyWebhookTrigger":
+        return cls(
+            id=str(payload.get("id", "")),
+            webhook_id=str(payload.get("webhook_id", "")),
+            webhook_url=str(payload.get("webhook_url", "")),
+            webhook_debug_url=str(payload.get("webhook_debug_url", "")),
+            node_id=str(payload.get("node_id", "")),
+            created_at=_string_or_none(payload.get("created_at")),
+        )
+
+
+@dataclass(frozen=True)
 class DifyDraftRunResult:
     ok: bool
     status: str
@@ -521,6 +582,63 @@ class DifyClient:
             raise DifyClientError("Dify draft sync response must be a JSON object.")
         return DifyDraftSyncResult.from_payload(body, workflow_url=self.settings.workflow_url(app_id))
 
+    def publish_workflow(
+        self,
+        app_id: str,
+        *,
+        marked_name: str | None = None,
+        marked_comment: str | None = None,
+    ) -> DifyPublishResult:
+        self._ensure_logged_in()
+        payload = {
+            "marked_name": marked_name or "",
+            "marked_comment": marked_comment or "",
+        }
+        response = self._post_with_auth_retry(f"/apps/{app_id}/workflows/publish", payload)
+        self._raise_for_response(response)
+        body = self._json_object(response, "Dify publish response")
+        return DifyPublishResult.from_payload(body)
+
+    def list_workflow_triggers(self, app_id: str) -> list[DifyWorkflowTrigger]:
+        self._ensure_logged_in()
+        response = self._get_with_auth_retry(f"/apps/{app_id}/triggers")
+        self._raise_for_response(response)
+        body = self._json_object(response, "Dify trigger list response")
+        items = body.get("data") if isinstance(body.get("data"), list) else []
+        return [
+            DifyWorkflowTrigger.from_payload(item)
+            for item in items
+            if isinstance(item, dict)
+        ]
+
+    def set_workflow_trigger_status(
+        self,
+        app_id: str,
+        trigger_id: str,
+        *,
+        enabled: bool,
+    ) -> DifyWorkflowTrigger:
+        self._ensure_logged_in()
+        response = self._post_with_auth_retry(
+            f"/apps/{app_id}/trigger-enable",
+            {"trigger_id": trigger_id, "enable_trigger": enabled},
+        )
+        self._raise_for_response(response)
+        return DifyWorkflowTrigger.from_payload(
+            self._json_object(response, "Dify trigger status response")
+        )
+
+    def get_webhook_trigger(self, app_id: str, node_id: str) -> DifyWebhookTrigger:
+        self._ensure_logged_in()
+        response = self._get_with_auth_retry(
+            f"/apps/{app_id}/workflows/triggers/webhook",
+            params={"node_id": node_id},
+        )
+        self._raise_for_response(response)
+        return DifyWebhookTrigger.from_payload(
+            self._json_object(response, "Dify webhook trigger response")
+        )
+
     def run_draft_workflow(
         self,
         app_id: str,
@@ -571,6 +689,16 @@ class DifyClient:
     def _ensure_logged_in(self) -> None:
         if not self.csrf_token:
             self.login()
+
+    @staticmethod
+    def _json_object(response: httpx.Response, label: str) -> dict[str, Any]:
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise DifyClientError(f"Invalid {label}: {response.text}") from exc
+        if not isinstance(payload, dict):
+            raise DifyClientError(f"{label} must be a JSON object.")
+        return payload
 
     def _csrf_headers(self) -> dict[str, str]:
         token = self.csrf_token

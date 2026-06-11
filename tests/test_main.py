@@ -17,8 +17,11 @@ from app.dify.client import (
     DifyDraftRunResult,
     DifyDraftSyncResult,
     DifyDraftWorkflow,
+    DifyPublishResult,
     DifyToolListItem,
     DifyToolListResult,
+    DifyWebhookTrigger,
+    DifyWorkflowTrigger,
 )
 from app.dify.version import DifyVersionInfo
 from app.main import app
@@ -64,6 +67,10 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert 'id="agents-list"' in index.text
     assert 'id="agents-search"' in index.text
     assert "Agent Strategies" in index.text
+    assert 'id="trigger-form"' in index.text
+    assert 'id="trigger-type"' in index.text
+    assert 'id="publish-form"' in index.text
+    assert 'id="workflow-trigger-list"' in index.text
     assert 'id="result-tabs"' in index.text
     assert 'id="load-draft"' in index.text
     assert script.status_code == 200
@@ -82,6 +89,8 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert "handleLoadDraft" in script.text
     assert "handleReviewedPreviewApply" in script.text
     assert "modifyPreview" in script.text
+    assert "triggerSelectionFromPlan" in script.text
+    assert "loadedTriggerSelection" in script.text
     assert "DATASET_IDS_KEY" in script.text
     assert "SELECTED_DATASET_IDS_KEY" in script.text
     assert "loadDatasets" in script.text
@@ -96,6 +105,9 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert "agentConfigurationPanel" in script.text
     assert "agent_parameters" in script.text
     assert "ensureAgentSelectionReady" in script.text
+    assert "currentTriggerSelection" in script.text
+    assert "handlePublish" in script.text
+    assert "loadWorkflowTriggers" in script.text
     assert "Applied reviewed preview" in script.text
     assert "localStorage" in script.text
     assert "renderValidationPanel" in script.text
@@ -1691,6 +1703,161 @@ def test_run_draft_workflow_api_can_return_timeout(monkeypatch) -> None:
     assert data["status"] == "timeout"
 
 
+def test_publish_and_trigger_management_apis(monkeypatch) -> None:
+    settings = _test_settings()
+    selected = normalize_plan_payload(
+        fallback_plan("处理售后 Webhook", app_name="Webhook 售后").model_dump(),
+        trigger_selection={
+            "type": "webhook",
+            "body": [{"name": "query", "type": "string", "required": True}],
+        },
+    )
+    plan = WorkflowPlan.model_validate(selected.payload)
+    graph = yaml.safe_load(
+        DifyDslCompiler(
+            dsl_version="9.9.9",
+            default_model_provider="langgenius/tongyi/tongyi",
+            default_model_name="qwen3.5-plus",
+        ).compile(plan)
+    )["workflow"]["graph"]
+    seen = {}
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get_draft_workflow(self, _app_id):
+            return DifyDraftWorkflow(
+                id="workflow-1",
+                graph=graph,
+                features={},
+                hash="hash-1",
+                version="draft",
+                environment_variables=[],
+                conversation_variables=[],
+                raw={},
+            )
+
+        def get_app_detail(self, app_id):
+            return DifyAppDetail(
+                id=app_id,
+                name="Webhook 售后",
+                mode="workflow",
+                description="",
+                raw={},
+            )
+
+        def publish_workflow(self, app_id, *, marked_name=None, marked_comment=None):
+            seen["publish"] = (app_id, marked_name, marked_comment)
+            return DifyPublishResult(result="success", created_at="2026-06-09T09:00:00")
+
+        def list_workflow_triggers(self, _app_id):
+            return [
+                DifyWorkflowTrigger(
+                    id="trigger-1",
+                    trigger_type="trigger-webhook",
+                    title="接收 Webhook 请求",
+                    node_id="start",
+                    provider_name="",
+                    icon="",
+                    status="enabled",
+                )
+            ]
+
+        def set_workflow_trigger_status(self, app_id, trigger_id, *, enabled):
+            seen["status"] = (app_id, trigger_id, enabled)
+            return DifyWorkflowTrigger(
+                id=trigger_id,
+                trigger_type="trigger-webhook",
+                title="接收 Webhook 请求",
+                node_id="start",
+                provider_name="",
+                icon="",
+                status="enabled" if enabled else "disabled",
+            )
+
+        def get_webhook_trigger(self, _app_id, node_id):
+            return DifyWebhookTrigger(
+                id="webhook-1",
+                webhook_id="hook-1",
+                webhook_url="http://dify.local/hook-1",
+                webhook_debug_url="http://dify.local/debug/hook-1",
+                node_id=node_id,
+            )
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+
+    with TestClient(app) as client:
+        publish = client.post(
+            "/api/workflows/app-1/publish",
+            json={"expected_hash": "hash-1", "marked_name": "v1", "marked_comment": "Webhook release"},
+        )
+        listed = client.get("/api/workflows/app-1/triggers")
+        updated = client.post(
+            "/api/workflows/app-1/triggers/trigger-1/status",
+            json={"enabled": False},
+        )
+        webhook = client.get("/api/workflows/app-1/triggers/webhook", params={"node_id": "start"})
+
+    assert publish.status_code == 200
+    assert publish.json()["status"] == "published"
+    assert publish.json()["webhooks"][0]["webhook_url"] == "http://dify.local/hook-1"
+    assert listed.json()["triggers"][0]["status"] == "enabled"
+    assert updated.json()["trigger"]["status"] == "disabled"
+    assert webhook.json()["webhook_debug_url"] == "http://dify.local/debug/hook-1"
+    assert seen["publish"] == ("app-1", "v1", "Webhook release")
+    assert seen["status"] == ("app-1", "trigger-1", False)
+
+
+def test_publish_rejects_stale_draft_hash(monkeypatch) -> None:
+    settings = _test_settings()
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get_draft_workflow(self, _app_id):
+            return DifyDraftWorkflow(
+                id="workflow-1",
+                graph={},
+                features={},
+                hash="current-hash",
+                version="draft",
+                environment_variables=[],
+                conversation_variables=[],
+                raw={},
+            )
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/app-1/publish",
+            json={"expected_hash": "stale-hash"},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "DRAFT_HASH_MISMATCH"
+
+
 def test_background_create_task_returns_202_and_can_be_polled(monkeypatch, tmp_path) -> None:
     settings = _test_settings()
     settings = Settings.from_env(
@@ -1738,6 +1905,53 @@ def test_background_create_task_returns_202_and_can_be_polled(monkeypatch, tmp_p
     assert task["status"] == "succeeded"
     assert task["progress"] == 100
     assert task["result"]["app_id"] == "app-background"
+
+
+def test_background_publish_task_returns_202_and_can_be_polled(monkeypatch, tmp_path) -> None:
+    settings = Settings.from_env(
+        {
+            "DIFY_SOURCE_DIR": "../dify",
+            "OPENAI_API_KEY": "token",
+            "CHAT2DIFY_TASK_DB": str(tmp_path / "publish-tasks.sqlite3"),
+        },
+        validate_dify=False,
+    )
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+
+    def fake_publish(app_id, request, *, task_context=None):
+        assert task_context is not None
+        task_context.update("publishing", 75, "Publishing")
+        return {
+            "status": "published",
+            "app_id": app_id,
+            "base_hash": request.expected_hash,
+            "triggers": [],
+        }
+
+    monkeypatch.setattr("app.main._publish_workflow", fake_publish)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/tasks/workflows/publish",
+            json={"app_id": "app-1", "expected_hash": "hash-1"},
+        )
+        assert response.status_code == 202
+        task_id = response.json()["task_id"]
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            task_response = client.get(f"/api/tasks/{task_id}")
+            if task_response.json()["status"] == "succeeded":
+                break
+            time.sleep(0.01)
+
+    task = task_response.json()
+    assert task["status"] == "succeeded"
+    assert task["result"]["status"] == "published"
+    assert task["result"]["app_id"] == "app-1"
 
 
 class _KnowledgePlanner:

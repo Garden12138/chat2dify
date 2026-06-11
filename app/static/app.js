@@ -9,6 +9,7 @@ const SELECTED_AGENTS_KEY = "chat2dify.workbench.selectedAgents.v1";
 const AGENT_SEARCH_KEY = "chat2dify.workbench.agentSearch.v1";
 const PLANNER_PROVIDER_KEY = "chat2dify.workbench.plannerProvider.v1";
 const PLANNER_MODEL_KEY = "chat2dify.workbench.plannerModel.v1";
+const TRIGGER_SELECTION_KEY = "chat2dify.workbench.triggerSelection.v1";
 const ACTIVE_TASKS_KEY = "chat2dify.workbench.activeTasks.v1";
 const TERMINAL_TASKS_KEY = "chat2dify.workbench.terminalTasks.v1";
 const MAX_HISTORY_ITEMS = 12;
@@ -48,6 +49,8 @@ const state = {
     selected: [],
     keyword: "",
   },
+  triggerSelection: null,
+  workflowTriggers: [],
   defaultModel: {
     provider: "",
     name: "",
@@ -94,6 +97,29 @@ const els = {
   agentsSearch: document.querySelector("#agents-search"),
   agentsList: document.querySelector("#agents-list"),
   agentsSelectedSummary: document.querySelector("#agents-selected-summary"),
+  triggerForm: document.querySelector("#trigger-form"),
+  triggerStatus: document.querySelector("#trigger-status"),
+  triggerType: document.querySelector("#trigger-type"),
+  triggerWebhookFields: document.querySelector("#trigger-webhook-fields"),
+  triggerWebhookMethod: document.querySelector("#trigger-webhook-method"),
+  triggerWebhookContentType: document.querySelector("#trigger-webhook-content-type"),
+  triggerWebhookHeaders: document.querySelector("#trigger-webhook-headers"),
+  triggerWebhookQuery: document.querySelector("#trigger-webhook-query"),
+  triggerWebhookBody: document.querySelector("#trigger-webhook-body"),
+  triggerWebhookStatusCode: document.querySelector("#trigger-webhook-status-code"),
+  triggerWebhookTimeout: document.querySelector("#trigger-webhook-timeout"),
+  triggerWebhookResponse: document.querySelector("#trigger-webhook-response"),
+  triggerScheduleFields: document.querySelector("#trigger-schedule-fields"),
+  triggerScheduleMode: document.querySelector("#trigger-schedule-mode"),
+  triggerScheduleTimezone: document.querySelector("#trigger-schedule-timezone"),
+  triggerScheduleVisual: document.querySelector("#trigger-schedule-visual"),
+  triggerScheduleFrequency: document.querySelector("#trigger-schedule-frequency"),
+  triggerScheduleTime: document.querySelector("#trigger-schedule-time"),
+  triggerScheduleMinute: document.querySelector("#trigger-schedule-minute"),
+  triggerScheduleWeekdays: document.querySelector("#trigger-schedule-weekdays"),
+  triggerScheduleMonthlyDays: document.querySelector("#trigger-schedule-monthly-days"),
+  triggerScheduleCronField: document.querySelector("#trigger-schedule-cron-field"),
+  triggerScheduleCron: document.querySelector("#trigger-schedule-cron"),
   modifyForm: document.querySelector("#modify-form"),
   modifyStatus: document.querySelector("#modify-status"),
   modifyDuration: document.querySelector("#modify-duration"),
@@ -108,6 +134,16 @@ const els = {
   runTaskMessage: document.querySelector("#run-task-message"),
   runTaskBar: document.querySelector("#run-task-bar"),
   runCancelTask: document.querySelector("#run-cancel-task"),
+  publishForm: document.querySelector("#publish-form"),
+  publishStatus: document.querySelector("#publish-status"),
+  publishDuration: document.querySelector("#publish-duration"),
+  publishTaskProgress: document.querySelector("#publish-task-progress"),
+  publishTaskMessage: document.querySelector("#publish-task-message"),
+  publishTaskBar: document.querySelector("#publish-task-bar"),
+  publishCancelTask: document.querySelector("#publish-cancel-task"),
+  publishAppId: document.querySelector("#publish-app-id"),
+  publishExpectedHash: document.querySelector("#publish-expected-hash"),
+  workflowTriggerList: document.querySelector("#workflow-trigger-list"),
   createAppName: document.querySelector("#create-app-name"),
   modifyAppId: document.querySelector("#modify-app-id"),
   modifyExpectedHash: document.querySelector("#modify-expected-hash"),
@@ -132,6 +168,7 @@ document.addEventListener("DOMContentLoaded", () => {
   state.agents.keyword = loadAgentSearchText();
   state.planner.provider = loadPlannerProvider();
   state.planner.model = loadPlannerModel();
+  state.triggerSelection = loadTriggerSelection();
   state.activeTasks = loadActiveTasks();
   state.terminalTasks = loadTerminalTasks();
   els.knowledgeSearch.value = state.datasets.keyword;
@@ -139,11 +176,14 @@ document.addEventListener("DOMContentLoaded", () => {
   els.toolsSearch.value = state.tools.keyword;
   els.toolsType.value = state.tools.providerType;
   els.agentsSearch.value = state.agents.keyword;
+  restoreTriggerForm(state.triggerSelection);
   bindEvents();
   renderHistory();
   renderPlannerModels();
   renderKnowledgeDatasets();
   renderTools();
+  renderTriggerForm();
+  renderWorkflowTriggers([]);
   refreshHealth();
   loadPlannerProviders();
   loadDatasets({ reset: true });
@@ -246,6 +286,8 @@ function bindEvents() {
       handleAgentConfigInput(field);
     }
   });
+  els.triggerForm.addEventListener("input", handleTriggerFormChange);
+  els.triggerForm.addEventListener("change", handleTriggerFormChange);
 
   els.createForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -254,6 +296,7 @@ function bindEvents() {
   els.createCancelTask.addEventListener("click", () => handleTaskAction("create"));
   els.modifyCancelTask.addEventListener("click", () => handleTaskAction("modify"));
   els.runCancelTask.addEventListener("click", () => handleTaskAction("run"));
+  els.publishCancelTask.addEventListener("click", () => handleTaskAction("publish"));
 
   document.querySelector("#preview-modify").addEventListener("click", async () => {
     await handleModify("/api/workflows/modify/draft", "preview");
@@ -274,6 +317,14 @@ function bindEvents() {
     event.preventDefault();
     await handleRun();
   });
+  els.publishForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await handlePublish();
+  });
+  document.querySelector("#refresh-workflow-triggers").addEventListener("click", async () => {
+    await loadWorkflowTriggers();
+  });
+  els.workflowTriggerList.addEventListener("click", handleWorkflowTriggerAction);
 
   document.querySelector("#format-inputs").addEventListener("click", formatRunInputs);
   document.querySelector("#reset-inputs").addEventListener("click", resetRunInputs);
@@ -1562,6 +1613,183 @@ function agentToolKeyFromValue(value = {}) {
   return [value.type || "", value.provider_name || value.provider_id || "", value.tool_name || ""].join("::");
 }
 
+function handleTriggerFormChange() {
+  renderTriggerForm();
+  try {
+    state.triggerSelection = currentTriggerSelection();
+    localStorage.setItem(TRIGGER_SELECTION_KEY, JSON.stringify(state.triggerSelection));
+    setPanelStatus(
+      els.triggerStatus,
+      triggerTypeLabel(state.triggerSelection.type),
+      state.triggerSelection.type === "user-input" ? "muted" : "ok"
+    );
+  } catch (error) {
+    setPanelStatus(els.triggerStatus, "Invalid", "error");
+  }
+  markModifyPreviewDirty();
+}
+
+function renderTriggerForm() {
+  const type = els.triggerType.value || "user-input";
+  els.triggerWebhookFields.classList.toggle("is-hidden", type !== "webhook");
+  els.triggerScheduleFields.classList.toggle("is-hidden", type !== "schedule");
+  const cronMode = type === "schedule" && els.triggerScheduleMode.value === "cron";
+  els.triggerScheduleVisual.classList.toggle("is-hidden", cronMode);
+  els.triggerScheduleCronField.classList.toggle("is-hidden", !cronMode);
+  setPanelStatus(els.triggerStatus, triggerTypeLabel(type), type === "user-input" ? "muted" : "ok");
+}
+
+function currentTriggerSelection() {
+  const type = els.triggerType.value || "user-input";
+  if (type === "user-input") {
+    return { type: "user-input" };
+  }
+  if (type === "webhook") {
+    return {
+      type: "webhook",
+      method: els.triggerWebhookMethod.value || "POST",
+      content_type: els.triggerWebhookContentType.value || "application/json",
+      headers: parseTriggerParameters(els.triggerWebhookHeaders.value, "headers"),
+      params: parseTriggerParameters(els.triggerWebhookQuery.value, "query parameters"),
+      body: parseTriggerParameters(els.triggerWebhookBody.value, "body parameters"),
+      status_code: boundedNumber(els.triggerWebhookStatusCode.value, 100, 599, 200),
+      response_body: els.triggerWebhookResponse.value || "",
+      timeout: boundedNumber(els.triggerWebhookTimeout.value, 1, 300, 30),
+    };
+  }
+  const mode = els.triggerScheduleMode.value || "visual";
+  const selection = {
+    type: "schedule",
+    mode,
+    timezone: els.triggerScheduleTimezone.value.trim() || "Asia/Shanghai",
+  };
+  if (mode === "cron") {
+    selection.cron_expression = els.triggerScheduleCron.value.trim();
+    return selection;
+  }
+  selection.frequency = els.triggerScheduleFrequency.value || "daily";
+  selection.visual_config = {
+    time: toTwelveHourTime(els.triggerScheduleTime.value || "09:00"),
+    weekdays: splitValues(els.triggerScheduleWeekdays.value).map((item) => item.toLowerCase()),
+    on_minute: boundedNumber(els.triggerScheduleMinute.value, 0, 59, 0),
+    monthly_days: splitValues(els.triggerScheduleMonthlyDays.value).map((item) => {
+      if (item.toLowerCase() === "last") {
+        return "last";
+      }
+      return Number(item);
+    }),
+  };
+  return selection;
+}
+
+function parseTriggerParameters(value, label) {
+  const seen = new Set();
+  return String(value || "")
+    .split(/\n|,/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const required = line.endsWith("*");
+      const normalized = required ? line.slice(0, -1).trim() : line;
+      const separator = normalized.indexOf(":");
+      const name = (separator >= 0 ? normalized.slice(0, separator) : normalized).trim();
+      const type = (separator >= 0 ? normalized.slice(separator + 1) : "string").trim() || "string";
+      if (!/^[A-Za-z_][A-Za-z0-9_-]*$/.test(name)) {
+        throw new Error(`${label}: invalid parameter name "${name}".`);
+      }
+      const outputName = label === "headers" ? name.replaceAll("-", "_") : name;
+      if (seen.has(outputName)) {
+        throw new Error(`${label}: duplicate parameter "${name}".`);
+      }
+      seen.add(outputName);
+      return { name, type, required };
+    });
+}
+
+function restoreTriggerForm(selection) {
+  const value = selection && typeof selection === "object" ? selection : { type: "user-input" };
+  els.triggerType.value = value.type || "user-input";
+  els.triggerWebhookMethod.value = value.method || "POST";
+  els.triggerWebhookContentType.value = value.content_type || "application/json";
+  els.triggerWebhookHeaders.value = formatTriggerParameters(value.headers);
+  els.triggerWebhookQuery.value = formatTriggerParameters(value.params);
+  els.triggerWebhookBody.value = formatTriggerParameters(value.body);
+  els.triggerWebhookStatusCode.value = String(value.status_code || 200);
+  els.triggerWebhookTimeout.value = String(value.timeout || 30);
+  els.triggerWebhookResponse.value = value.response_body || "";
+  els.triggerScheduleMode.value = value.mode || "visual";
+  els.triggerScheduleTimezone.value = value.timezone || "Asia/Shanghai";
+  els.triggerScheduleFrequency.value = value.frequency || "daily";
+  const visual = value.visual_config && typeof value.visual_config === "object" ? value.visual_config : {};
+  els.triggerScheduleTime.value = toTwentyFourHourTime(visual.time || "09:00 AM");
+  els.triggerScheduleMinute.value = String(visual.on_minute ?? 0);
+  els.triggerScheduleWeekdays.value = (visual.weekdays || ["mon"]).join(",");
+  els.triggerScheduleMonthlyDays.value = (visual.monthly_days || [1]).join(",");
+  els.triggerScheduleCron.value = value.cron_expression || "0 9 * * *";
+}
+
+function loadTriggerSelection() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(TRIGGER_SELECTION_KEY) || "{}");
+    return parsed && typeof parsed === "object" ? parsed : { type: "user-input" };
+  } catch (error) {
+    return { type: "user-input" };
+  }
+}
+
+function formatTriggerParameters(items) {
+  return (Array.isArray(items) ? items : [])
+    .map((item) => `${item.name || ""}:${item.type || "string"}${item.required ? "*" : ""}`)
+    .filter((item) => !item.startsWith(":"))
+    .join("\n");
+}
+
+function triggerTypeLabel(type) {
+  return {
+    "user-input": "User Input",
+    webhook: "Webhook",
+    schedule: "Schedule",
+  }[type] || type;
+}
+
+function splitValues(value) {
+  return String(value || "").split(/[\s,]+/).map((item) => item.trim()).filter(Boolean);
+}
+
+function boundedNumber(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, Math.trunc(number)));
+}
+
+function toTwelveHourTime(value) {
+  const [hoursText, minutesText] = String(value || "09:00").split(":");
+  const hours = boundedNumber(hoursText, 0, 23, 9);
+  const minutes = boundedNumber(minutesText, 0, 59, 0);
+  const period = hours >= 12 ? "PM" : "AM";
+  const twelveHours = hours % 12 || 12;
+  return `${String(twelveHours).padStart(2, "0")}:${String(minutes).padStart(2, "0")} ${period}`;
+}
+
+function toTwentyFourHourTime(value) {
+  const match = String(value || "").match(/^(\d{1,2}):(\d{2})\s*(AM|PM)?$/i);
+  if (!match) {
+    return "09:00";
+  }
+  let hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  const period = (match[3] || "").toUpperCase();
+  if (period === "PM" && hours < 12) {
+    hours += 12;
+  }
+  if (period === "AM" && hours === 12) {
+    hours = 0;
+  }
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
 function pruneAgentToolBindings(agent, removedToolKey) {
   if (!agent?.agent_parameters || typeof agent.agent_parameters !== "object") {
     return agent;
@@ -1588,6 +1816,7 @@ async function handleCreate() {
       dataset_ids: currentDatasetIds(),
       tool_selections: currentToolSelections(),
       agent_selections: currentAgentSelections(),
+      trigger_selection: currentTriggerSelection(),
       planner: currentPlannerSelection(),
     };
     ensureAgentSelectionReady(payload.message, payload.agent_selections);
@@ -1613,6 +1842,7 @@ async function handleModify(path, mode) {
       dataset_ids: currentDatasetIds(),
       tool_selections: currentToolSelections(),
       agent_selections: currentAgentSelections(),
+      trigger_selection: currentTriggerSelection(),
       planner: currentPlannerSelection(),
     };
     ensureAgentSelectionReady(payload.message, payload.agent_selections);
@@ -1656,6 +1886,7 @@ async function handleReviewedPreviewApply() {
       dataset_ids: state.modifyPreview.dataset_ids,
       tool_selections: state.modifyPreview.tool_selections,
       agent_selections: state.modifyPreview.agent_selections,
+      trigger_selection: state.modifyPreview.trigger_selection,
       planner: state.modifyPreview.planner,
     };
     await submitBackgroundTask("modify", "/api/tasks/workflows/modify/apply", payload, {
@@ -1676,6 +1907,14 @@ async function handleLoadDraft() {
   }
   await withBusy(els.modifyForm, els.modifyStatus, els.modifyDuration, "Loading", async () => {
     const data = await requestJson(`/api/workflows/${encodeURIComponent(appId)}/draft`);
+    const loadedTriggerSelection = triggerSelectionFromPlan(data.plan);
+    state.triggerSelection = loadedTriggerSelection;
+    restoreTriggerForm(loadedTriggerSelection);
+    renderTriggerForm();
+    localStorage.setItem(
+      TRIGGER_SELECTION_KEY,
+      JSON.stringify(loadedTriggerSelection)
+    );
     syncAppContext(data, appId);
     rememberApp(data, {
       operation: "load draft",
@@ -1689,8 +1928,57 @@ async function handleLoadDraft() {
   });
 }
 
+function triggerSelectionFromPlan(plan) {
+  const nodes = Array.isArray(plan?.nodes) ? plan.nodes : [];
+  const webhook = nodes.find((node) => node?.type === "trigger-webhook");
+  if (webhook) {
+    const params = webhook.params && typeof webhook.params === "object" ? webhook.params : {};
+    return {
+      type: "webhook",
+      method: params.method || "POST",
+      content_type: params.content_type || "application/json",
+      headers: Array.isArray(params.headers) ? params.headers : [],
+      params: Array.isArray(params.params) ? params.params : [],
+      body: Array.isArray(params.body) ? params.body : [],
+      status_code: params.status_code || 200,
+      response_body: params.response_body || "",
+      timeout: params.timeout || 30,
+    };
+  }
+
+  const schedule = nodes.find((node) => node?.type === "trigger-schedule");
+  if (schedule) {
+    const params = schedule.params && typeof schedule.params === "object" ? schedule.params : {};
+    if (params.mode === "cron") {
+      return {
+        type: "schedule",
+        mode: "cron",
+        cron_expression: params.cron_expression || "",
+        timezone: params.timezone || "Asia/Shanghai",
+      };
+    }
+    return {
+      type: "schedule",
+      mode: "visual",
+      frequency: params.frequency || "daily",
+      visual_config: params.visual_config && typeof params.visual_config === "object"
+        ? params.visual_config
+        : {},
+      timezone: params.timezone || "Asia/Shanghai",
+    };
+  }
+
+  return { type: "user-input" };
+}
+
 async function handleRun() {
   try {
+    const triggerNodes = workflowTriggerNodes(state.lastResponse.plan);
+    if (triggerNodes.length && (state.lastResponse.app_id || "") === valueOf("#run-app-id")) {
+      throw new Error(
+        "This workflow starts from a trigger. Publish it, then use its Webhook URL or schedule instead of Run Draft inputs."
+      );
+    }
     const payload = {
       app_id: valueOf("#run-app-id"),
       inputs: parseJsonField("#run-inputs", "Inputs JSON"),
@@ -1703,6 +1991,181 @@ async function handleRun() {
   } catch (error) {
     renderTaskSubmissionError("run", error);
   }
+}
+
+async function handlePublish() {
+  if (!els.publishForm.reportValidity()) {
+    return;
+  }
+  try {
+    const payload = {
+      app_id: valueOf("#publish-app-id"),
+      expected_hash: optionalValue("#publish-expected-hash"),
+      marked_name: optionalValue("#publish-version-name"),
+      marked_comment: optionalValue("#publish-version-note"),
+    };
+    await submitBackgroundTask("publish", "/api/tasks/workflows/publish", payload, {
+      kind: "publish",
+      payload,
+    });
+  } catch (error) {
+    renderTaskSubmissionError("publish", error);
+  }
+}
+
+async function loadWorkflowTriggers() {
+  const appId = valueOf("#publish-app-id") || valueOf("#modify-app-id");
+  if (!appId) {
+    setPanelStatus(els.publishStatus, "App ID required", "error");
+    els.publishAppId.focus();
+    return;
+  }
+  await withBusy(els.publishForm, els.publishStatus, els.publishDuration, "Loading", async () => {
+    const data = await requestJson(`/api/workflows/${encodeURIComponent(appId)}/triggers`);
+    const triggers = Array.isArray(data.triggers) ? data.triggers : [];
+    const webhooks = [];
+    await Promise.all(
+      triggers
+        .filter((trigger) => trigger.trigger_type === "webhook" || trigger.trigger_type === "trigger-webhook")
+        .map(async (trigger) => {
+          try {
+            const webhook = await requestJson(
+              `/api/workflows/${encodeURIComponent(appId)}/triggers/webhook?node_id=${encodeURIComponent(trigger.node_id)}`
+            );
+            webhooks.push(webhook);
+          } catch (error) {
+            webhooks.push({ node_id: trigger.node_id, error: error.message });
+          }
+        })
+    );
+    updateWorkflowTriggers(triggers, webhooks);
+    setPanelStatus(els.publishStatus, triggers.length ? "Loaded" : "No triggers", triggers.length ? "ok" : "muted");
+  });
+}
+
+async function handleWorkflowTriggerAction(event) {
+  const copyButton = event.target.closest("[data-copy-trigger-url]");
+  if (copyButton) {
+    await copyValue(copyButton.dataset.copyTriggerUrl, copyButton, "Copy URL");
+    return;
+  }
+  const toggleButton = event.target.closest("[data-trigger-id]");
+  if (!toggleButton) {
+    return;
+  }
+  const appId = valueOf("#publish-app-id");
+  const enabled = toggleButton.dataset.triggerEnabled !== "true";
+  toggleButton.disabled = true;
+  try {
+    await requestJson(
+      `/api/workflows/${encodeURIComponent(appId)}/triggers/${encodeURIComponent(toggleButton.dataset.triggerId)}/status`,
+      {
+        method: "POST",
+        body: { enabled },
+      }
+    );
+    await loadWorkflowTriggers();
+  } catch (error) {
+    toggleButton.disabled = false;
+    setPanelStatus(els.publishStatus, "Update failed", "error");
+    renderResult(error.payload || { error: error.message }, "raw");
+  }
+}
+
+function updateWorkflowTriggers(triggers, webhooks = []) {
+  const webhookByNode = new Map(
+    (Array.isArray(webhooks) ? webhooks : [])
+      .filter((item) => item && item.node_id)
+      .map((item) => [item.node_id, item])
+  );
+  state.workflowTriggers = (Array.isArray(triggers) ? triggers : []).map((trigger) => ({
+    ...trigger,
+    webhook: webhookByNode.get(trigger.node_id) || null,
+  }));
+  renderWorkflowTriggers(state.workflowTriggers);
+}
+
+function renderWorkflowTriggers(triggers) {
+  if (!Array.isArray(triggers) || triggers.length === 0) {
+    els.workflowTriggerList.replaceChildren(
+      emptyState("Publish a trigger workflow, then refresh to manage its status and endpoint.")
+    );
+    return;
+  }
+  els.workflowTriggerList.replaceChildren(
+    ...triggers.map((trigger) => {
+      const card = document.createElement("article");
+      card.className = "managed-trigger";
+      const heading = document.createElement("div");
+      heading.className = "managed-trigger-heading";
+      const title = document.createElement("strong");
+      title.textContent = trigger.title || trigger.trigger_type || "Trigger";
+      const status = document.createElement("span");
+      const enabled = triggerStatusEnabled(trigger.status);
+      status.className = `panel-status ${enabled ? "status-ok" : "status-warning"}`;
+      status.textContent = enabled ? "Enabled" : "Disabled";
+      heading.append(title, status);
+      const meta = document.createElement("div");
+      meta.className = "managed-trigger-meta";
+      meta.textContent = [trigger.trigger_type, trigger.node_id].filter(Boolean).join(" · ");
+      const actions = document.createElement("div");
+      actions.className = "button-row";
+      if (trigger.id) {
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "secondary";
+        toggle.dataset.triggerId = trigger.id;
+        toggle.dataset.triggerEnabled = String(enabled);
+        toggle.textContent = enabled ? "Disable" : "Enable";
+        actions.append(toggle);
+      }
+      const webhookUrl = trigger.webhook?.webhook_url;
+      const debugUrl = trigger.webhook?.webhook_debug_url;
+      if (webhookUrl) {
+        actions.append(triggerUrlButton("Copy URL", webhookUrl));
+      }
+      if (debugUrl) {
+        actions.append(triggerUrlButton("Copy debug URL", debugUrl));
+      }
+      card.append(heading, meta);
+      if (webhookUrl) {
+        const url = document.createElement("a");
+        url.className = "managed-trigger-url";
+        url.href = webhookUrl;
+        url.target = "_blank";
+        url.rel = "noreferrer";
+        url.textContent = webhookUrl;
+        card.append(url);
+      }
+      if (trigger.webhook?.error) {
+        card.append(renderMessageRow({ tone: "warning", text: trigger.webhook.error }));
+      }
+      card.append(actions);
+      return card;
+    })
+  );
+}
+
+function triggerUrlButton(label, url) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "secondary";
+  button.dataset.copyTriggerUrl = url;
+  button.textContent = label;
+  return button;
+}
+
+function triggerStatusEnabled(status) {
+  if (typeof status === "boolean") {
+    return status;
+  }
+  return ["enabled", "active", "true", "1"].includes(String(status || "").toLowerCase());
+}
+
+function workflowTriggerNodes(plan) {
+  return (Array.isArray(plan?.nodes) ? plan.nodes : []).filter((node) =>
+    ["trigger-webhook", "trigger-plugin", "trigger-schedule"].includes(node.type)
+  );
 }
 
 async function submitBackgroundTask(panelName, path, payload, metadata) {
@@ -1888,6 +2351,17 @@ function completeBackgroundTask(metadata, data) {
     });
     setPanelStatus(els.runStatus, data.status || "Done", runStatusTone(data));
     renderResult(data, "outputs");
+    return;
+  }
+  if (metadata.kind === "publish") {
+    syncAppContext(data, payload.app_id);
+    rememberApp(data, {
+      operation: "publish",
+      appId: payload.app_id,
+    });
+    updateWorkflowTriggers(data.triggers || [], data.webhooks || []);
+    setPanelStatus(els.publishStatus, "Published", "ok");
+    renderResult(data, "changes");
   }
 }
 
@@ -1913,7 +2387,7 @@ async function cancelActiveTask(panelName) {
 }
 
 function restoreActiveTasks() {
-  for (const panelName of ["create", "modify", "run"]) {
+  for (const panelName of ["create", "modify", "run", "publish"]) {
     const active = state.activeTasks[panelName];
     if (!active?.task_id) {
       continue;
@@ -1924,7 +2398,7 @@ function restoreActiveTasks() {
 }
 
 function restoreTerminalTasks() {
-  for (const panelName of ["create", "modify", "run"]) {
+  for (const panelName of ["create", "modify", "run", "publish"]) {
     if (state.activeTasks[panelName]) {
       continue;
     }
@@ -1983,6 +2457,15 @@ function taskPanel(panelName) {
       message: els.runTaskMessage,
       bar: els.runTaskBar,
       cancel: els.runCancelTask,
+    },
+    publish: {
+      form: els.publishForm,
+      status: els.publishStatus,
+      duration: els.publishDuration,
+      progress: els.publishTaskProgress,
+      message: els.publishTaskMessage,
+      bar: els.publishTaskBar,
+      cancel: els.publishCancelTask,
     },
   };
   return panels[panelName];
@@ -2085,6 +2568,7 @@ function backgroundTaskPath(operation) {
     "workflow.modify.draft": "/api/tasks/workflows/modify/draft",
     "workflow.modify.apply": "/api/tasks/workflows/modify/apply",
     "workflow.run.draft": "/api/tasks/workflows/run/draft",
+    "workflow.publish": "/api/tasks/workflows/publish",
   }[operation] || "";
 }
 
@@ -2094,6 +2578,7 @@ function backgroundTaskKind(operation) {
     "workflow.modify.draft": "modify-preview",
     "workflow.modify.apply": "modify-apply",
     "workflow.run.draft": "run",
+    "workflow.publish": "publish",
   }[operation] || "";
 }
 
@@ -2208,6 +2693,8 @@ function renderSummary(data) {
     ["Base hash", data.base_hash],
     ["New hash", data.new_hash],
     ["Sync", data.sync?.result],
+    ["Published", data.publish?.created_at],
+    ["Triggers", Array.isArray(data.triggers) ? data.triggers.length : undefined],
     ["Run ID", data.workflow_run_id],
     ["Task ID", data.task_id],
     ["Tokens", data.total_tokens],
@@ -2263,6 +2750,9 @@ function renderChangesPanel(data) {
   }
   if (data.sync?.result) {
     rows.push({ tone: "ok", text: `Sync: ${data.sync.result}${data.sync.updated_at ? ` at ${data.sync.updated_at}` : ""}` });
+  }
+  if (data.publish?.result) {
+    rows.push({ tone: "ok", text: `Publish: ${data.publish.result}${data.publish.created_at ? ` at ${data.publish.created_at}` : ""}` });
   }
   if (data.planner) {
     rows.push({ tone: "muted", text: plannerMessage(data.planner) });
@@ -2515,6 +3005,37 @@ function nodeDetails(node) {
       nodeLine("Children", childSummary(children)),
     ];
   }
+  if (node.type === "trigger-webhook" && !params._raw_data) {
+    const headers = Array.isArray(params.headers) ? params.headers : [];
+    const query = Array.isArray(params.params) ? params.params : [];
+    const body = Array.isArray(params.body) ? params.body : [];
+    return [
+      nodeLine("Request", `${params.method || "POST"} · ${params.content_type || "application/json"}`),
+      nodeLine("Headers", triggerParameterSummary(headers)),
+      nodeLine("Query", triggerParameterSummary(query)),
+      nodeLine("Body", triggerParameterSummary(body)),
+      nodeLine("Response", `${params.status_code || 200} · timeout ${params.timeout || 30}s`),
+      promptPreview("Response body", params.response_body),
+    ];
+  }
+  if (node.type === "trigger-schedule" && !params._raw_data) {
+    const visual = params.visual_config || {};
+    return [
+      nodeLine("Mode", params.mode || "visual"),
+      nodeLine("Timezone", params.timezone || "Asia/Shanghai"),
+      nodeLine(
+        "Schedule",
+        params.mode === "cron"
+          ? params.cron_expression || "not configured"
+          : [
+              params.frequency,
+              visual.time,
+              Array.isArray(visual.weekdays) ? visual.weekdays.join(",") : "",
+              Array.isArray(visual.monthly_days) ? visual.monthly_days.join(",") : "",
+            ].filter(Boolean).join(" · ")
+      ),
+    ];
+  }
   if (node.type === "tool" && !params._raw_data) {
     const schemas = Array.isArray(params.paramSchemas) ? params.paramSchemas : [];
     const toolParameters = params.tool_parameters && typeof params.tool_parameters === "object" ? params.tool_parameters : {};
@@ -2576,6 +3097,15 @@ function externalOutputSummary(raw) {
   const variables = Array.isArray(raw.variables) ? raw.variables : [];
   const names = variables.map((item) => item && (item.name || item.variable)).filter(Boolean);
   return names.join(", ") || "text, files, json / Dify runtime";
+}
+
+function triggerParameterSummary(items) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return "none";
+  }
+  return items
+    .map((item) => `${item.name}:${item.type || "string"}${item.required ? "*" : ""}`)
+    .join(", ");
 }
 
 function toolBindingSummary(values) {
@@ -2740,9 +3270,26 @@ function syncAppContext(data, fallbackAppId = "") {
   }
   els.modifyAppId.value = appId;
   els.runAppId.value = appId;
+  els.publishAppId.value = appId;
   const latestHash = data.new_hash || data.base_hash;
   if (latestHash) {
     els.modifyExpectedHash.value = latestHash;
+    els.publishExpectedHash.value = latestHash;
+  }
+  if (Array.isArray(data.triggers)) {
+    updateWorkflowTriggers(data.triggers, data.webhooks || []);
+  } else if (Array.isArray(data.webhooks) && data.webhooks.length) {
+    const planTriggers = workflowTriggerNodes(data.plan);
+    updateWorkflowTriggers(
+      planTriggers.map((node) => ({
+        id: "",
+        trigger_type: node.type.replace("trigger-", ""),
+        title: node.title,
+        node_id: node.id,
+        status: "draft",
+      })),
+      data.webhooks
+    );
   }
 }
 
@@ -2755,6 +3302,7 @@ function currentModifyPayload() {
     dataset_ids: currentDatasetIds(),
     tool_selections: currentToolSelections(),
     agent_selections: currentAgentSelections(),
+    trigger_selection: currentTriggerSelection(),
     planner: currentPlannerSelection(),
   };
 }
@@ -2774,6 +3322,7 @@ function storeModifyPreview(data, payload) {
     dataset_ids: payload.dataset_ids || [],
     tool_selections: payload.tool_selections || [],
     agent_selections: payload.agent_selections || [],
+    trigger_selection: payload.trigger_selection || { type: "user-input" },
     planner: payload.planner || null,
   };
   state.modifyPreviewDirty = false;
@@ -2792,6 +3341,7 @@ function modifyPreviewMatches(payload) {
     datasetIdsEqual(payload.dataset_ids || [], preview.dataset_ids || []) &&
     toolSelectionsEqual(payload.tool_selections || [], preview.tool_selections || []) &&
     agentSelectionsEqual(payload.agent_selections || [], preview.agent_selections || []) &&
+    triggerSelectionsEqual(payload.trigger_selection, preview.trigger_selection) &&
     plannerSelectionsEqual(payload.planner, preview.planner)
   );
 }
@@ -3224,6 +3774,10 @@ function agentSelectionsEqual(left, right) {
   return JSON.stringify(uniqueAgents(left || [])) === JSON.stringify(uniqueAgents(right || []));
 }
 
+function triggerSelectionsEqual(left, right) {
+  return JSON.stringify(left || { type: "user-input" }) === JSON.stringify(right || { type: "user-input" });
+}
+
 function rememberApp(data, meta = {}) {
   const appId = data.app_id || meta.appId;
   if (!appId) {
@@ -3335,6 +3889,11 @@ function clearResult() {
     setPanelStatus(els.runStatus, "");
     resetTaskDuration(els.runDuration);
     hideTaskProgress(taskPanel("run"));
+  }
+  if (!state.activeTasks.publish) {
+    setPanelStatus(els.publishStatus, "");
+    resetTaskDuration(els.publishDuration);
+    hideTaskProgress(taskPanel("publish"));
   }
 }
 

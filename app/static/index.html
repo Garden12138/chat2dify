@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>chat2dify</title>
-    <link rel="stylesheet" href="/static/styles.css?v=workbench-20260608-background-tasks">
+    <link rel="stylesheet" href="/static/styles.css?v=workbench-20260609-triggers">
   </head>
   <body>
     <header class="app-header">
@@ -102,6 +102,125 @@
         </form>
       </section>
 
+      <section class="tool-panel trigger-panel" aria-labelledby="trigger-title">
+        <div class="panel-heading">
+          <h2 id="trigger-title">Trigger</h2>
+          <span id="trigger-status" class="panel-status status-muted">User Input</span>
+        </div>
+        <form id="trigger-form" class="form-stack">
+          <label>
+            Entry type
+            <select id="trigger-type">
+              <option value="user-input">User Input</option>
+              <option value="webhook">Webhook</option>
+              <option value="schedule">Schedule</option>
+            </select>
+          </label>
+
+          <div id="trigger-webhook-fields" class="conditional-fields is-hidden">
+            <div class="compact-grid">
+              <label>
+                Method
+                <select id="trigger-webhook-method">
+                  <option>POST</option>
+                  <option>GET</option>
+                  <option>PUT</option>
+                  <option>PATCH</option>
+                  <option>DELETE</option>
+                  <option>HEAD</option>
+                </select>
+              </label>
+              <label>
+                Content type
+                <select id="trigger-webhook-content-type">
+                  <option value="application/json">JSON</option>
+                  <option value="multipart/form-data">Multipart form</option>
+                  <option value="application/x-www-form-urlencoded">Form encoded</option>
+                  <option value="text/plain">Plain text</option>
+                  <option value="application/octet-stream">Binary</option>
+                </select>
+              </label>
+            </div>
+            <label>
+              Headers
+              <textarea id="trigger-webhook-headers" rows="3" spellcheck="false" placeholder="x-request-id:string"></textarea>
+            </label>
+            <label>
+              Query parameters
+              <textarea id="trigger-webhook-query" rows="3" spellcheck="false" placeholder="source:string&#10;urgent:boolean"></textarea>
+            </label>
+            <label>
+              Body parameters
+              <textarea id="trigger-webhook-body" rows="4" spellcheck="false" placeholder="query:string*&#10;order_id:string"></textarea>
+            </label>
+            <div class="compact-grid">
+              <label>
+                Status code
+                <input id="trigger-webhook-status-code" type="number" min="100" max="599" value="200">
+              </label>
+              <label>
+                Timeout seconds
+                <input id="trigger-webhook-timeout" type="number" min="1" max="300" value="30">
+              </label>
+            </div>
+            <label>
+              Response body
+              <textarea id="trigger-webhook-response" rows="3" spellcheck="false" placeholder='{"ok":true}'></textarea>
+            </label>
+            <p class="field-help">One parameter per line: <code>name:type*</code>. The asterisk marks it required.</p>
+          </div>
+
+          <div id="trigger-schedule-fields" class="conditional-fields is-hidden">
+            <div class="compact-grid">
+              <label>
+                Mode
+                <select id="trigger-schedule-mode">
+                  <option value="visual">Visual</option>
+                  <option value="cron">Cron</option>
+                </select>
+              </label>
+              <label>
+                Timezone
+                <input id="trigger-schedule-timezone" value="Asia/Shanghai" autocomplete="off">
+              </label>
+            </div>
+            <div id="trigger-schedule-visual" class="conditional-fields">
+              <label>
+                Frequency
+                <select id="trigger-schedule-frequency">
+                  <option value="hourly">Hourly</option>
+                  <option value="daily" selected>Daily</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="monthly">Monthly</option>
+                </select>
+              </label>
+              <div class="compact-grid">
+                <label>
+                  Time
+                  <input id="trigger-schedule-time" type="time" value="09:00">
+                </label>
+                <label>
+                  Minute
+                  <input id="trigger-schedule-minute" type="number" min="0" max="59" value="0">
+                </label>
+              </div>
+              <label>
+                Weekdays
+                <input id="trigger-schedule-weekdays" value="mon" placeholder="mon,tue,wed">
+              </label>
+              <label>
+                Monthly days
+                <input id="trigger-schedule-monthly-days" value="1" placeholder="1,15,last">
+              </label>
+            </div>
+            <label id="trigger-schedule-cron-field" class="is-hidden">
+              Cron expression
+              <input id="trigger-schedule-cron" value="0 9 * * *" autocomplete="off">
+            </label>
+          </div>
+        </form>
+      </section>
+
       <section class="tool-panel" aria-labelledby="create-title">
         <div class="panel-heading">
           <h2 id="create-title">Create</h2>
@@ -168,6 +287,49 @@
             <button id="apply-modify" type="button">Apply</button>
           </div>
         </form>
+      </section>
+
+      <section class="tool-panel publish-panel" aria-labelledby="publish-title">
+        <div class="panel-heading">
+          <h2 id="publish-title">Publish & Triggers</h2>
+          <div class="task-meta">
+            <span id="publish-duration" class="task-duration">耗时 --</span>
+            <span id="publish-status" class="panel-status"></span>
+          </div>
+        </div>
+        <div id="publish-task-progress" class="task-progress is-hidden">
+          <div class="task-progress-row">
+            <span id="publish-task-message">Waiting</span>
+            <button id="publish-cancel-task" type="button" class="secondary task-cancel">Cancel</button>
+          </div>
+          <progress id="publish-task-bar" max="100"></progress>
+        </div>
+        <form id="publish-form" class="form-stack">
+          <label>
+            App ID
+            <input id="publish-app-id" autocomplete="off" required placeholder="Create or load a workflow first">
+          </label>
+          <label>
+            Expected hash
+            <input id="publish-expected-hash" autocomplete="off" placeholder="Current draft hash">
+          </label>
+          <div class="compact-grid">
+            <label>
+              Version name
+              <input id="publish-version-name" maxlength="20" autocomplete="off" placeholder="Optional">
+            </label>
+            <label>
+              Version note
+              <input id="publish-version-note" maxlength="100" autocomplete="off" placeholder="Optional">
+            </label>
+          </div>
+          <div class="button-row">
+            <button type="submit">Publish workflow</button>
+            <button id="refresh-workflow-triggers" type="button" class="secondary">Refresh status</button>
+          </div>
+          <p class="field-help">Publishing is always explicit. Create and Apply only update the draft.</p>
+        </form>
+        <div id="workflow-trigger-list" class="trigger-management-list"></div>
       </section>
 
       <section class="tool-panel" aria-labelledby="run-title">
@@ -244,6 +406,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js?v=workbench-20260608-background-task-retry-v2" defer></script>
+    <script src="/static/app.js?v=workbench-20260611-schedule-fix" defer></script>
   </body>
 </html>

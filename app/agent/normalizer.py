@@ -14,6 +14,18 @@ SOURCE_HANDLE = "source"
 FALSE_HANDLE = "false"
 HUMAN_INPUT_DEFAULT_WEBAPP_DELIVERY_ID = "00000000-0000-4000-8000-000000000001"
 DIFY_REF_PATTERN = re.compile(r"\{\{\s*#([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)#\s*\}\}")
+SCHEDULE_TIME_OUTPUT_ALIASES = {
+    "date",
+    "datetime",
+    "current_time",
+    "query",
+    "scheduled_at",
+    "scheduled_time",
+    "sys.timestamp",
+    "time",
+    "timestamp",
+    "trigger_time",
+}
 GENERIC_TITLES = {
     "",
     "node",
@@ -242,6 +254,7 @@ def normalize_plan_payload(
     default_dataset_ids: list[str] | None = None,
     tool_selections: list[dict[str, Any]] | None = None,
     agent_selections: list[dict[str, Any]] | None = None,
+    trigger_selection: dict[str, Any] | None = None,
 ) -> NormalizationResult:
     data = deepcopy(payload)
     changes: list[str] = []
@@ -260,6 +273,8 @@ def normalize_plan_payload(
         raise ValueError("plan.nodes must be a list")
     if not isinstance(edges, list):
         raise ValueError("plan.edges must be a list")
+
+    _apply_trigger_selection(nodes, trigger_selection, changes)
 
     for node in nodes:
         if not isinstance(node, dict):
@@ -336,6 +351,10 @@ def normalize_plan_payload(
                 node["params"] = _normalize_tool_params(params, tool_selections or [])
             case "agent":
                 node["params"] = _normalize_agent_params(params, agent_selections or [])
+            case "trigger-webhook":
+                node["params"] = _normalize_trigger_webhook_params(params)
+            case "trigger-schedule":
+                node["params"] = _normalize_trigger_schedule_params(params)
             case node_type if node_type in EXTERNAL_DEPENDENCY_NODE_TYPES:
                 node["params"] = _normalize_external_dependency_params(params)
             case "iteration-start" | "loop-start" | "loop-end":
@@ -344,13 +363,40 @@ def normalize_plan_payload(
             changes.append(f"normalized {node.get('id', '<unknown>')} params")
 
     node_by_id = {str(node.get("id")): node for node in nodes if isinstance(node, dict)}
+    schedule_node_ids = {
+        node_id
+        for node_id, node in node_by_id.items()
+        if str(node.get("type") or "") == "trigger-schedule"
+    }
+    if schedule_node_ids:
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            params = node.get("params") if isinstance(node.get("params"), dict) else {}
+            rewritten_params, rewrite_count = _rewrite_schedule_time_references(
+                params,
+                schedule_node_ids=schedule_node_ids,
+            )
+            if rewrite_count:
+                node["params"] = rewritten_params
+                changes.append(
+                    f"normalized {rewrite_count} schedule time reference(s) to sys.timestamp "
+                    f"for {node.get('id', '<unknown>')}"
+                )
+
+        _ensure_schedule_datetime_formatter(nodes, edges, changes)
+        node_by_id = {str(node.get("id")): node for node in nodes if isinstance(node, dict)}
+
     for node in nodes:
         if not isinstance(node, dict):
             continue
         old_title = str(node.get("title") or "")
         node_type = str(node.get("type") or "")
         node_params = node.get("params") if isinstance(node.get("params"), dict) else {}
-        if node_type in EXTERNAL_DEPENDENCY_NODE_TYPES and not (
+        if node_type in EXTERNAL_DEPENDENCY_NODE_TYPES and node_type not in {
+            "trigger-webhook",
+            "trigger-schedule",
+        } and not (
             node_type in {"tool", "agent"} and "_raw_data" not in node_params
         ):
             continue
@@ -402,6 +448,260 @@ def normalize_template_refs(text: str) -> str:
         r"{{#\1.\2#}}",
         text,
     )
+
+
+def _rewrite_schedule_time_references(
+    value: Any,
+    *,
+    schedule_node_ids: set[str],
+) -> tuple[Any, int]:
+    if isinstance(value, str):
+        normalized = normalize_template_refs(value)
+        count = 0
+
+        def replace(match: re.Match[str]) -> str:
+            nonlocal count
+            node_id = match.group(1)
+            variable = match.group(2)
+            if node_id not in schedule_node_ids or variable not in SCHEDULE_TIME_OUTPUT_ALIASES:
+                return match.group(0)
+            count += 1
+            return "{{#sys.timestamp#}}"
+
+        return DIFY_REF_PATTERN.sub(replace, normalized), count
+
+    if isinstance(value, list):
+        if (
+            len(value) == 2
+            and all(isinstance(item, str) for item in value)
+            and value[0] in schedule_node_ids
+            and value[1] in SCHEDULE_TIME_OUTPUT_ALIASES
+        ):
+            return ["sys", "timestamp"], 1
+        result: list[Any] = []
+        count = 0
+        for item in value:
+            rewritten, item_count = _rewrite_schedule_time_references(
+                item,
+                schedule_node_ids=schedule_node_ids,
+            )
+            result.append(rewritten)
+            count += item_count
+        return result, count
+
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        count = 0
+        for key, item in value.items():
+            rewritten, item_count = _rewrite_schedule_time_references(
+                item,
+                schedule_node_ids=schedule_node_ids,
+            )
+            result[key] = rewritten
+            count += item_count
+        return result, count
+
+    return value, 0
+
+
+def _ensure_schedule_datetime_formatter(
+    nodes: list[Any],
+    edges: list[Any],
+    changes: list[str],
+) -> None:
+    schedule_nodes = [
+        node
+        for node in nodes
+        if isinstance(node, dict) and str(node.get("type") or "") == "trigger-schedule"
+    ]
+    if len(schedule_nodes) != 1:
+        return
+
+    schedule = schedule_nodes[0]
+    schedule_params = (
+        schedule.get("params") if isinstance(schedule.get("params"), dict) else {}
+    )
+    timezone_name = str(schedule_params.get("timezone") or "Asia/Shanghai")
+    existing_formatter = next(
+        (
+            node
+            for node in nodes
+            if isinstance(node, dict)
+            and str(node.get("type") or "") == "code"
+            and _is_schedule_datetime_formatter(node)
+        ),
+        None,
+    )
+    if existing_formatter is not None and not _is_valid_schedule_datetime_formatter(
+        existing_formatter
+    ):
+        existing_formatter["params"] = _schedule_datetime_code_params(timezone_name)
+        changes.append(
+            f"repaired malformed schedule datetime formatter "
+            f"{existing_formatter.get('id', '<unknown>')}"
+        )
+
+    affected_llms: list[dict[str, Any]] = []
+    for node in nodes:
+        if not isinstance(node, dict) or str(node.get("type") or "") != "llm":
+            continue
+        params = node.get("params") if isinstance(node.get("params"), dict) else {}
+        prompt_text = "\n".join(
+            str(params.get(key) or "")
+            for key in ("system_prompt", "user_prompt")
+        )
+        if "{{#sys.timestamp#}}" in normalize_template_refs(prompt_text):
+            affected_llms.append(node)
+    if not affected_llms:
+        return
+
+    if existing_formatter is None:
+        used_ids = {
+            str(node.get("id"))
+            for node in nodes
+            if isinstance(node, dict) and node.get("id")
+        }
+        formatter_id = _unique_node_id(
+            f"{str(schedule.get('id') or 'schedule')}_format_datetime",
+            used_ids,
+        )
+        existing_formatter = {
+            "id": formatter_id,
+            "type": "code",
+            "title": "格式化计划执行时间",
+            "desc": "将 Dify 系统时间戳转换为定时任务所在时区的日期字符串。",
+            "params": _schedule_datetime_code_params(timezone_name),
+        }
+        schedule_index = nodes.index(schedule)
+        nodes.insert(schedule_index + 1, existing_formatter)
+        _insert_node_after_entry(
+            edges,
+            entry_id=str(schedule.get("id") or ""),
+            inserted_id=formatter_id,
+        )
+        changes.append(
+            f"inserted schedule datetime formatter {formatter_id} for timezone {timezone_name}"
+        )
+
+    formatter_id = str(existing_formatter.get("id") or "")
+    for node in affected_llms:
+        params = node.get("params") if isinstance(node.get("params"), dict) else {}
+        rewritten = False
+        for key in ("system_prompt", "user_prompt"):
+            text = str(params.get(key) or "")
+            normalized = normalize_template_refs(text)
+            updated = normalized.replace(
+                "{{#sys.timestamp#}}",
+                f"{{{{#{formatter_id}.date#}}}}",
+            )
+            if updated != text:
+                params[key] = updated
+                rewritten = True
+        if rewritten:
+            node["params"] = params
+            changes.append(
+                f"rewrote schedule timestamp prompt reference to {formatter_id}.date "
+                f"for {node.get('id', '<unknown>')}"
+            )
+
+
+def _is_schedule_datetime_formatter(node: dict[str, Any]) -> bool:
+    params = node.get("params") if isinstance(node.get("params"), dict) else {}
+    variables = params.get("variables") if isinstance(params.get("variables"), list) else []
+    outputs = params.get("outputs") if isinstance(params.get("outputs"), dict) else {}
+    return any(
+        isinstance(item, dict)
+        and item.get("value_selector") == ["sys", "timestamp"]
+        for item in variables
+    ) and {"date", "datetime"}.issubset(outputs)
+
+
+def _is_valid_schedule_datetime_formatter(node: dict[str, Any]) -> bool:
+    params = node.get("params") if isinstance(node.get("params"), dict) else {}
+    code = str(params.get("code") or "")
+    outputs = params.get("outputs") if isinstance(params.get("outputs"), dict) else {}
+    return (
+        bool(re.search(r"\bdef\s+main\s*\(", code))
+        and "return" in code
+        and all(
+            isinstance(outputs.get(name), dict)
+            and bool(outputs[name].get("type"))
+            for name in ("date", "datetime", "weekday")
+        )
+    )
+
+
+def _schedule_datetime_code_params(timezone_name: str) -> dict[str, Any]:
+    code = (
+        "from datetime import datetime\n"
+        "from zoneinfo import ZoneInfo\n\n"
+        "def main(timestamp: int) -> dict:\n"
+        f"    local_time = datetime.fromtimestamp(float(timestamp), ZoneInfo({timezone_name!r}))\n"
+        "    weekdays = ['星期一', '星期二', '星期三', '星期四', '星期五', '星期六', '星期日']\n"
+        "    return {\n"
+        "        'date': local_time.strftime('%Y-%m-%d'),\n"
+        "        'datetime': local_time.strftime('%Y-%m-%d %H:%M:%S'),\n"
+        "        'weekday': weekdays[local_time.weekday()],\n"
+        "    }\n"
+    )
+    return {
+        "code": code,
+        "code_language": "python3",
+        "variables": [
+            {
+                "variable": "timestamp",
+                "value_selector": ["sys", "timestamp"],
+                "value_type": "number",
+            }
+        ],
+        "outputs": {
+            "date": {"type": "string", "children": None},
+            "datetime": {"type": "string", "children": None},
+            "weekday": {"type": "string", "children": None},
+        },
+    }
+
+
+def _unique_node_id(preferred: str, used_ids: set[str]) -> str:
+    if preferred not in used_ids:
+        return preferred
+    index = 2
+    while f"{preferred}_{index}" in used_ids:
+        index += 1
+    return f"{preferred}_{index}"
+
+
+def _insert_node_after_entry(
+    edges: list[Any],
+    *,
+    entry_id: str,
+    inserted_id: str,
+) -> None:
+    outgoing = [
+        dict(edge)
+        for edge in edges
+        if isinstance(edge, dict) and str(edge.get("source") or "") == entry_id
+    ]
+    edges[:] = [
+        edge
+        for edge in edges
+        if not (
+            isinstance(edge, dict)
+            and str(edge.get("source") or "") == entry_id
+        )
+    ]
+    edges.append(
+        {
+            "source": entry_id,
+            "target": inserted_id,
+            "source_handle": SOURCE_HANDLE,
+            "target_handle": "target",
+        }
+    )
+    for edge in outgoing:
+        edge["source"] = inserted_id
+        edge["source_handle"] = SOURCE_HANDLE
+        edges.append(edge)
 
 
 def _normalize_node_type(value: str) -> str:
@@ -468,9 +768,94 @@ def _normalize_code_params(params: dict[str, Any]) -> dict[str, Any]:
     result.setdefault("code", "def main(query: str) -> dict:\n    return {\"result\": query}\n")
     result.setdefault("code_language", "python3")
     result["variables"] = _normalize_variables(result.get("variables", []), result.get("inputs"))
-    if not result.get("outputs"):
-        result["outputs"] = _infer_code_outputs(str(result["code"]))
+    for variable in result["variables"]:
+        if variable.get("value_selector") == ["sys", "timestamp"]:
+            variable["value_type"] = "number"
+    result["outputs"] = _normalize_code_outputs(
+        result.get("outputs"),
+        code=str(result["code"]),
+    )
     return result
+
+
+def _normalize_code_outputs(
+    raw_outputs: Any,
+    *,
+    code: str,
+) -> dict[str, dict[str, Any]]:
+    if not raw_outputs:
+        return _infer_code_outputs(code)
+
+    normalized: dict[str, dict[str, Any]] = {}
+    if isinstance(raw_outputs, dict):
+        items = raw_outputs.items()
+    elif isinstance(raw_outputs, list):
+        items = (
+            (
+                str(item.get("name") or item.get("variable") or ""),
+                item,
+            )
+            for item in raw_outputs
+            if isinstance(item, dict)
+        )
+    else:
+        return _infer_code_outputs(code)
+
+    for raw_name, raw_config in items:
+        name = _safe_variable_name(str(raw_name or ""))
+        if not name:
+            continue
+        if isinstance(raw_config, dict):
+            output_type = _normalize_code_output_type(
+                raw_config.get("type")
+                or raw_config.get("value_type")
+                or raw_config.get("data_type")
+            )
+            children = raw_config.get("children")
+        else:
+            output_type = _normalize_code_output_type(raw_config)
+            children = None
+        normalized[name] = {"type": output_type, "children": children}
+
+    return normalized or _infer_code_outputs(code)
+
+
+def _normalize_code_output_type(value: Any) -> str:
+    normalized = str(value or "").strip().lower().replace("_", "-")
+    aliases = {
+        "str": "string",
+        "text": "string",
+        "float": "number",
+        "double": "number",
+        "int": "integer",
+        "bool": "boolean",
+        "dict": "object",
+        "json": "object",
+        "list": "array",
+        "string[]": "array[string]",
+        "number[]": "array[number]",
+        "object[]": "array[object]",
+        "boolean[]": "array[boolean]",
+        "file[]": "array[file]",
+    }
+    normalized = aliases.get(normalized, normalized)
+    allowed = {
+        "string",
+        "number",
+        "integer",
+        "boolean",
+        "object",
+        "file",
+        "array",
+        "array[string]",
+        "array[number]",
+        "array[object]",
+        "array[boolean]",
+        "array[file]",
+        "any",
+        "array[any]",
+    }
+    return normalized if normalized in allowed else "string"
 
 
 def _normalize_if_else_params(params: dict[str, Any]) -> dict[str, Any]:
@@ -1872,6 +2257,275 @@ def _normalize_external_dependency_params(params: dict[str, Any]) -> dict[str, A
     return result
 
 
+def _apply_trigger_selection(
+    nodes: list[Any],
+    trigger_selection: dict[str, Any] | None,
+    changes: list[str],
+) -> None:
+    if not isinstance(trigger_selection, dict):
+        return
+    selection_type = str(trigger_selection.get("type") or "user-input")
+    if selection_type == "user-input":
+        if any(
+            isinstance(node, dict) and str(node.get("type") or "") == "start"
+            for node in nodes
+        ):
+            return
+        target = next(
+            (
+                node
+                for node in nodes
+                if isinstance(node, dict)
+                and str(node.get("type") or "") in {"trigger-webhook", "trigger-schedule"}
+            ),
+            None,
+        )
+        if target is None:
+            return
+        existing_params = target.get("params") if isinstance(target.get("params"), dict) else {}
+        target["type"] = "start"
+        target["title"] = "接收用户输入"
+        target["params"] = {"variables": _start_variables_from_trigger(existing_params)}
+        changes.append(f"replaced trigger entry {target.get('id', '<unknown>')} with start")
+        return
+    if selection_type not in {"webhook", "schedule"}:
+        return
+
+    target_type = f"trigger-{selection_type}"
+    matching = [
+        node
+        for node in nodes
+        if isinstance(node, dict) and str(node.get("type") or "") == target_type
+    ]
+    target = matching[0] if matching else next(
+        (
+            node
+            for node in nodes
+            if isinstance(node, dict) and str(node.get("type") or "") == "start"
+        ),
+        None,
+    )
+    if target is None:
+        return
+
+    old_type = str(target.get("type") or "")
+    target["type"] = target_type
+    target["title"] = (
+        str(target.get("title") or "")
+        if old_type == target_type
+        else ("接收 Webhook 请求" if selection_type == "webhook" else "按计划启动工作流")
+    )
+    selected_params = (
+        _normalize_trigger_webhook_params(trigger_selection)
+        if selection_type == "webhook"
+        else _normalize_trigger_schedule_params(trigger_selection)
+    )
+    existing_params = target.get("params") if isinstance(target.get("params"), dict) else {}
+    if isinstance(existing_params.get("_raw_data"), dict):
+        existing_params = existing_params["_raw_data"]
+    target["params"] = {**deepcopy(existing_params), **selected_params}
+    changes.append(f"applied explicit {target_type} selection to {target.get('id', '<unknown>')}")
+
+
+def _start_variables_from_trigger(params: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = params.get("_raw_data") if isinstance(params.get("_raw_data"), dict) else params
+    variables: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for group in ("params", "body", "headers"):
+        for item in raw.get(group) if isinstance(raw.get(group), list) else []:
+            if not isinstance(item, dict) or not item.get("name"):
+                continue
+            name = str(item["name"]).replace("-", "_") if group == "headers" else str(item["name"])
+            if name in seen or name == "_webhook_raw":
+                continue
+            variable_type = str(item.get("type") or "string")
+            variables.append(
+                {
+                    "name": name,
+                    "type": (
+                        "number"
+                        if variable_type == "number"
+                        else "boolean"
+                        if variable_type == "boolean"
+                        else "paragraph"
+                    ),
+                    "required": bool(item.get("required", False)),
+                    "label": name,
+                }
+            )
+            seen.add(name)
+    if not variables:
+        variables.append(
+            {
+                "name": "query",
+                "type": "paragraph",
+                "required": True,
+                "label": "用户输入",
+            }
+        )
+    return variables
+
+
+def _normalize_trigger_webhook_params(params: dict[str, Any]) -> dict[str, Any]:
+    raw = params.get("_raw_data") if isinstance(params.get("_raw_data"), dict) else params
+    headers = _normalize_webhook_parameters(raw.get("headers"), allowed_types={"string"}, header=True)
+    query_params = _normalize_webhook_parameters(
+        raw.get("params"),
+        allowed_types={"string", "number", "boolean"},
+    )
+    body = _normalize_webhook_parameters(
+        raw.get("body"),
+        allowed_types={
+            "string",
+            "number",
+            "boolean",
+            "object",
+            "array[string]",
+            "array[number]",
+            "array[boolean]",
+            "array[object]",
+            "file",
+        },
+    )
+    variables = [
+        {
+            "variable": "_webhook_raw",
+            "label": "raw",
+            "value_type": "object",
+            "value_selector": [],
+            "required": True,
+        }
+    ]
+    for label, items in (("header", headers), ("param", query_params), ("body", body)):
+        for item in items:
+            variable = str(item["name"]).replace("-", "_") if label == "header" else str(item["name"])
+            variables.append(
+                {
+                    "variable": variable,
+                    "label": label,
+                    "value_type": item["type"],
+                    "value_selector": [],
+                    "required": bool(item.get("required", False)),
+                }
+            )
+    existing_variables = raw.get("variables") if isinstance(raw.get("variables"), list) else []
+    known_variables = {str(item.get("variable")) for item in variables if isinstance(item, dict)}
+    for item in existing_variables:
+        if not isinstance(item, dict):
+            continue
+        variable = str(item.get("variable") or item.get("name") or "").strip()
+        if not variable or variable in known_variables:
+            continue
+        variables.append(
+            {
+                "variable": variable,
+                "label": str(item.get("label") or "body"),
+                "value_type": str(item.get("value_type") or item.get("type") or "string"),
+                "value_selector": [],
+                "required": bool(item.get("required", False)),
+            }
+        )
+        known_variables.add(variable)
+    try:
+        status_code = int(raw.get("status_code", 200))
+    except (TypeError, ValueError):
+        status_code = 200
+    try:
+        timeout = int(raw.get("timeout", 30))
+    except (TypeError, ValueError):
+        timeout = 30
+    return {
+        "webhook_url": str(raw.get("webhook_url") or ""),
+        "webhook_debug_url": str(raw.get("webhook_debug_url") or ""),
+        "method": str(raw.get("method") or "POST").upper(),
+        "content_type": str(raw.get("content_type") or "application/json"),
+        "headers": headers,
+        "params": query_params,
+        "body": body,
+        "async_mode": True,
+        "status_code": max(100, min(599, status_code)),
+        "response_body": str(raw.get("response_body") or ""),
+        "timeout": max(1, min(300, timeout)),
+        "variables": variables,
+    }
+
+
+def _normalize_webhook_parameters(
+    value: Any,
+    *,
+    allowed_types: set[str],
+    header: bool = False,
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for item in value if isinstance(value, list) else []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("variable") or "").strip()
+        if not name:
+            continue
+        parameter_type = "string" if header else str(item.get("type") or "string")
+        if parameter_type not in allowed_types:
+            parameter_type = "string"
+        result.append(
+            {
+                "name": name,
+                "type": parameter_type,
+                "required": bool(item.get("required", False)),
+            }
+        )
+    return result
+
+
+def _normalize_trigger_schedule_params(params: dict[str, Any]) -> dict[str, Any]:
+    raw = params.get("_raw_data") if isinstance(params.get("_raw_data"), dict) else params
+    mode = str(raw.get("mode") or "visual").lower()
+    if mode not in {"visual", "cron"}:
+        mode = "visual"
+    timezone_name = str(raw.get("timezone") or "Asia/Shanghai")
+    if mode == "cron":
+        return {
+            "mode": "cron",
+            "cron_expression": str(raw.get("cron_expression") or ""),
+            "timezone": timezone_name,
+        }
+
+    frequency = str(raw.get("frequency") or "daily").lower()
+    if frequency not in {"hourly", "daily", "weekly", "monthly"}:
+        frequency = "daily"
+    visual = raw.get("visual_config") if isinstance(raw.get("visual_config"), dict) else {}
+    try:
+        on_minute = int(visual.get("on_minute", 0))
+    except (TypeError, ValueError):
+        on_minute = 0
+    weekdays = [
+        str(item).lower()
+        for item in visual.get("weekdays", ["mon"])
+        if str(item).lower() in {"sun", "mon", "tue", "wed", "thu", "fri", "sat"}
+    ]
+    monthly_days: list[int | str] = []
+    for item in visual.get("monthly_days", [1]):
+        if str(item).lower() == "last":
+            monthly_days.append("last")
+            continue
+        try:
+            day = int(item)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= day <= 31:
+            monthly_days.append(day)
+    return {
+        "mode": "visual",
+        "frequency": frequency,
+        "visual_config": {
+            "time": str(visual.get("time") or "09:00 AM"),
+            "weekdays": weekdays or ["mon"],
+            "on_minute": max(0, min(59, on_minute)),
+            "monthly_days": monthly_days or [1],
+        },
+        "timezone": timezone_name,
+    }
+
+
 def _error_handle_mode(value: str) -> str:
     normalized = str(value or "").strip().lower().replace("_", "-")
     allowed = {"terminated", "continue-on-error", "remove-abnormal-output"}
@@ -2736,7 +3390,13 @@ def _normalize_variables(items: Any, inputs: Any = None) -> list[dict[str, Any]]
         variable = item.get("variable")
         selector = item.get("value_selector")
         if variable and selector:
-            variables.append(_normalize_output({"variable": str(variable), "value_selector": selector}))
+            normalized_variable = {
+                "variable": str(variable),
+                "value_selector": selector,
+            }
+            if item.get("value_type") is not None:
+                normalized_variable["value_type"] = str(item["value_type"])
+            variables.append(_normalize_output(normalized_variable))
     if isinstance(inputs, dict):
         for variable, ref in inputs.items():
             variables.append(_normalize_output({"variable": str(variable), "value_selector": _selector_from_ref(str(ref))}))

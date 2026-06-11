@@ -380,11 +380,15 @@ def test_decompile_and_compile_external_dependency_nodes_as_passthrough() -> Non
     compiled_nodes = {node["id"]: node for node in compiled["nodes"]}
 
     assert nodes["webhook"].type == "trigger-webhook"
-    assert nodes["webhook"].params["_raw_data"]["webhook_url"] == "https://example.test/hook"
+    assert nodes["webhook"].params["webhook_url"] == "https://example.test/hook"
+    assert nodes["webhook"].params["method"] == "POST"
     assert nodes["tool"].type == "tool"
     assert nodes["tool"].params["output_schema"]["properties"]["answer"]["type"] == "string"
     assert not [issue for issue in issues if issue.severity == "error"]
-    assert any(issue.code == "PLAN_EXTERNAL_DEPENDENCY_NODE_PASSTHROUGH" for issue in issues)
+    assert not any(
+        issue.code == "PLAN_EXTERNAL_DEPENDENCY_NODE_PASSTHROUGH" and issue.node_id == "webhook"
+        for issue in issues
+    )
     assert compiled_nodes["tool"]["data"]["provider_id"] == "demo-provider"
     assert compiled_nodes["tool"]["data"]["tool_parameters"]["query"] == {
         "type": "mixed",
@@ -455,6 +459,74 @@ def test_decompile_and_compile_structured_agent_node() -> None:
     assert compiled_agent["agent_strategy_name"] == "react"
     assert compiled_agent["agent_parameters"]["query"] == {"type": "constant", "value": "{{#start.query#}}"}
     assert compiled_agent["output_schema"]["properties"]["answer"]["type"] == "string"
+
+
+def test_compile_repairs_overlapping_top_level_layout_in_graph_order() -> None:
+    plan = WorkflowPlan.model_validate(
+        {
+            "name": "Schedule",
+            "nodes": [
+                {
+                    "id": "schedule",
+                    "type": "trigger-schedule",
+                    "params": {
+                        "mode": "cron",
+                        "cron_expression": "0 18 * * 1-5",
+                        "timezone": "Asia/Shanghai",
+                    },
+                },
+                {
+                    "id": "format_time",
+                    "type": "code",
+                    "params": {
+                        "code": "def main(timestamp: int) -> dict:\n    return {'date': str(timestamp)}\n",
+                        "variables": [
+                            {
+                                "variable": "timestamp",
+                                "value_selector": ["sys", "timestamp"],
+                                "value_type": "number",
+                            }
+                        ],
+                        "outputs": {"date": {"type": "string", "children": None}},
+                    },
+                },
+                {
+                    "id": "llm",
+                    "type": "llm",
+                    "params": {"user_prompt": "今天是 {{#format_time.date#}}"},
+                },
+                {
+                    "id": "end",
+                    "type": "end",
+                    "params": {
+                        "outputs": [{"variable": "answer", "value_selector": ["llm", "text"]}]
+                    },
+                },
+            ],
+            "edges": [
+                {"source": "schedule", "target": "format_time"},
+                {"source": "format_time", "target": "llm"},
+                {"source": "llm", "target": "end"},
+            ],
+        }
+    )
+    base_graph = {
+        "nodes": [
+            {"id": "schedule", "position": {"x": 80, "y": 282}},
+            {"id": "format_time", "position": {"x": 380, "y": 282}},
+            {"id": "llm", "position": {"x": 380, "y": 282}},
+            {"id": "end", "position": {"x": 680, "y": 282}},
+        ],
+        "edges": [],
+    }
+
+    graph = compile_plan_to_dify_graph(plan, compiler=_compiler(), base_graph=base_graph)
+    positions = {node["id"]: node["position"] for node in graph["nodes"]}
+
+    assert positions["schedule"]["x"] < positions["format_time"]["x"]
+    assert positions["format_time"]["x"] < positions["llm"]["x"]
+    assert positions["llm"]["x"] < positions["end"]["x"]
+    assert len({(item["x"], item["y"]) for item in positions.values()}) == 4
 
 
 def _seven_type_plan() -> WorkflowPlan:

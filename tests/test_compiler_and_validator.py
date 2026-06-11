@@ -362,6 +362,114 @@ def test_normalizer_infers_code_outputs_from_return_dict() -> None:
     assert end_node["params"]["outputs"][0]["value_selector"] == ["code", "total_amount"]
 
 
+def test_normalizer_expands_code_output_type_shorthand() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "name": "Format values",
+            "nodes": [
+                {
+                    "id": "start",
+                    "type": "start",
+                    "params": {"variables": [{"name": "query", "type": "text-input"}]},
+                },
+                {
+                    "id": "code",
+                    "type": "code",
+                    "params": {
+                        "code": (
+                            "def main(query: str) -> dict:\n"
+                            "    return {'date': query, 'count': 1}\n"
+                        ),
+                        "variables": [
+                            {
+                                "variable": "query",
+                                "value_selector": ["start", "query"],
+                            }
+                        ],
+                        "outputs": {
+                            "date": "string",
+                            "count": {"value_type": "integer"},
+                        },
+                    },
+                },
+                {
+                    "id": "end",
+                    "type": "end",
+                    "params": {
+                        "outputs": [
+                            {
+                                "variable": "answer",
+                                "value_selector": ["code", "date"],
+                            }
+                        ]
+                    },
+                },
+            ],
+            "edges": [
+                {"source": "start", "target": "code"},
+                {"source": "code", "target": "end"},
+            ],
+        }
+    )
+
+    code = next(node for node in normalized.payload["nodes"] if node["id"] == "code")
+    assert code["params"]["outputs"] == {
+        "date": {"type": "string", "children": None},
+        "count": {"type": "integer", "children": None},
+    }
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    assert not [issue for issue in validate_plan(plan) if issue.severity == "error"]
+
+
+def test_validator_rejects_bare_code_output_type() -> None:
+    plan = WorkflowPlan.model_validate(
+        {
+            "name": "Invalid code output",
+            "nodes": [
+                {
+                    "id": "start",
+                    "type": "start",
+                    "params": {"variables": [{"name": "query"}]},
+                },
+                {
+                    "id": "code",
+                    "type": "code",
+                    "params": {
+                        "code": "def main(query: str) -> dict:\n    return {'result': query}\n",
+                        "variables": [
+                            {
+                                "variable": "query",
+                                "value_selector": ["start", "query"],
+                            }
+                        ],
+                        "outputs": {"result": "string"},
+                    },
+                },
+                {
+                    "id": "end",
+                    "type": "end",
+                    "params": {
+                        "outputs": [
+                            {
+                                "variable": "answer",
+                                "value_selector": ["code", "result"],
+                            }
+                        ]
+                    },
+                },
+            ],
+            "edges": [
+                {"source": "start", "target": "code"},
+                {"source": "code", "target": "end"},
+            ],
+        }
+    )
+
+    assert "PLAN_CODE_OUTPUT_INVALID" in {
+        issue.code for issue in validate_plan(plan)
+    }
+
+
 def test_template_transform_refs_become_jinja_variables() -> None:
     normalized = normalize_plan_payload(
         {

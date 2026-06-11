@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
@@ -209,7 +210,10 @@ def _params_from_dify_node_data(node_type: str, data: dict[str, Any]) -> dict[st
         case "start":
             return {"variables": [_start_variable(item) for item in data.get("variables", []) if isinstance(item, dict)]}
         case "llm":
-            system_prompt, user_prompt = _prompt_texts(data.get("prompt_template", []))
+            system_prompt, user_prompt = _prompt_texts(
+                data.get("prompt_template", []),
+                data.get("prompt_config"),
+            )
             model = data.get("model") if isinstance(data.get("model"), dict) else {}
             return {
                 "system_prompt": system_prompt,
@@ -373,6 +377,43 @@ def _params_from_dify_node_data(node_type: str, data: dict[str, Any]) -> dict[st
                 "meta": deepcopy(data.get("meta")) if data.get("meta") is not None else None,
                 "memory": deepcopy(data.get("memory")) if data.get("memory") is not None else None,
             }
+        case "trigger-webhook":
+            return {
+                "webhook_url": data.get("webhook_url", ""),
+                "webhook_debug_url": data.get("webhook_debug_url", ""),
+                "method": data.get("method", "POST"),
+                "content_type": data.get("content_type", "application/json"),
+                "headers": deepcopy(data.get("headers") or []),
+                "params": deepcopy(data.get("params") or []),
+                "body": deepcopy(data.get("body") or []),
+                "async_mode": bool(data.get("async_mode", True)),
+                "status_code": data.get("status_code", 200),
+                "response_body": data.get("response_body", ""),
+                "timeout": data.get("timeout", 30),
+                "variables": deepcopy(data.get("variables") or []),
+            }
+        case "trigger-schedule":
+            mode = data.get("mode", "visual")
+            if mode == "cron":
+                return {
+                    "mode": "cron",
+                    "cron_expression": data.get("cron_expression", ""),
+                    "timezone": data.get("timezone", "Asia/Shanghai"),
+                }
+            return {
+                "mode": "visual",
+                "frequency": data.get("frequency", "daily"),
+                "visual_config": deepcopy(
+                    data.get("visual_config")
+                    or {
+                        "time": "09:00 AM",
+                        "weekdays": ["mon"],
+                        "on_minute": 0,
+                        "monthly_days": [1],
+                    }
+                ),
+                "timezone": data.get("timezone", "Asia/Shanghai"),
+            }
         case node_type if node_type in EXTERNAL_DEPENDENCY_NODE_TYPES:
             return {
                 "_raw_data": {
@@ -405,20 +446,46 @@ def _start_variable(item: dict[str, Any]) -> dict[str, Any]:
     return variable
 
 
-def _prompt_texts(prompt_template: Any) -> tuple[str, str]:
+def _prompt_texts(prompt_template: Any, prompt_config: Any = None) -> tuple[str, str]:
     system_prompt = ""
     user_prompt = ""
+    jinja_variables = {}
+    if isinstance(prompt_config, dict):
+        for item in prompt_config.get("jinja2_variables", []):
+            if not isinstance(item, dict) or not item.get("variable"):
+                continue
+            selector = item.get("value_selector")
+            if isinstance(selector, list) and len(selector) >= 2:
+                jinja_variables[str(item["variable"])] = [str(part) for part in selector]
     if isinstance(prompt_template, list):
         for item in prompt_template:
             if not isinstance(item, dict):
                 continue
             role = item.get("role")
-            text = str(item.get("text", ""))
+            text = _canonical_prompt_text(item, jinja_variables)
             if role == "system":
                 system_prompt = text
             elif role == "user":
                 user_prompt = text
     return system_prompt, user_prompt
+
+
+def _canonical_prompt_text(item: dict[str, Any], jinja_variables: dict[str, list[str]]) -> str:
+    basic_text = str(item.get("text") or "")
+    if item.get("edition_type") != "jinja2":
+        return basic_text
+    if "{{#" in basic_text:
+        return basic_text
+
+    text = str(item.get("jinja2_text") or basic_text)
+    for alias, selector in jinja_variables.items():
+        reference = f"{{{{#{selector[0]}.{'.'.join(selector[1:])}#}}}}"
+        text = re.sub(
+            rf"\{{\{{\s*{re.escape(alias)}\s*\}}\}}",
+            lambda _match, value=reference: value,
+            text,
+        )
+    return text
 
 
 def _merge_existing_layout(graph: dict[str, Any], base_graph: dict[str, Any]) -> None:
@@ -446,6 +513,76 @@ def _merge_existing_layout(graph: dict[str, Any], base_graph: dict[str, Any]) ->
             node["positionAbsolute"] = deepcopy(node["position"])
         if isinstance(node.get("position"), dict):
             positions[node_id] = {"x": float(node["position"].get("x", 0)), "y": float(node["position"].get("y", 0))}
+    _repair_overlapping_top_level_layout(graph)
+
+
+def _repair_overlapping_top_level_layout(graph: dict[str, Any]) -> None:
+    nodes = [
+        node
+        for node in graph.get("nodes", [])
+        if isinstance(node, dict) and node.get("id") and not node.get("parentId")
+    ]
+    occupied: set[tuple[int, int]] = set()
+    has_overlap = False
+    for node in nodes:
+        position = node.get("position")
+        if not isinstance(position, dict):
+            continue
+        key = (
+            round(float(position.get("x", 0))),
+            round(float(position.get("y", 0))),
+        )
+        if key in occupied:
+            has_overlap = True
+            break
+        occupied.add(key)
+    if not has_overlap:
+        return
+
+    node_by_id = {str(node["id"]): node for node in nodes}
+    outgoing: dict[str, list[str]] = {}
+    incoming_count = {node_id: 0 for node_id in node_by_id}
+    for edge in graph.get("edges", []):
+        if not isinstance(edge, dict):
+            continue
+        source = str(edge.get("source") or "")
+        target = str(edge.get("target") or "")
+        if source not in node_by_id or target not in node_by_id:
+            continue
+        outgoing.setdefault(source, []).append(target)
+        incoming_count[target] += 1
+
+    roots = [node_id for node_id, count in incoming_count.items() if count == 0]
+    depths = {node_id: 0 for node_id in roots}
+    queue = list(roots)
+    while queue:
+        source = queue.pop(0)
+        for target in outgoing.get(source, []):
+            next_depth = depths[source] + 1
+            if next_depth > depths.get(target, -1):
+                depths[target] = next_depth
+                queue.append(target)
+
+    min_x = min(float(node.get("position", {}).get("x", 80)) for node in nodes)
+    min_y = min(float(node.get("position", {}).get("y", 282)) for node in nodes)
+    levels: dict[int, list[dict[str, Any]]] = {}
+    for node_id, node in node_by_id.items():
+        levels.setdefault(depths.get(node_id, 0), []).append(node)
+
+    for depth, level_nodes in levels.items():
+        level_nodes.sort(
+            key=lambda node: (
+                float(node.get("position", {}).get("y", min_y)),
+                str(node.get("id")),
+            )
+        )
+        for index, node in enumerate(level_nodes):
+            position = {
+                "x": min_x + depth * 300,
+                "y": min_y + index * 140,
+            }
+            node["position"] = position
+            node["positionAbsolute"] = deepcopy(position)
 
 
 def _new_node_position(

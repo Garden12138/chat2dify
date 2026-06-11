@@ -729,3 +729,83 @@ def test_connection_error_is_wrapped() -> None:
         assert "connection refused" in str(exc)
     else:
         raise AssertionError("DifyClient should wrap connection errors")
+
+
+def test_publish_and_manage_workflow_triggers() -> None:
+    seen: list[tuple[str, str, dict | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content) if request.content else None
+        seen.append((request.method, request.url.path, body))
+        if request.url.path == "/console/api/login":
+            return httpx.Response(
+                200,
+                json={"result": "success"},
+                headers=[("set-cookie", "csrf_token=csrf123; Path=/")],
+            )
+        if request.url.path == "/console/api/apps/app-1/workflows/publish":
+            return httpx.Response(200, json={"result": "success", "created_at": "2026-06-09T09:00:00"})
+        if request.url.path == "/console/api/apps/app-1/triggers":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "trigger-1",
+                            "trigger_type": "trigger-webhook",
+                            "title": "接收售后请求",
+                            "node_id": "entry",
+                            "provider_name": "",
+                            "icon": "",
+                            "status": "enabled",
+                        }
+                    ]
+                },
+            )
+        if request.url.path == "/console/api/apps/app-1/trigger-enable":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "trigger-1",
+                    "trigger_type": "trigger-webhook",
+                    "title": "接收售后请求",
+                    "node_id": "entry",
+                    "provider_name": "",
+                    "icon": "",
+                    "status": "disabled",
+                },
+            )
+        if request.url.path == "/console/api/apps/app-1/workflows/triggers/webhook":
+            assert request.url.params["node_id"] == "entry"
+            return httpx.Response(
+                200,
+                json={
+                    "id": "webhook-trigger-1",
+                    "webhook_id": "hook-1",
+                    "webhook_url": "http://dify.local/hook-1",
+                    "webhook_debug_url": "http://dify.local/debug/hook-1",
+                    "node_id": "entry",
+                },
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+    published = client.publish_workflow("app-1", marked_name="v1", marked_comment="trigger release")
+    triggers = client.list_workflow_triggers("app-1")
+    updated = client.set_workflow_trigger_status("app-1", "trigger-1", enabled=False)
+    webhook = client.get_webhook_trigger("app-1", "entry")
+
+    assert published.result == "success"
+    assert triggers[0].status == "enabled"
+    assert updated.status == "disabled"
+    assert webhook.webhook_url == "http://dify.local/hook-1"
+    assert (
+        "POST",
+        "/console/api/apps/app-1/workflows/publish",
+        {"marked_name": "v1", "marked_comment": "trigger release"},
+    ) in seen
+    assert (
+        "POST",
+        "/console/api/apps/app-1/trigger-enable",
+        {"trigger_id": "trigger-1", "enable_trigger": False},
+    ) in seen

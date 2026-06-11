@@ -165,6 +165,71 @@ h2 {
   gap: 12px;
 }
 
+.compact-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.conditional-fields {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.field-help {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.45;
+}
+
+.field-help code {
+  color: var(--text);
+}
+
+.trigger-management-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.managed-trigger {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fbfcfe;
+  padding: 10px;
+}
+
+.managed-trigger-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.managed-trigger-heading strong {
+  min-width: 0;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.managed-trigger-meta,
+.managed-trigger-url {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.managed-trigger-url {
+  color: var(--accent);
+}
+
 .selection-summary {
   min-height: 20px;
   color: var(--muted);
@@ -779,6 +844,10 @@ button:disabled {
   }
 
   .node-list {
+    grid-template-columns: 1fr;
+  }
+
+  .compact-grid {
     grid-template-columns: 1fr;
   }
 

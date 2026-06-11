@@ -176,10 +176,10 @@ Open the local Web UI:
 http://127.0.0.1:8000/
 ```
 
-Create, Modify Preview/Apply, and Run Draft execute as persistent background
-tasks in the Web UI. Each panel shows the current phase, elapsed time, progress,
-and a cooperative Cancel action. Active task IDs are restored after a browser
-refresh. Task records and results use SQLite by default:
+Create, Modify Preview/Apply, Run Draft, and Publish execute as persistent
+background tasks in the Web UI. Each panel shows the current phase, elapsed
+time, progress, and a cooperative Cancel action. Active task IDs are restored
+after a browser refresh. Task records and results use SQLite by default:
 
 ```env
 CHAT2DIFY_TASK_DB=data/tasks.sqlite3
@@ -335,7 +335,69 @@ curl -X POST http://127.0.0.1:8000/api/tasks/TASK_ID/cancel
 The corresponding background endpoints for the other Web UI operations are
 `/api/tasks/workflows/modify/draft`,
 `/api/tasks/workflows/modify/apply`, and
-`/api/tasks/workflows/run/draft`.
+`/api/tasks/workflows/run/draft`. Explicit workflow publishing uses
+`/api/tasks/workflows/publish`.
+
+Create a POST Webhook workflow by selecting Webhook in the Web UI Trigger
+panel, or by passing a structured selection:
+
+```json
+{
+  "message": "接收售后请求，根据 query 生成客服回复并返回 answer",
+  "app_name": "Webhook 售后受理",
+  "trigger_selection": {
+    "type": "webhook",
+    "method": "POST",
+    "content_type": "application/json",
+    "body": [
+      {"name": "query", "type": "string", "required": true}
+    ],
+    "status_code": 200,
+    "response_body": "{\"accepted\":true}",
+    "timeout": 30
+  }
+}
+```
+
+Create a daily schedule workflow:
+
+```json
+{
+  "message": "每天汇总售后记录并返回 answer，不引用 start.query",
+  "app_name": "每日售后汇总",
+  "trigger_selection": {
+    "type": "schedule",
+    "mode": "visual",
+    "frequency": "daily",
+    "visual_config": {
+      "time": "09:00 AM",
+      "weekdays": ["mon"],
+      "on_minute": 0,
+      "monthly_days": [1]
+    },
+    "timezone": "Asia/Shanghai"
+  }
+}
+```
+
+Create and Modify only update the Dify draft. Publishing is always explicit:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/workflows/YOUR_APP_ID/publish \
+  -H 'Content-Type: application/json' \
+  -d '{"expected_hash":"CURRENT_DRAFT_HASH","marked_name":"v1","marked_comment":"Enable trigger"}'
+
+curl http://127.0.0.1:8000/api/workflows/YOUR_APP_ID/triggers
+
+curl -X POST http://127.0.0.1:8000/api/workflows/YOUR_APP_ID/triggers/TRIGGER_ID/status \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled":false}'
+
+curl 'http://127.0.0.1:8000/api/workflows/YOUR_APP_ID/triggers/webhook?node_id=WEBHOOK_NODE_ID'
+```
+
+Regular Draft Run is for workflows with a `start` entry. Trigger workflows
+must be published and invoked through the returned Webhook URL or schedule.
 
 Preview a change to an existing Dify workflow draft:
 
@@ -430,10 +492,11 @@ user explicitly asks for an Agent/智能体/autonomous multi-step flow. Agent
 parameters use the same Dify `{type,value}` input structure, and Agent
 tool-selector parameters must bind tools selected in the Web UI Tools panel.
 Existing `_raw_data` agent nodes are still preserved as passthrough for old
-draft compatibility. `datasource`、`datasource-empty`、`knowledge-index` 和
-`trigger-*` 节点目前仍作为外部依赖节点兼容层：chat2dify 可以读取已有 Dify 草稿并
-尽量原样写回这些节点，Web UI 会展示 warning 诊断；新建 workflow 时 planner 不主动
-生成它们。
+draft compatibility. `trigger-webhook` and `trigger-schedule` are structured
+entry nodes that can be configured in the Web UI, generated only from an
+explicit `trigger_selection`, published explicitly, and enabled or disabled
+after publication. `trigger-plugin`, `datasource`, `datasource-empty`, and
+`knowledge-index` remain passthrough-only external dependency nodes.
 
 Example file workflow request:
 
@@ -484,8 +547,8 @@ Example selected agent workflow request:
 ```
 
 Answer/chatflow nodes, plugin installation, credential editing, automatic
-creation of trigger/data-source nodes, Agent Roster management, and model
-capability registry sync remain out of scope for now.
+creation of plugin trigger/data-source nodes, Agent Roster management, and
+model capability registry sync remain out of scope for now.
 
 ## Test
 

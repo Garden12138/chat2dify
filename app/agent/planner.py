@@ -25,8 +25,27 @@ question-classifier, parameter-extractor, variable-aggregator,
 document-extractor, list-operator, knowledge-retrieval, human-input,
 iteration, loop. iteration-start, loop-start, and loop-end are internal
 container children only; never place them in top-level nodes.
-Do not generate datasource, datasource-empty, trigger-webhook, trigger-plugin,
-trigger-schedule, or knowledge-index nodes in new workflows.
+Do not generate datasource, datasource-empty, trigger-plugin, or knowledge-index
+nodes in new workflows. Generate trigger-webhook or trigger-schedule only when
+selected_trigger explicitly contains that trigger type. When
+selected_trigger.type is user-input, keep a normal start entry. A trigger entry
+replaces the start node; start and trigger nodes must never coexist.
+For trigger-webhook, copy the selected method, content_type, headers, params,
+body, status_code, response_body, timeout, and variables. Downstream references
+may only use declared webhook variables.
+For trigger-schedule, copy the selected mode, frequency, cron_expression,
+visual_config, and timezone. Schedule workflows have no start.query input and
+the trigger-schedule node does not expose a time output. When the workflow needs
+the current date or readable local time, add a Python code node immediately
+after the trigger. Bind its timestamp input to ["sys","timestamp"], convert it
+with zoneinfo.ZoneInfo(selected_trigger.timezone), and output date
+(YYYY-MM-DD), datetime (YYYY-MM-DD HH:MM:SS), and weekday strings. The following
+LLM must reference that code output, for example {{#format_time.date#}}, instead
+of the numeric system timestamp. Never put {{#sys.timestamp#}} directly in an
+LLM prompt and never use {{#<schedule_node_id>.time#}} or similar schedule-node
+references. In cron mode include only mode, cron_expression, and timezone; do
+not include frequency or visual_config. In visual mode include frequency,
+visual_config, and timezone; do not include cron_expression.
 Generate agent nodes only when the user explicitly asks for an Agent, 智能体,
 autonomous planning, multi-step execution, or self-directed reasoning, and
 selected_agents is non-empty in the user message. Never invent agent strategy
@@ -62,6 +81,9 @@ Use document-extractor only when the request explicitly involves uploaded files/
 Use list-operator only when the request explicitly involves filtering/sorting/limiting a string, number, or file array. For arrays of objects, use a code node instead because Dify's list-operator runtime does not handle array[object]. Dify workflow start inputs cannot accept a top-level JSON array; for user-provided arrays, create a start json variable such as items and treat it as an object wrapper whose records field is the array. List-operator params must include:
 {"variable":["start","items","records"],"var_type":"array[string]","item_var_type":"string","filter_by":{"enabled":false,"conditions":[]},"extract_by":{"enabled":false,"serial":"1"},"order_by":{"enabled":false,"key":"","value":"asc"},"limit":{"enabled":false,"size":10}}.
 When using code for object-array filtering, output result as array[object], first_record as object, and last_record as object.
+Every Python code node must define def main(...)->dict and return every declared
+output. Code params.outputs must use Dify's typed schema, for example
+{"date":{"type":"string","children":null}}, never {"date":"string"}.
 Use knowledge-retrieval only when the request explicitly asks for knowledge base, document library, RAG, retrieval, or answering from stored materials. Its params must include:
 {"query_variable_selector":["start","query"],"retrieval_mode":"multiple","multiple_retrieval_config":{"top_k":4,"score_threshold":null,"reranking_enable":false},"metadata_filtering_mode":"disabled"}.
 Do not invent dataset_ids. If dataset_ids are not known, omit them and let chat2dify inject DIFY_DEFAULT_DATASET_IDS.
@@ -142,22 +164,38 @@ class WorkflowPlanner:
         dsl_version: str,
         tool_selections: list[dict[str, Any]] | None = None,
         agent_selections: list[dict[str, Any]] | None = None,
+        trigger_selection: dict[str, Any] | None = None,
         task_context: TaskContext | None = None,
     ) -> PlannerResult:
         runtime = self.settings.planner_runtime()
         if not runtime.api_key:
             if task_context is not None:
                 task_context.update("planning", 35, "Using the fallback workflow template.")
-            plan = fallback_plan(message, app_name=app_name)
+            fallback = fallback_plan(message, app_name=app_name)
+            fallback_payload = _prepare_fallback_for_trigger(
+                fallback.model_dump(),
+                message=message,
+                trigger_selection=trigger_selection,
+            )
+            normalized = normalize_plan_payload(
+                fallback_payload,
+                app_name=app_name,
+                default_dataset_ids=self.settings.dify_default_dataset_ids,
+                tool_selections=tool_selections or [],
+                agent_selections=agent_selections or [],
+                trigger_selection=trigger_selection,
+            )
+            plan = WorkflowPlan.model_validate(normalized.payload)
             return PlannerResult(
                 plan=plan,
-                raw_plan=plan.model_dump(),
+                raw_plan=fallback_payload,
                 mode="fallback",
                 attempts=0,
                 used_fallback=True,
                 repaired=False,
                 provider=runtime.provider,
                 model=runtime.model,
+                normalizations=normalized.changes,
             )
 
         last_error = ""
@@ -176,6 +214,8 @@ class WorkflowPlanner:
                 "tool_selections": tool_selections or [],
                 "agent_selections": agent_selections or [],
             }
+            if trigger_selection is not None:
+                call_kwargs["trigger_selection"] = trigger_selection
             if task_context is not None:
                 call_kwargs["task_context"] = task_context
             content = self._call_llm(message, **call_kwargs)
@@ -195,6 +235,7 @@ class WorkflowPlanner:
                     default_dataset_ids=self.settings.dify_default_dataset_ids,
                     tool_selections=tool_selections or [],
                     agent_selections=agent_selections or [],
+                    trigger_selection=trigger_selection,
                 )
                 plan = WorkflowPlan.model_validate(normalized.payload)
                 issues = _validate_compiled_plan(plan, settings=self.settings, dsl_version=dsl_version)
@@ -226,6 +267,7 @@ class WorkflowPlanner:
         last_error: str = "",
         tool_selections: list[dict[str, Any]] | None = None,
         agent_selections: list[dict[str, Any]] | None = None,
+        trigger_selection: dict[str, Any] | None = None,
         task_context: TaskContext | None = None,
     ) -> str:
         runtime = self.settings.planner_runtime()
@@ -235,6 +277,7 @@ class WorkflowPlanner:
             "request": message,
             "selected_tools": _planner_tool_schemas(tool_selections or []),
             "selected_agents": _planner_agent_schemas(agent_selections or []),
+            "selected_trigger": trigger_selection or {"type": "user-input"},
         }
         if last_error:
             user_content["previous_validation_error"] = last_error
@@ -420,6 +463,59 @@ def fallback_plan(message: str, *, app_name: str | None = None) -> WorkflowPlan:
             ],
         }
     )
+
+
+def _prepare_fallback_for_trigger(
+    payload: dict[str, Any],
+    *,
+    message: str,
+    trigger_selection: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(trigger_selection, dict):
+        return payload
+    trigger_type = str(trigger_selection.get("type") or "user-input")
+    if trigger_type not in {"webhook", "schedule"}:
+        return payload
+
+    data = json.loads(json.dumps(payload, ensure_ascii=False))
+    llm_node = next(
+        (
+            node
+            for node in data.get("nodes", [])
+            if isinstance(node, dict) and node.get("type") == "llm"
+        ),
+        None,
+    )
+    if llm_node is None:
+        return data
+
+    params = llm_node.setdefault("params", {})
+    if trigger_type == "schedule":
+        params["user_prompt"] = f"请执行以下定时工作要求，并生成本次执行结果：\n{message}"
+        return data
+
+    declared: list[str] = []
+    for group in ("body", "params", "headers"):
+        for item in trigger_selection.get(group) or []:
+            if not isinstance(item, dict) or not item.get("name"):
+                continue
+            name = str(item["name"])
+            declared.append(name.replace("-", "_") if group == "headers" else name)
+    entry = next(
+        (
+            node
+            for node in data.get("nodes", [])
+            if isinstance(node, dict) and node.get("type") == "start"
+        ),
+        {},
+    )
+    entry_id = str(entry.get("id") or "start")
+    variable = declared[0] if declared else "_webhook_raw"
+    params["user_prompt"] = (
+        f"请根据 Webhook 本次传入的数据完成任务：{{{{#{entry_id}.{variable}#}}}}\n"
+        f"任务要求：{message}"
+    )
+    return data
 
 
 def _validate_compiled_plan(plan: WorkflowPlan, *, settings: Settings, dsl_version: str) -> list[ValidationIssue]:

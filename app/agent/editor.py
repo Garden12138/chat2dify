@@ -38,8 +38,16 @@ Prefer the smallest safe change that satisfies the request.
 Preserve existing node ids when a node keeps the same purpose.
 Preserve existing tool, agent, datasource, datasource-empty, knowledge-index,
 trigger-webhook, trigger-plugin, and trigger-schedule nodes exactly unless the
-user explicitly asks to remove them. Do not add datasource, trigger, or
-knowledge-index nodes; they require Dify-side configuration. Add a new agent
+user explicitly asks to remove them. Do not add datasource, trigger-plugin, or
+knowledge-index nodes. Add trigger-webhook or trigger-schedule only when
+selected_trigger explicitly contains that type; it replaces start and copies
+the selected configuration exactly. When selected_trigger.type is user-input,
+use a normal start entry instead. A trigger-schedule node has no time output;
+when readable date/time is needed, format {{#sys.timestamp#}} in a code node
+using the configured timezone, then give the LLM the code node's date/datetime
+output. Never put the numeric timestamp directly in an LLM prompt or reference
+{{#<schedule_node_id>.time#}}. Cron mode keeps only cron_expression/timezone;
+visual mode keeps only frequency/visual_config/timezone. Add a new agent
 node only when selected_agents is non-empty and the user explicitly asks for an
 Agent, 智能体, autonomous planning, or multi-step execution. Never invent agent
 strategy provider names or strategy names. Use selected_agents[].agent_parameters
@@ -53,6 +61,9 @@ Use parameter-extractor for structured field extraction; default reasoning_mode 
 Use variable-aggregator for fallback/merge of multiple upstream variables.
 Use document-extractor only for file/document/attachment text extraction.
 Use list-operator only for filtering/sorting/limiting arrays.
+Every Python code node must define def main(...)->dict and return every declared
+output. Code params.outputs must use Dify's typed schema, for example
+{"date":{"type":"string","children":null}}, never {"date":"string"}.
 Use knowledge-retrieval only for explicit knowledge base, document library, RAG, retrieval, or stored-material Q&A requests.
 Use human-input only for explicit human review, manual approval, manager approval, human confirmation, or human-supplied follow-up information. delivery_methods[].id must be a valid UUID. Each action needs an outgoing edge with source_handle equal to user_actions[].id.
 human-input outputs include form input names plus __action_id, __action_value, and __rendered_content.
@@ -114,6 +125,7 @@ class WorkflowEditPlanner:
         dsl_version: str,
         tool_selections: list[dict[str, Any]] | None = None,
         agent_selections: list[dict[str, Any]] | None = None,
+        trigger_selection: dict[str, Any] | None = None,
         task_context: TaskContext | None = None,
     ) -> WorkflowEditResult:
         runtime = self.settings.planner_runtime()
@@ -137,6 +149,8 @@ class WorkflowEditPlanner:
                 "tool_selections": tool_selections or [],
                 "agent_selections": agent_selections or [],
             }
+            if trigger_selection is not None:
+                call_kwargs["trigger_selection"] = trigger_selection
             if task_context is not None:
                 call_kwargs["task_context"] = task_context
             content = self._call_llm(message, **call_kwargs)
@@ -156,6 +170,7 @@ class WorkflowEditPlanner:
                     default_dataset_ids=self.settings.dify_default_dataset_ids,
                     tool_selections=tool_selections or [],
                     agent_selections=agent_selections or [],
+                    trigger_selection=trigger_selection,
                 )
                 plan = WorkflowPlan.model_validate(normalized.payload)
                 issues = _validate_compiled_plan(plan, settings=self.settings, dsl_version=dsl_version)
@@ -185,6 +200,7 @@ class WorkflowEditPlanner:
         last_error: str = "",
         tool_selections: list[dict[str, Any]] | None = None,
         agent_selections: list[dict[str, Any]] | None = None,
+        trigger_selection: dict[str, Any] | None = None,
         task_context: TaskContext | None = None,
     ) -> str:
         runtime = self.settings.planner_runtime()
@@ -194,6 +210,7 @@ class WorkflowEditPlanner:
             "current_plan": current_plan.model_dump(),
             "selected_tools": _planner_tool_schemas(tool_selections or []),
             "selected_agents": _planner_agent_schemas(agent_selections or []),
+            "selected_trigger": trigger_selection or {"type": "user-input"},
             "edit_policy": {
                 "output": "Return the complete revised WorkflowPlan JSON.",
                 "default": "Make a minimal targeted edit.",

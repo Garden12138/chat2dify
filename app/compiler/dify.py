@@ -55,12 +55,13 @@ class DifyDslCompiler:
         self.default_dataset_ids = default_dataset_ids or []
 
     def compile(self, plan: WorkflowPlan) -> str:
+        output_types = _plan_output_types(plan)
         nodes: list[dict[str, Any]] = []
         for index, node in enumerate(plan.nodes):
-            graph_node = self._compile_node(node, index)
+            graph_node = self._compile_node(node, index, output_types=output_types)
             nodes.append(graph_node)
             if node.type in {"iteration", "loop"}:
-                nodes.extend(self._compile_container_child_nodes(node))
+                nodes.extend(self._compile_container_child_nodes(node, output_types=output_types))
         type_by_id = {node["id"]: node["data"]["type"] for node in nodes}
         edges = [self._compile_edge(edge.model_dump(), type_by_id) for edge in plan.edges]
         for node in plan.nodes:
@@ -93,7 +94,13 @@ class DifyDslCompiler:
         }
         return yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
 
-    def _compile_node(self, node: PlanNode, index: int) -> dict[str, Any]:
+    def _compile_node(
+        self,
+        node: PlanNode,
+        index: int,
+        *,
+        output_types: dict[tuple[str, str], str],
+    ) -> dict[str, Any]:
         position = {"x": START_X + index * NODE_WIDTH_X_OFFSET, "y": START_Y}
         data = {
             "title": node.title or _default_title(node.type),
@@ -105,7 +112,7 @@ class DifyDslCompiler:
             case "start":
                 data.update(self._start_data(node))
             case "llm":
-                data.update(self._llm_data(node))
+                data.update(self._llm_data(node, output_types=output_types))
             case "code":
                 data.update(self._code_data(node))
             case "if-else":
@@ -144,6 +151,10 @@ class DifyDslCompiler:
                 data.update({})
             case "agent":
                 data.update(_agent_data(node))
+            case "trigger-webhook":
+                data.update(self._trigger_webhook_data(node))
+            case "trigger-schedule":
+                data.update(self._trigger_schedule_data(node))
             case node_type if node_type in EXTERNAL_DEPENDENCY_NODE_TYPES:
                 data.update(_external_dependency_data(node))
 
@@ -196,14 +207,19 @@ class DifyDslCompiler:
             "zIndex": z_index,
         }
 
-    def _compile_container_child_nodes(self, node: PlanNode) -> list[dict[str, Any]]:
+    def _compile_container_child_nodes(
+        self,
+        node: PlanNode,
+        *,
+        output_types: dict[tuple[str, str], str],
+    ) -> list[dict[str, Any]]:
         children = node.params.get("children") if isinstance(node.params.get("children"), list) else []
         graph_nodes: list[dict[str, Any]] = []
         for index, child in enumerate(children):
             if not isinstance(child, dict):
                 continue
             child_node = PlanNode.model_validate(child)
-            graph_node = self._compile_node(child_node, index)
+            graph_node = self._compile_node(child_node, index, output_types=output_types)
             position = _child_position(child, index)
             graph_node["position"] = position
             graph_node["positionAbsolute"] = position.copy()
@@ -267,22 +283,39 @@ class DifyDslCompiler:
             )
         return {"variables": variables}
 
-    def _llm_data(self, node: PlanNode) -> dict[str, Any]:
+    def _llm_data(
+        self,
+        node: PlanNode,
+        *,
+        output_types: dict[tuple[str, str], str],
+    ) -> dict[str, Any]:
         provider = node.params.get("model_provider") or self.default_model_provider
         name = node.params.get("model_name") or self.default_model_name
         system_prompt = node.params.get("system_prompt", "")
         user_prompt = node.params.get("user_prompt") or "{{#start.query#}}"
-        return {
+        prompt_variables: dict[tuple[str, str], str] = {}
+        prompt_template = [
+            _compile_prompt_item(
+                "system",
+                system_prompt,
+                output_types=output_types,
+                prompt_variables=prompt_variables,
+            ),
+            _compile_prompt_item(
+                "user",
+                user_prompt,
+                output_types=output_types,
+                prompt_variables=prompt_variables,
+            ),
+        ]
+        data = {
             "model": {
                 "provider": provider,
                 "name": name,
                 "mode": node.params.get("model_mode", "chat"),
                 "completion_params": node.params.get("completion_params", {"temperature": 0.7}),
             },
-            "prompt_template": [
-                {"role": "system", "text": normalize_template_refs(system_prompt)},
-                {"role": "user", "text": normalize_template_refs(user_prompt)},
-            ],
+            "prompt_template": prompt_template,
             "variables": [],
             "context": {"enabled": False, "variable_selector": []},
             "vision": {"enabled": False, "configs": {"variable_selector": []}},
@@ -295,6 +328,17 @@ class DifyDslCompiler:
                 "exponential_backoff": {"enabled": False, "multiplier": 2, "max_interval": 10000},
             },
         }
+        if prompt_variables:
+            data["prompt_config"] = {
+                "jinja2_variables": [
+                    {
+                        "variable": alias,
+                        "value_selector": [node_id, variable],
+                    }
+                    for (node_id, variable), alias in prompt_variables.items()
+                ]
+            }
+        return data
 
     def _code_data(self, node: PlanNode) -> dict[str, Any]:
         outputs = node.params.get("outputs") or {"result": {"type": "string", "children": None}}
@@ -489,6 +533,46 @@ class DifyDslCompiler:
             "_children": _container_children_refs(children),
         }
 
+    def _trigger_webhook_data(self, node: PlanNode) -> dict[str, Any]:
+        params = node.params
+        return {
+            "webhook_url": str(params.get("webhook_url") or ""),
+            "webhook_debug_url": str(params.get("webhook_debug_url") or ""),
+            "method": str(params.get("method") or "POST").upper(),
+            "content_type": str(params.get("content_type") or "application/json"),
+            "headers": _webhook_parameters(params.get("headers"), header=True),
+            "params": _webhook_parameters(params.get("params")),
+            "body": _webhook_parameters(params.get("body")),
+            "async_mode": True,
+            "status_code": _bounded_int(params.get("status_code"), default=200, minimum=100, maximum=599),
+            "response_body": str(params.get("response_body") or ""),
+            "timeout": _bounded_int(params.get("timeout"), default=30, minimum=1, maximum=300),
+            "variables": _webhook_variables(params),
+        }
+
+    def _trigger_schedule_data(self, node: PlanNode) -> dict[str, Any]:
+        params = node.params
+        mode = str(params.get("mode") or "visual")
+        if mode == "cron":
+            return {
+                "mode": "cron",
+                "cron_expression": str(params.get("cron_expression") or ""),
+                "timezone": str(params.get("timezone") or "Asia/Shanghai"),
+            }
+
+        visual = params.get("visual_config") if isinstance(params.get("visual_config"), dict) else {}
+        return {
+            "mode": "visual",
+            "frequency": str(params.get("frequency") or "daily"),
+            "visual_config": {
+                "time": str(visual.get("time") or "09:00 AM"),
+                "weekdays": deepcopy(visual.get("weekdays") or ["mon"]),
+                "on_minute": _bounded_int(visual.get("on_minute"), default=0, minimum=0, maximum=59),
+                "monthly_days": deepcopy(visual.get("monthly_days") or [1]),
+            },
+            "timezone": str(params.get("timezone") or "Asia/Shanghai"),
+        }
+
     def _model_config(self, node: PlanNode) -> dict[str, Any]:
         model = node.params.get("model") if isinstance(node.params.get("model"), dict) else {}
         return {
@@ -629,7 +713,13 @@ def _variables(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         variable = item.get("variable")
         selector = item.get("value_selector")
         if variable and selector:
-            variables.append(_normalize_output({"variable": variable, "value_selector": selector}))
+            normalized = {
+                "variable": variable,
+                "value_selector": selector,
+            }
+            if item.get("value_type") is not None:
+                normalized["value_type"] = item["value_type"]
+            variables.append(_normalize_output(normalized))
     return variables
 
 
@@ -855,6 +945,237 @@ def _positive_int(value: Any, *, default: int) -> int:
     except (TypeError, ValueError):
         parsed = default
     return max(1, parsed)
+
+
+def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def _webhook_parameters(value: Any, *, header: bool = False) -> list[dict[str, Any]]:
+    result = []
+    for item in value if isinstance(value, list) else []:
+        if not isinstance(item, dict) or not item.get("name"):
+            continue
+        result.append(
+            {
+                "name": str(item["name"]),
+                "type": "string" if header else str(item.get("type") or "string"),
+                "required": bool(item.get("required", False)),
+            }
+        )
+    return result
+
+
+def _webhook_variables(params: dict[str, Any]) -> list[dict[str, Any]]:
+    variables = params.get("variables") if isinstance(params.get("variables"), list) else []
+    if variables:
+        return deepcopy(variables)
+    result = [
+        {
+            "variable": "_webhook_raw",
+            "label": "raw",
+            "value_type": "object",
+            "value_selector": [],
+            "required": True,
+        }
+    ]
+    for label, items in (
+        ("header", params.get("headers")),
+        ("param", params.get("params")),
+        ("body", params.get("body")),
+    ):
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict) or not item.get("name"):
+                continue
+            name = str(item["name"]).replace("-", "_") if label == "header" else str(item["name"])
+            result.append(
+                {
+                    "variable": name,
+                    "label": label,
+                    "value_type": str(item.get("type") or "string"),
+                    "value_selector": [],
+                    "required": bool(item.get("required", False)),
+                }
+            )
+    return result
+
+
+_BASIC_PROMPT_VAR_TYPES = {
+    "string",
+    "secret",
+    "number",
+    "array",
+    "array[string]",
+    "array[number]",
+    "array[object]",
+    "file",
+    "array[file]",
+}
+
+
+def _compile_prompt_item(
+    role: str,
+    text: Any,
+    *,
+    output_types: dict[tuple[str, str], str],
+    prompt_variables: dict[tuple[str, str], str],
+) -> dict[str, Any]:
+    normalized = normalize_template_refs(str(text or ""))
+    references = [
+        (match.group(1), match.group(2))
+        for match in DIFY_REF_PATTERN.finditer(normalized)
+    ]
+    needs_jinja = any(
+        output_types.get(reference) not in _BASIC_PROMPT_VAR_TYPES
+        for reference in references
+        if output_types.get(reference)
+    )
+    if not needs_jinja:
+        return {"role": role, "text": normalized}
+
+    def replace_reference(match: re.Match[str]) -> str:
+        reference = (match.group(1), match.group(2))
+        alias = prompt_variables.get(reference)
+        if alias is None:
+            alias = _unique_prompt_alias(reference, set(prompt_variables.values()))
+            prompt_variables[reference] = alias
+        return f"{{{{ {alias} }}}}"
+
+    return {
+        "role": role,
+        "text": normalized,
+        "jinja2_text": DIFY_REF_PATTERN.sub(replace_reference, normalized),
+        "edition_type": "jinja2",
+    }
+
+
+def _unique_prompt_alias(reference: tuple[str, str], existing: set[str]) -> str:
+    raw = re.sub(r"[^A-Za-z0-9_]", "_", f"{reference[0]}_{reference[1]}")
+    alias = raw if raw and not raw[0].isdigit() else f"v_{raw}"
+    alias = alias or "value"
+    candidate = alias
+    suffix = 2
+    while candidate in existing:
+        candidate = f"{alias}_{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _plan_output_types(plan: WorkflowPlan) -> dict[tuple[str, str], str]:
+    output_types: dict[tuple[str, str], str] = {
+        ("sys", "timestamp"): "number",
+    }
+
+    def register(node: PlanNode) -> None:
+        for variable, variable_type in _node_output_types(node).items():
+            output_types[(node.id, variable)] = variable_type
+        for child in node.params.get("children") if isinstance(node.params.get("children"), list) else []:
+            if isinstance(child, dict):
+                register(PlanNode.model_validate(child))
+
+    for node in plan.nodes:
+        register(node)
+    return output_types
+
+
+def _node_output_types(node: PlanNode) -> dict[str, str]:
+    params = node.params
+    match node.type:
+        case "start":
+            return {
+                str(item.get("name") or item.get("variable")): _start_output_type(item.get("type"))
+                for item in params.get("variables", [])
+                if isinstance(item, dict) and (item.get("name") or item.get("variable"))
+            }
+        case "trigger-webhook":
+            variables = params.get("variables") if isinstance(params.get("variables"), list) else []
+            result = {
+                str(item.get("variable") or item.get("name")): str(
+                    item.get("value_type") or item.get("type") or "string"
+                )
+                for item in variables
+                if isinstance(item, dict) and (item.get("variable") or item.get("name"))
+            }
+            if result:
+                return result
+            result = {"_webhook_raw": "object"}
+            for group in ("headers", "params", "body"):
+                for item in params.get(group) if isinstance(params.get(group), list) else []:
+                    if not isinstance(item, dict) or not item.get("name"):
+                        continue
+                    variable = str(item["name"]).replace("-", "_") if group == "headers" else str(item["name"])
+                    result[variable] = str(item.get("type") or "string")
+            return result
+        case "llm":
+            return {"text": "string"}
+        case "code":
+            outputs = params.get("outputs") if isinstance(params.get("outputs"), dict) else {}
+            return {
+                str(name): str(config.get("type") or "string") if isinstance(config, dict) else "string"
+                for name, config in outputs.items()
+            }
+        case "http-request":
+            return {"body": "string", "status_code": "number", "headers": "object"}
+        case "template-transform":
+            return {"output": "string"}
+        case "question-classifier":
+            return {"class_name": "string"}
+        case "parameter-extractor":
+            return {
+                str(item.get("name")): str(item.get("type") or "string")
+                for item in params.get("parameters", [])
+                if isinstance(item, dict) and item.get("name")
+            }
+        case "variable-aggregator":
+            return {"output": str(params.get("output_type") or "string")}
+        case "document-extractor":
+            return {"text": "string"}
+        case "list-operator":
+            return {
+                "result": str(params.get("var_type") or "array"),
+                "first_record": str(params.get("item_var_type") or "string"),
+                "last_record": str(params.get("item_var_type") or "string"),
+            }
+        case "knowledge-retrieval":
+            return {"result": "array[object]"}
+        case "human-input":
+            result = {
+                str(item.get("output_variable_name")): str(item.get("type") or "string")
+                for item in params.get("inputs", [])
+                if isinstance(item, dict) and item.get("output_variable_name")
+            }
+            result.update({"selected_action": "string", "submitted_at": "string"})
+            return result
+        case "tool" | "agent":
+            return {"text": "string", "files": "array[file]", "json": "object"}
+        case "knowledge-index":
+            return {"result": "object", "document_ids": "array[string]"}
+        case "datasource" | "datasource-empty":
+            return {"datasource_type": "string", "file": "file"}
+        case "iteration":
+            return {"output": "array", "item": "object", "index": "number"}
+        case "loop":
+            result = {"loop_round": "number"}
+            for item in params.get("loop_variables", []):
+                if isinstance(item, dict) and item.get("label"):
+                    result[str(item["label"])] = str(item.get("var_type") or item.get("type") or "string")
+            return result
+    return {}
+
+
+def _start_output_type(value: Any) -> str:
+    input_type = _input_type(value or "paragraph")
+    return {
+        "number": "number",
+        "checkbox": "boolean",
+        "json_object": "object",
+        "file": "file",
+        "file-list": "array[file]",
+    }.get(input_type, "string")
 
 
 def _multiple_retrieval_config(value: Any) -> dict[str, Any]:

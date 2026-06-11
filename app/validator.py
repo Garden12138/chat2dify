@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 from pydantic import ValidationError
@@ -52,6 +53,24 @@ EXTERNAL_DEPENDENCY_NODE_TYPES = {
 }
 TEMPLATE_REF_RE = re.compile(r"\{\{#([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)#\}\}")
 BARE_TEMPLATE_REF_RE = re.compile(r"\{\{\s*(?!#)([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)\s*\}\}")
+SYSTEM_OUTPUTS = {
+    "app_id",
+    "batch",
+    "conversation_id",
+    "dataset_id",
+    "datasource_info",
+    "datasource_type",
+    "dialogue_count",
+    "document_id",
+    "files",
+    "invoke_from",
+    "original_document_id",
+    "query",
+    "timestamp",
+    "user_id",
+    "workflow_id",
+    "workflow_run_id",
+}
 GENERIC_TITLE_RE = re.compile(r"[\s_\-]+")
 GENERIC_TITLES = {
     "",
@@ -244,9 +263,10 @@ def validate_dsl(yaml_content: str, *, expected_dsl_version: str | None = None) 
     if isinstance(nodes, list):
         node_ids = {node.get("id") for node in nodes if isinstance(node, dict)}
         node_types = {node.get("id"): node.get("data", {}).get("type") for node in nodes if isinstance(node, dict)}
-        if "start" not in set(node_types.values()):
+        entry_types = {"start", "datasource", "trigger-webhook", "trigger-plugin", "trigger-schedule"}
+        if not (set(node_types.values()) & entry_types):
             issues.append(
-                ValidationIssue(code="DSL_START_MISSING", message="workflow graph must contain a start node.")
+                ValidationIssue(code="DSL_ENTRY_MISSING", message="workflow graph must contain an entry node.")
             )
         if "end" not in set(node_types.values()):
             issues.append(
@@ -278,6 +298,22 @@ def _validate_graph_semantics(plan: WorkflowPlan) -> list[ValidationIssue]:
     for edge in plan.edges:
         outgoing.setdefault(edge.source, []).append(edge.source_handle)
         incoming.setdefault(edge.target, []).append(edge.source)
+
+    start_nodes = [node for node in plan.nodes if node.type == "start"]
+    trigger_nodes = [
+        node
+        for node in plan.nodes
+        if node.type in {"trigger-webhook", "trigger-plugin", "trigger-schedule"}
+    ]
+    if start_nodes and trigger_nodes:
+        issues.append(
+            ValidationIssue(
+                code="PLAN_START_TRIGGER_CONFLICT",
+                message="start node cannot coexist with trigger entry nodes.",
+                path="nodes",
+                suggestion="保留普通 start，或改为 Webhook/定时触发入口，二者只能选一种。",
+            )
+        )
 
     for node in plan.nodes:
         if node.type in ENTRY_NODE_TYPES and incoming.get(node.id):
@@ -460,8 +496,24 @@ def _validate_node_params(plan: WorkflowPlan) -> list[ValidationIssue]:
             case "code":
                 if not params.get("code"):
                     issues.append(_node_issue("PLAN_CODE_MISSING", "code node requires code.", node.id, "params.code"))
-                if not isinstance(params.get("outputs"), dict) or not params.get("outputs"):
+                outputs = params.get("outputs")
+                if not isinstance(outputs, dict) or not outputs:
                     issues.append(_node_issue("PLAN_CODE_OUTPUTS_MISSING", "code node requires outputs.", node.id, "params.outputs"))
+                else:
+                    for output_name, output_config in outputs.items():
+                        if not isinstance(output_config, dict) or not output_config.get("type"):
+                            issues.append(
+                                _node_issue(
+                                    "PLAN_CODE_OUTPUT_INVALID",
+                                    "code output requires a typed Dify output schema.",
+                                    node.id,
+                                    f"params.outputs.{output_name}",
+                                    suggestion=(
+                                        'Use {"type":"string","children":null} '
+                                        "instead of a bare type value."
+                                    ),
+                                )
+                            )
             case "if-else":
                 cases = params.get("cases")
                 if not isinstance(cases, list) or not cases:
@@ -831,6 +883,10 @@ def _validate_node_params(plan: WorkflowPlan) -> list[ValidationIssue]:
                 issues.extend(_validate_tool_node(node))
             case "agent":
                 issues.extend(_validate_agent_node(node))
+            case "trigger-webhook":
+                issues.extend(_validate_trigger_webhook_node(node))
+            case "trigger-schedule":
+                issues.extend(_validate_trigger_schedule_node(node))
             case node_type if node_type in EXTERNAL_DEPENDENCY_NODE_TYPES:
                 issues.append(
                     _node_issue(
@@ -841,6 +897,236 @@ def _validate_node_params(plan: WorkflowPlan) -> list[ValidationIssue]:
                         suggestion="该节点依赖 Dify 插件、触发器或外部配置；chat2dify 会尽量原样保留，但不会替你校验外部资源是否可用。",
                     ).model_copy(update={"severity": "warning"})
                 )
+    return issues
+
+
+def _validate_trigger_webhook_node(node: PlanNode) -> list[ValidationIssue]:
+    params = node.params
+    if isinstance(params.get("_raw_data"), dict):
+        return [
+            _node_issue(
+                "PLAN_EXTERNAL_DEPENDENCY_NODE_PASSTHROUGH",
+                "trigger-webhook node is preserved from an existing Dify draft.",
+                node.id,
+                "type",
+            ).model_copy(update={"severity": "warning"})
+        ]
+    issues: list[ValidationIssue] = []
+    if str(params.get("method") or "").upper() not in {"GET", "POST", "HEAD", "PATCH", "PUT", "DELETE"}:
+        issues.append(_node_issue("PLAN_WEBHOOK_METHOD_INVALID", "Webhook method is invalid.", node.id, "params.method"))
+    if str(params.get("content_type") or "") not in {
+        "application/json",
+        "multipart/form-data",
+        "application/x-www-form-urlencoded",
+        "text/plain",
+        "application/octet-stream",
+    }:
+        issues.append(
+            _node_issue(
+                "PLAN_WEBHOOK_CONTENT_TYPE_INVALID",
+                "Webhook content_type is invalid.",
+                node.id,
+                "params.content_type",
+            )
+        )
+
+    allowed_by_group = {
+        "headers": {"string"},
+        "params": {"string", "number", "boolean"},
+        "body": {
+            "string",
+            "number",
+            "boolean",
+            "object",
+            "array[string]",
+            "array[number]",
+            "array[boolean]",
+            "array[object]",
+            "file",
+        },
+    }
+    seen: dict[str, str] = {}
+    for group, allowed in allowed_by_group.items():
+        items = params.get(group)
+        if not isinstance(items, list):
+            issues.append(
+                _node_issue(
+                    "PLAN_WEBHOOK_PARAMETERS_INVALID",
+                    f"Webhook {group} must be a list.",
+                    node.id,
+                    f"params.{group}",
+                )
+            )
+            continue
+        for idx, item in enumerate(items):
+            if not isinstance(item, dict):
+                issues.append(
+                    _node_issue(
+                        "PLAN_WEBHOOK_PARAMETER_INVALID",
+                        f"Webhook {group} parameter must be an object.",
+                        node.id,
+                        f"params.{group}.{idx}",
+                    )
+                )
+                continue
+            name = str(item.get("name") or "").strip()
+            variable_name = name.replace("-", "_") if group == "headers" else name
+            if not name or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", name):
+                issues.append(
+                    _node_issue(
+                        "PLAN_WEBHOOK_PARAMETER_NAME_INVALID",
+                        f"Webhook parameter name is invalid: {name or '<empty>'}",
+                        node.id,
+                        f"params.{group}.{idx}.name",
+                        suggestion="参数名使用英文字母或下划线开头，并只包含字母、数字、下划线或连字符。",
+                    )
+                )
+            if variable_name in seen:
+                issues.append(
+                    _node_issue(
+                        "PLAN_WEBHOOK_PARAMETER_DUPLICATE",
+                        f"Webhook output variable is duplicated: {variable_name}",
+                        node.id,
+                        f"params.{group}.{idx}.name",
+                        suggestion=f"该名称已在 {seen[variable_name]} 中使用，请改成唯一变量名。",
+                    )
+                )
+            else:
+                seen[variable_name] = group
+            parameter_type = str(item.get("type") or "string")
+            if parameter_type not in allowed:
+                issues.append(
+                    _node_issue(
+                        "PLAN_WEBHOOK_PARAMETER_TYPE_INVALID",
+                        f"Webhook {group} parameter type is invalid: {parameter_type}",
+                        node.id,
+                        f"params.{group}.{idx}.type",
+                    )
+                )
+    try:
+        timeout = int(params.get("timeout", 0))
+    except (TypeError, ValueError):
+        timeout = 0
+    if timeout < 1 or timeout > 300:
+        issues.append(
+            _node_issue(
+                "PLAN_WEBHOOK_TIMEOUT_INVALID",
+                "Webhook timeout must be between 1 and 300 seconds.",
+                node.id,
+                "params.timeout",
+            )
+        )
+    return issues
+
+
+def _validate_trigger_schedule_node(node: PlanNode) -> list[ValidationIssue]:
+    params = node.params
+    if isinstance(params.get("_raw_data"), dict):
+        return [
+            _node_issue(
+                "PLAN_EXTERNAL_DEPENDENCY_NODE_PASSTHROUGH",
+                "trigger-schedule node is preserved from an existing Dify draft.",
+                node.id,
+                "type",
+            ).model_copy(update={"severity": "warning"})
+        ]
+    issues: list[ValidationIssue] = []
+    mode = str(params.get("mode") or "")
+    if mode not in {"visual", "cron"}:
+        issues.append(_node_issue("PLAN_SCHEDULE_MODE_INVALID", "Schedule mode must be visual or cron.", node.id, "params.mode"))
+    timezone = str(params.get("timezone") or "")
+    try:
+        ZoneInfo(timezone)
+    except (ZoneInfoNotFoundError, ValueError):
+        issues.append(
+            _node_issue(
+                "PLAN_SCHEDULE_TIMEZONE_INVALID",
+                f"Schedule timezone is invalid: {timezone or '<empty>'}",
+                node.id,
+                "params.timezone",
+                suggestion="使用 IANA 时区，例如 Asia/Shanghai。",
+            )
+        )
+    if mode == "cron":
+        cron = str(params.get("cron_expression") or "").strip()
+        if len(cron.split()) != 5:
+            issues.append(
+                _node_issue(
+                    "PLAN_SCHEDULE_CRON_INVALID",
+                    "Schedule cron_expression must contain five fields.",
+                    node.id,
+                    "params.cron_expression",
+                )
+            )
+        return issues
+
+    frequency = str(params.get("frequency") or "")
+    if frequency not in {"hourly", "daily", "weekly", "monthly"}:
+        issues.append(
+            _node_issue(
+                "PLAN_SCHEDULE_FREQUENCY_INVALID",
+                "Schedule frequency must be hourly, daily, weekly, or monthly.",
+                node.id,
+                "params.frequency",
+            )
+        )
+    visual = params.get("visual_config") if isinstance(params.get("visual_config"), dict) else {}
+    if frequency == "hourly":
+        try:
+            on_minute = int(visual.get("on_minute", -1))
+        except (TypeError, ValueError):
+            on_minute = -1
+        if not 0 <= on_minute <= 59:
+            issues.append(
+                _node_issue(
+                    "PLAN_SCHEDULE_MINUTE_INVALID",
+                    "Hourly schedule on_minute must be between 0 and 59.",
+                    node.id,
+                    "params.visual_config.on_minute",
+                )
+            )
+    else:
+        time_value = str(visual.get("time") or "")
+        if not re.fullmatch(r"(?:0?[1-9]|1[0-2]):[0-5][0-9] (?:AM|PM)", time_value):
+            issues.append(
+                _node_issue(
+                    "PLAN_SCHEDULE_TIME_INVALID",
+                    "Schedule time must use 12-hour format such as 09:00 AM.",
+                    node.id,
+                    "params.visual_config.time",
+                )
+            )
+    if frequency == "weekly":
+        weekdays = visual.get("weekdays")
+        valid_days = {"sun", "mon", "tue", "wed", "thu", "fri", "sat"}
+        if not isinstance(weekdays, list) or not weekdays or any(str(item) not in valid_days for item in weekdays):
+            issues.append(
+                _node_issue(
+                    "PLAN_SCHEDULE_WEEKDAYS_INVALID",
+                    "Weekly schedule requires valid weekdays.",
+                    node.id,
+                    "params.visual_config.weekdays",
+                )
+            )
+    if frequency == "monthly":
+        days = visual.get("monthly_days")
+        valid = isinstance(days, list) and bool(days)
+        for item in days if isinstance(days, list) else []:
+            if item == "last":
+                continue
+            try:
+                valid = valid and 1 <= int(item) <= 31
+            except (TypeError, ValueError):
+                valid = False
+        if not valid:
+            issues.append(
+                _node_issue(
+                    "PLAN_SCHEDULE_MONTHLY_DAYS_INVALID",
+                    "Monthly schedule requires days from 1 to 31 or last.",
+                    node.id,
+                    "params.visual_config.monthly_days",
+                )
+            )
     return issues
 
 
@@ -1324,7 +1610,7 @@ def _validate_plan_variable_references(plan: WorkflowPlan) -> list[ValidationIss
 
 
 def _known_outputs(plan: WorkflowPlan) -> dict[str, set[str]]:
-    outputs: dict[str, set[str]] = {}
+    outputs: dict[str, set[str]] = {"sys": set(SYSTEM_OUTPUTS)}
     for node in plan.nodes:
         match node.type:
             case "start":
@@ -1382,7 +1668,11 @@ def _known_outputs(plan: WorkflowPlan) -> dict[str, set[str]]:
                 outputs[node.id] = {"datasource_type", "file", *_schema_output_names(node.params)}
             case "knowledge-index":
                 outputs[node.id] = {"result", "document_ids", *_schema_output_names(node.params)}
-            case "trigger-webhook" | "trigger-plugin" | "trigger-schedule":
+            case "trigger-webhook":
+                outputs[node.id] = _webhook_outputs(node.params)
+            case "trigger-schedule":
+                outputs[node.id] = {"sys.timestamp"}
+            case "trigger-plugin":
                 outputs[node.id] = _external_trigger_outputs(node.params)
             case "iteration-start" | "loop-start" | "loop-end":
                 outputs[node.id] = set()
@@ -1449,7 +1739,11 @@ def _outputs_for_node(node_type: str, params: dict[str, Any]) -> set[str]:
             return {"datasource_type", "file", *_schema_output_names(params)}
         case "knowledge-index":
             return {"result", "document_ids", *_schema_output_names(params)}
-        case "trigger-webhook" | "trigger-plugin" | "trigger-schedule":
+        case "trigger-webhook":
+            return _webhook_outputs(params)
+        case "trigger-schedule":
+            return {"sys.timestamp"}
+        case "trigger-plugin":
             return _external_trigger_outputs(params)
     return set()
 
@@ -1470,6 +1764,21 @@ def _external_trigger_outputs(params: dict[str, Any]) -> set[str]:
             name = item.get("name") or item.get("variable")
             if name:
                 outputs.add(str(name))
+    return outputs
+
+
+def _webhook_outputs(params: dict[str, Any]) -> set[str]:
+    raw_data = params.get("_raw_data") if isinstance(params.get("_raw_data"), dict) else params
+    outputs = {"_webhook_raw"}
+    for group in ("headers", "params", "body"):
+        for item in raw_data.get(group) if isinstance(raw_data.get(group), list) else []:
+            if not isinstance(item, dict) or not item.get("name"):
+                continue
+            name = str(item["name"]).replace("-", "_") if group == "headers" else str(item["name"])
+            outputs.add(name)
+    for item in raw_data.get("variables") if isinstance(raw_data.get("variables"), list) else []:
+        if isinstance(item, dict) and (item.get("variable") or item.get("name")):
+            outputs.add(str(item.get("variable") or item.get("name")))
     return outputs
 
 

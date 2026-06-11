@@ -26,7 +26,15 @@ from app.dify.graph import (
 )
 from app.dify.knowledge_retrieval import apply_dataset_retrieval_settings, knowledge_dataset_ids
 from app.dify.version import read_dify_version_info
-from app.models import WorkflowModifyRequest, WorkflowPlan, WorkflowRequest, WorkflowRunDraftRequest
+from app.models import (
+    WorkflowModifyRequest,
+    WorkflowPlan,
+    WorkflowPublishRequest,
+    WorkflowPublishTaskRequest,
+    WorkflowRequest,
+    WorkflowRunDraftRequest,
+    WorkflowTriggerStatusRequest,
+)
 from app.tasks import TaskContext, TaskManager, TaskNotFound, TaskRepository
 from app.validator import has_errors, validate_dsl, validate_plan
 
@@ -219,6 +227,17 @@ def _create_workflow(request: WorkflowRequest, *, task_context: TaskContext | No
     try:
         with DifyClient(settings) as client:
             result = client.import_yaml(draft["dsl"], name=request.app_name or draft["plan"]["name"])
+            imported_draft = None
+            if result.app_id:
+                try:
+                    imported_draft = client.get_draft_workflow(result.app_id)
+                except (AttributeError, DifyClientError):
+                    imported_draft = None
+            webhooks = (
+                _webhook_details(client, result.app_id, WorkflowPlan.model_validate(draft["plan"]))
+                if result.app_id
+                else []
+            )
     except DifyClientError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -227,6 +246,8 @@ def _create_workflow(request: WorkflowRequest, *, task_context: TaskContext | No
         "app_id": result.app_id,
         "app_mode": result.app_mode,
         "workflow_url": result.workflow_url,
+        "base_hash": imported_draft.hash if imported_draft else None,
+        "webhooks": webhooks,
         "import": asdict(result),
         "raw_plan": draft["raw_plan"],
         "plan": draft["plan"],
@@ -234,6 +255,144 @@ def _create_workflow(request: WorkflowRequest, *, task_context: TaskContext | No
         "planner": draft["planner"],
         "validation": draft["validation"],
         "dsl": draft["dsl"],
+    }
+
+
+@app.post("/api/workflows/{app_id}/publish")
+def publish_workflow(app_id: str, request: WorkflowPublishRequest) -> dict:
+    return _publish_workflow(app_id, request)
+
+
+def _publish_workflow(
+    app_id: str,
+    request: WorkflowPublishRequest,
+    *,
+    task_context: TaskContext | None = None,
+) -> dict:
+    settings = load_settings()
+    version_info = read_dify_version_info(settings.dify_source_path)
+    if task_context is not None:
+        task_context.update("loading-draft", 15, "Loading and validating the current Dify draft.")
+    try:
+        with DifyClient(settings) as client:
+            draft = client.get_draft_workflow(app_id)
+            if request.expected_hash and request.expected_hash != draft.hash:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "DRAFT_HASH_MISMATCH",
+                        "message": "Expected hash does not match the current Dify draft hash.",
+                        "expected_hash": request.expected_hash,
+                        "current_hash": draft.hash,
+                    },
+                )
+            app_detail = _load_app_detail(client, app_id)
+            plan = decompile_dify_graph(draft.graph, name=_draft_plan_name(app_detail, app_id))
+            compiler = DifyDslCompiler(
+                dsl_version=version_info.app_dsl_version,
+                default_model_provider=settings.dify_default_model_provider,
+                default_model_name=settings.dify_default_model_name,
+                default_dataset_ids=settings.dify_default_dataset_ids,
+            )
+            dsl = compiler.compile(plan)
+            issues = [
+                *validate_plan(plan),
+                *validate_dsl(dsl, expected_dsl_version=version_info.app_dsl_version),
+            ]
+            if has_errors(issues):
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "WORKFLOW_PUBLISH_VALIDATION_FAILED",
+                        "message": "Workflow validation failed before publish.",
+                        "validation": {
+                            "ok": False,
+                            "issues": [issue.model_dump() for issue in issues],
+                        },
+                    },
+                )
+            if task_context is not None:
+                task_context.update("publishing", 75, "Publishing the validated workflow in Dify.")
+                task_context.raise_if_cancelled()
+            published = client.publish_workflow(
+                app_id,
+                marked_name=request.marked_name,
+                marked_comment=request.marked_comment,
+            )
+            triggers = client.list_workflow_triggers(app_id)
+            webhooks = _webhook_details(client, app_id, plan)
+            return {
+                "status": "published",
+                "app_id": app_id,
+                "workflow_url": settings.workflow_url(app_id),
+                "base_hash": draft.hash,
+                "publish": asdict(published),
+                "triggers": [asdict(trigger) for trigger in triggers],
+                "webhooks": webhooks,
+                "plan": plan.model_dump(),
+                "validation": {
+                    "ok": True,
+                    "issues": [issue.model_dump() for issue in issues],
+                },
+            }
+    except HTTPException:
+        raise
+    except DifyGraphAdapterError as exc:
+        raise HTTPException(status_code=422, detail={"code": "DIFY_GRAPH_UNSUPPORTED", "message": str(exc)}) from exc
+    except DifyClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/api/workflows/{app_id}/triggers")
+def list_workflow_triggers(app_id: str) -> dict:
+    settings = load_settings()
+    try:
+        with DifyClient(settings) as client:
+            triggers = client.list_workflow_triggers(app_id)
+    except DifyClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "app_id": app_id,
+        "workflow_url": settings.workflow_url(app_id),
+        "triggers": [asdict(trigger) for trigger in triggers],
+    }
+
+
+@app.post("/api/workflows/{app_id}/triggers/{trigger_id}/status")
+def update_workflow_trigger_status(
+    app_id: str,
+    trigger_id: str,
+    request: WorkflowTriggerStatusRequest,
+) -> dict:
+    settings = load_settings()
+    try:
+        with DifyClient(settings) as client:
+            trigger = client.set_workflow_trigger_status(
+                app_id,
+                trigger_id,
+                enabled=request.enabled,
+            )
+    except DifyClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "app_id": app_id,
+        "workflow_url": settings.workflow_url(app_id),
+        "trigger": asdict(trigger),
+    }
+
+
+@app.get("/api/workflows/{app_id}/triggers/webhook")
+def get_workflow_webhook(app_id: str, node_id: str = Query(min_length=1)) -> dict:
+    settings = load_settings()
+    try:
+        with DifyClient(settings) as client:
+            webhook = client.get_webhook_trigger(app_id, node_id)
+    except DifyClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "app_id": app_id,
+        "workflow_url": settings.workflow_url(app_id),
+        **asdict(webhook),
     }
 
 
@@ -254,6 +413,7 @@ def get_workflow_draft(app_id: str) -> dict:
             "base_hash": draft.hash,
             "app": _app_payload(app_detail),
             "plan": plan.model_dump(),
+            "webhooks": _load_webhook_details(settings, app_id, plan),
             "explanation": explain_plan(plan),
             "validation": {
                 "ok": not has_errors(issues),
@@ -302,6 +462,35 @@ def _run_draft_workflow(
         task_context.update("connecting", None, "Connecting to the Dify draft run stream.")
     try:
         with DifyClient(settings) as client:
+            try:
+                draft = client.get_draft_workflow(request.app_id)
+                plan = decompile_dify_graph(draft.graph, name=f"Dify Workflow {request.app_id}")
+                trigger_nodes = [
+                    node
+                    for node in plan.nodes
+                    if node.type in {"trigger-webhook", "trigger-plugin", "trigger-schedule"}
+                ]
+                if trigger_nodes:
+                    raise HTTPException(
+                        status_code=422,
+                        detail={
+                            "code": "TRIGGER_WORKFLOW_DRAFT_RUN_UNSUPPORTED",
+                            "message": (
+                                "This workflow uses a trigger entry. Publish it explicitly, then invoke "
+                                "the Webhook URL or wait for the schedule instead of supplying start inputs."
+                            ),
+                            "triggers": [
+                                {
+                                    "node_id": node.id,
+                                    "type": node.type,
+                                    "title": node.title,
+                                }
+                                for node in trigger_nodes
+                            ],
+                        },
+                    )
+            except AttributeError:
+                pass
             run_kwargs = {
                 "inputs": request.inputs,
                 "files": request.files,
@@ -315,6 +504,13 @@ def _run_draft_workflow(
                     summary,
                 )
             result = client.run_draft_workflow(request.app_id, **run_kwargs)
+    except HTTPException:
+        raise
+    except DifyGraphAdapterError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "DIFY_GRAPH_UNSUPPORTED", "message": str(exc)},
+        ) from exc
     except DifyClientError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return asdict(result)
@@ -376,6 +572,7 @@ def _modify_workflow(
                     default_dataset_ids=effective_settings.dify_default_dataset_ids,
                     tool_selections=_tool_selection_payloads(request.tool_selections),
                     agent_selections=_agent_selection_payloads(request.agent_selections),
+                    trigger_selection=_trigger_selection_payload(request.trigger_selection),
                 )
                 plan = WorkflowPlan.model_validate(normalized.payload)
                 raw_plan = plan.model_dump()
@@ -448,6 +645,7 @@ def _modify_workflow(
             )
             response["new_hash"] = sync.hash
             response["sync"] = asdict(sync)
+            response["webhooks"] = _webhook_details(client, request.app_id, plan)
             return response
     except HTTPException:
         raise
@@ -508,6 +706,17 @@ def run_draft_workflow_task(request: WorkflowRunDraftRequest, http_request: Requ
         "workflow.run.draft",
         request.model_dump(mode="json"),
         lambda context: _run_draft_workflow(request, task_context=context),
+    )
+
+
+@app.post("/api/tasks/workflows/publish", status_code=status.HTTP_202_ACCEPTED)
+def publish_workflow_task(request: WorkflowPublishTaskRequest, http_request: Request) -> dict:
+    publish_request = WorkflowPublishRequest.model_validate(request.model_dump(exclude={"app_id"}))
+    return _submit_task(
+        http_request,
+        "workflow.publish",
+        request.model_dump(mode="json"),
+        lambda context: _publish_workflow(request.app_id, publish_request, task_context=context),
     )
 
 
@@ -661,7 +870,20 @@ def _planner_selection_kwargs(request) -> dict:
         kwargs["tool_selections"] = tool_selections
     if agent_selections:
         kwargs["agent_selections"] = agent_selections
+    trigger_selection = _trigger_selection_payload(getattr(request, "trigger_selection", None))
+    if trigger_selection:
+        kwargs["trigger_selection"] = trigger_selection
     return kwargs
+
+
+def _trigger_selection_payload(trigger_selection) -> dict | None:
+    if trigger_selection is None:
+        return None
+    if hasattr(trigger_selection, "model_dump"):
+        return trigger_selection.model_dump(exclude_none=True)
+    if isinstance(trigger_selection, dict):
+        return {key: value for key, value in trigger_selection.items() if value is not None}
+    return None
 
 
 def _ensure_agent_strategy_selection_for_request(message: str, agent_selections) -> None:
@@ -878,3 +1100,23 @@ def _app_payload(app_detail: DifyAppDetail | None) -> dict | None:
         "mode": app_detail.mode,
         "description": app_detail.description,
     }
+
+
+def _webhook_details(client: DifyClient, app_id: str, plan: WorkflowPlan) -> list[dict]:
+    details: list[dict] = []
+    for node in plan.nodes:
+        if node.type != "trigger-webhook":
+            continue
+        try:
+            details.append(asdict(client.get_webhook_trigger(app_id, node.id)))
+        except (AttributeError, DifyClientError):
+            continue
+    return details
+
+
+def _load_webhook_details(settings: Settings, app_id: str, plan: WorkflowPlan) -> list[dict]:
+    try:
+        with DifyClient(settings) as client:
+            return _webhook_details(client, app_id, plan)
+    except (AttributeError, DifyClientError):
+        return []

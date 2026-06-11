@@ -80,10 +80,23 @@ class WorkflowPlan(BaseModel):
             if edge.target not in node_id_set:
                 raise ValueError(f"edge references unknown target node: {edge.target}")
 
-        starts = [node for node in self.nodes if node.type in ENTRY_NODE_TYPES]
+        starts = [node for node in self.nodes if node.type == "start"]
+        triggers = [
+            node
+            for node in self.nodes
+            if node.type in {"trigger-webhook", "trigger-plugin", "trigger-schedule"}
+        ]
+        datasource_entries = [node for node in self.nodes if node.type == "datasource"]
+        entries = [*starts, *triggers, *datasource_entries]
         ends = [node for node in self.nodes if node.type == "end"]
-        if len(starts) != 1:
-            raise ValueError("workflow must contain exactly one entry node")
+        if not entries:
+            raise ValueError("workflow must contain at least one entry node")
+        if len(starts) > 1:
+            raise ValueError("workflow must contain at most one start node")
+        if starts and (triggers or datasource_entries):
+            raise ValueError("start node cannot coexist with trigger or datasource entry nodes")
+        if datasource_entries and (triggers or len(datasource_entries) > 1):
+            raise ValueError("datasource entry cannot coexist with trigger nodes")
         if not ends:
             raise ValueError("workflow must contain at least one end node")
 
@@ -92,7 +105,9 @@ class WorkflowPlan(BaseModel):
         if isolated:
             raise ValueError(f"workflow contains isolated nodes: {', '.join(isolated)}")
 
-        reachable = _reachable_from(starts[0].id, self.edges)
+        reachable: set[str] = set()
+        for entry in entries:
+            reachable.update(_reachable_from(entry.id, self.edges))
         unreachable = [node.id for node in self.nodes if node.id not in reachable]
         if unreachable:
             raise ValueError(f"nodes are not reachable from entry node: {', '.join(unreachable)}")
@@ -152,6 +167,52 @@ class WorkflowPlannerSelection(BaseModel):
     model: str = Field(min_length=1)
 
 
+class WorkflowTriggerParameter(BaseModel):
+    name: str = Field(min_length=1)
+    type: Literal[
+        "string",
+        "number",
+        "boolean",
+        "object",
+        "array[string]",
+        "array[number]",
+        "array[boolean]",
+        "array[object]",
+        "file",
+    ] = "string"
+    required: bool = False
+
+
+class WorkflowTriggerSelection(BaseModel):
+    type: Literal["user-input", "webhook", "schedule"] = "user-input"
+    method: Literal["GET", "POST", "HEAD", "PATCH", "PUT", "DELETE"] = "POST"
+    content_type: Literal[
+        "application/json",
+        "multipart/form-data",
+        "application/x-www-form-urlencoded",
+        "text/plain",
+        "application/octet-stream",
+    ] = "application/json"
+    headers: list[WorkflowTriggerParameter] = Field(default_factory=list)
+    params: list[WorkflowTriggerParameter] = Field(default_factory=list)
+    body: list[WorkflowTriggerParameter] = Field(default_factory=list)
+    status_code: int = Field(default=200, ge=100, le=599)
+    response_body: str = ""
+    timeout: int = Field(default=30, ge=1, le=300)
+    mode: Literal["visual", "cron"] = "visual"
+    frequency: Literal["hourly", "daily", "weekly", "monthly"] | None = "daily"
+    cron_expression: str | None = None
+    visual_config: dict[str, Any] | None = Field(
+        default_factory=lambda: {
+            "time": "09:00 AM",
+            "weekdays": ["mon"],
+            "on_minute": 0,
+            "monthly_days": [1],
+        }
+    )
+    timezone: str = "Asia/Shanghai"
+
+
 class WorkflowRequest(BaseModel):
     message: str = Field(min_length=1)
     app_name: str | None = None
@@ -159,6 +220,7 @@ class WorkflowRequest(BaseModel):
     dataset_ids: list[str] | None = None
     tool_selections: list[WorkflowToolSelection] | None = None
     agent_selections: list[WorkflowAgentSelection] | None = None
+    trigger_selection: WorkflowTriggerSelection | None = None
     planner: WorkflowPlannerSelection | None = None
 
 
@@ -171,6 +233,7 @@ class WorkflowModifyRequest(BaseModel):
     dataset_ids: list[str] | None = None
     tool_selections: list[WorkflowToolSelection] | None = None
     agent_selections: list[WorkflowAgentSelection] | None = None
+    trigger_selection: WorkflowTriggerSelection | None = None
     planner: WorkflowPlannerSelection | None = None
 
 
@@ -179,6 +242,20 @@ class WorkflowRunDraftRequest(BaseModel):
     inputs: dict[str, Any]
     files: list[dict[str, Any]] | None = None
     timeout_seconds: float = Field(default=120, gt=0)
+
+
+class WorkflowPublishRequest(BaseModel):
+    expected_hash: str | None = None
+    marked_name: str | None = Field(default=None, max_length=20)
+    marked_comment: str | None = Field(default=None, max_length=100)
+
+
+class WorkflowPublishTaskRequest(WorkflowPublishRequest):
+    app_id: str = Field(min_length=1)
+
+
+class WorkflowTriggerStatusRequest(BaseModel):
+    enabled: bool
 
 
 class ValidationIssue(BaseModel):
