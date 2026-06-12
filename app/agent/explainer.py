@@ -7,6 +7,7 @@ def explain_plan(plan: WorkflowPlan) -> dict[str, list[str] | str]:
     node_types = {node.id: node.type for node in plan.nodes}
     starts = [node for node in plan.nodes if node.type == "start"]
     ends = [node for node in plan.nodes if node.type == "end"]
+    answers = [node for node in plan.nodes if node.type == "answer"]
     llms = [node for node in plan.nodes if node.type == "llm"]
     branches = [node for node in plan.nodes if node.type in {"if-else", "question-classifier"}]
 
@@ -14,7 +15,8 @@ def explain_plan(plan: WorkflowPlan) -> dict[str, list[str] | str]:
     for node in starts:
         variables = node.params.get("variables", [])
         names = [item.get("name") or item.get("variable") for item in variables if isinstance(item, dict)]
-        inputs.append(f"{node.id} 接收输入变量：{', '.join(str(name) for name in names if name) or 'query'}")
+        default_input = "sys.query" if plan.app_mode == "advanced-chat" else "query"
+        inputs.append(f"{node.id} 接收输入变量：{', '.join(str(name) for name in names if name) or default_input}")
 
     branch_lines = []
     for node in branches:
@@ -67,13 +69,17 @@ def explain_plan(plan: WorkflowPlan) -> dict[str, list[str] | str]:
             steps.append(f"{node.id} 执行 {node.type} 节点")
 
     outputs = [f"{node.id} 返回最终输出" for node in ends]
+    outputs.extend(f"{node.id} 发送对话回复" for node in answers)
     edge_summary = [
         f"{edge.source}({node_types.get(edge.source, '?')}) -> {edge.target}({node_types.get(edge.target, '?')})"
         for edge in plan.edges
     ]
 
     return {
-        "summary": f"生成了 {len(plan.nodes)} 个节点、{len(plan.edges)} 条连线的 workflow。",
+        "summary": (
+            f"生成了 {len(plan.nodes)} 个节点、{len(plan.edges)} 条连线的 "
+            f"{'chatflow' if plan.app_mode == 'advanced-chat' else 'workflow'}。"
+        ),
         "inputs": inputs,
         "branches": branch_lines,
         "steps": steps,

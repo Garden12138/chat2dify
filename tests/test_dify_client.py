@@ -824,6 +824,64 @@ def test_run_draft_workflow_dify_error_is_wrapped() -> None:
     assert "boom" in str(exc.value)
 
 
+def test_run_draft_chatflow_accumulates_answer_and_conversation_ids() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/console/api/login":
+            return httpx.Response(
+                200,
+                json={"result": "success"},
+                headers=[("set-cookie", "csrf_token=csrf123; Path=/")],
+            )
+        if request.url.path == "/console/api/apps/app-1/advanced-chat/workflows/draft/run":
+            seen["body"] = json.loads(request.content)
+            seen["csrf"] = request.headers.get(CSRF_HEADER_NAME, "")
+            return httpx.Response(
+                200,
+                content=(
+                    'data: {"event":"message","answer":"您好，","conversation_id":"conv-1",'
+                    '"message_id":"msg-1","task_id":"task-1","workflow_run_id":"run-1"}\n\n'
+                    'data: {"event":"message","answer":"请提供订单号。","conversation_id":"conv-1",'
+                    '"message_id":"msg-1","task_id":"task-1","workflow_run_id":"run-1"}\n\n'
+                    'data: {"event":"message_end","id":"msg-1","conversation_id":"conv-1",'
+                    '"task_id":"task-1","metadata":{"usage":{"total_tokens":42,"latency":1.5}}}\n\n'
+                    'data: {"event":"workflow_finished","conversation_id":"conv-1",'
+                    '"workflow_run_id":"run-1","task_id":"task-1","data":{"status":"succeeded","total_steps":3}}\n\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+    result = client.run_draft_chatflow(
+        "app-1",
+        query="车辆刚保养完发动机抖动",
+        inputs={"store": "城西门店"},
+        files=[],
+        conversation_id="conv-old",
+        parent_message_id="msg-old",
+    )
+
+    assert result.ok is True
+    assert result.status == "succeeded"
+    assert result.answer == "您好，请提供订单号。"
+    assert result.conversation_id == "conv-1"
+    assert result.message_id == "msg-1"
+    assert result.workflow_run_id == "run-1"
+    assert result.task_id == "task-1"
+    assert result.total_tokens == 42
+    assert result.total_steps == 3
+    assert seen["body"] == {
+        "inputs": {"store": "城西门店"},
+        "query": "车辆刚保养完发动机抖动",
+        "files": [],
+        "conversation_id": "conv-old",
+        "parent_message_id": "msg-old",
+    }
+    assert seen["csrf"] == "csrf123"
+
+
 def test_connection_error_is_wrapped() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("connection refused", request=request)

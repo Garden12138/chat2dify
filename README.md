@@ -1,6 +1,6 @@
 # chat2dify
 
-Generate Dify Workflows via Natural Language Conversation.
+Generate Dify Workflows and Chatflows via Natural Language Conversation.
 
 ## Phase 1 MVP
 
@@ -36,6 +36,11 @@ user request -> raw LLM plan -> normalized WorkflowPlan IR -> Dify DSL YAML -> v
 
 The create API returns the imported Dify `app_id` and a console workflow URL in
 the form `/app/{app_id}/workflow`.
+
+Chatflow creation uses the same draft/create APIs with
+`"app_mode":"advanced-chat"`. The generated graph uses
+`start -> ... -> answer`, reads the current user message from
+`{{#sys.query#}}`, and enables a 10-message LLM memory window.
 
 Draft/create responses include `raw_plan`, normalized `plan`, rule-based
 `explanation`, `planner` metadata, `dsl`, and structured validation issues.
@@ -133,10 +138,11 @@ NVIDIA_MAX_TOKENS=8192
 ```
 
 If the default planner provider has no API key, the create draft endpoint uses
-a deterministic fallback plan (`start -> llm -> end`). Modify Preview requires
-a configured planner provider. When an LLM provider is configured, the planner
-tries up to three attempts and feeds structured validation errors back into the
-model for self-repair.
+a deterministic fallback plan: `start -> llm -> end` for Workflow or
+`start -> llm -> answer` for Chatflow. Modify Preview requires a configured
+planner provider. When an LLM provider is configured, the planner tries up to
+three attempts and feeds structured validation errors back into the model for
+self-repair.
 
 Knowledge retrieval workflows require real Dify dataset IDs. Configure a
 comma-separated default in `.env`, or use the Web UI Knowledge panel to search
@@ -338,6 +344,50 @@ The corresponding background endpoints for the other Web UI operations are
 `/api/tasks/workflows/run/draft`. Explicit workflow publishing uses
 `/api/tasks/workflows/publish`.
 
+Create a Chatflow:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/workflows/create \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "app_mode":"advanced-chat",
+    "app_name":"汽车售后多轮客服",
+    "message":"创建汽车售后多轮客服。识别客户问题，礼貌追问缺失信息，记住最近对话，并通过 Answer 回复。"
+  }'
+```
+
+Run the first Chatflow draft turn:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/chatflows/run/draft \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "app_id":"YOUR_CHATFLOW_APP_ID",
+    "query":"我的车刚保养完发动机抖动",
+    "inputs":{},
+    "timeout_seconds":120
+  }'
+```
+
+For the next turn, pass the `conversation_id` and `message_id` returned by the
+previous response:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/chatflows/run/draft \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "app_id":"YOUR_CHATFLOW_APP_ID",
+    "query":"我刚才说的故障是什么？",
+    "inputs":{},
+    "conversation_id":"PREVIOUS_CONVERSATION_ID",
+    "parent_message_id":"PREVIOUS_MESSAGE_ID",
+    "timeout_seconds":120
+  }'
+```
+
+The background equivalent is `POST /api/tasks/chatflows/run/draft`. Chatflow
+Modify and Publish are intentionally not supported in this stage.
+
 Create a POST Webhook workflow by selecting Webhook in the Web UI Trigger
 panel, or by passing a structured selection:
 
@@ -493,8 +543,12 @@ question-classifier, parameter-extractor, variable-aggregator,
 document-extractor, assigner, list-operator, knowledge-retrieval,
 human-input, iteration, iteration-start, loop, loop-start, loop-end,
 tool, agent, datasource, datasource-empty, knowledge-index,
-trigger-webhook, trigger-plugin, trigger-schedule
+trigger-webhook, trigger-plugin, trigger-schedule, answer
 ```
+
+`answer` is only valid in `advanced-chat` mode. Workflow mode continues to use
+`end`; Chatflow requires at least one `answer`, rejects `end` and workflow
+triggers, and reads the current message from `sys.query`.
 
 `question-classifier` is used for semantic routing such as complaint /
 consultation / appointment branches. `parameter-extractor` is used to extract
@@ -581,9 +635,9 @@ Example selected agent workflow request:
 创建智能体售后分析工作流。使用我在 Web UI 勾选的 Agent Strategy 对客户问题进行多步分析，必要时调用已绑定工具，最后生成处理建议并返回 answer。
 ```
 
-Answer/chatflow nodes, plugin installation, credential editing, automatic
-creation of plugin trigger/data-source nodes, Agent Roster management, and
-model capability registry sync remain out of scope for now.
+Chatflow modification and publishing, plugin installation, credential editing,
+automatic creation of data-source nodes, Agent Roster management, and model
+capability registry sync remain out of scope for now.
 
 ## Test
 

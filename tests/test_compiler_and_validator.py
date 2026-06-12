@@ -54,6 +54,171 @@ def test_validator_accepts_compiled_fallback_plan() -> None:
     assert validate_dsl(dsl, expected_dsl_version="9.9.9") == []
 
 
+def test_compiler_outputs_advanced_chat_dsl_with_memory() -> None:
+    plan = fallback_plan(
+        "创建一个汽车售后多轮客服",
+        app_name="汽车售后多轮客服",
+        app_mode="advanced-chat",
+    )
+
+    data = yaml.safe_load(_compiler().compile(plan))
+    nodes = data["workflow"]["graph"]["nodes"]
+    start = next(node for node in nodes if node["id"] == "start")
+    llm = next(node for node in nodes if node["id"] == "llm")
+    answer = next(node for node in nodes if node["id"] == "answer")
+
+    assert data["app"]["mode"] == "advanced-chat"
+    assert {node["data"]["type"] for node in nodes} == {"start", "llm", "answer"}
+    assert start["data"]["variables"] == []
+    assert [item["role"] for item in llm["data"]["prompt_template"]] == ["system"]
+    assert "{{#sys.query#}}" in llm["data"]["memory"]["query_prompt_template"]
+    assert llm["data"]["memory"]["window"] == {"enabled": True, "size": 10}
+    assert answer["data"]["answer"] == "{{#llm.text#}}"
+    assert validate_dsl(yaml.safe_dump(data), expected_dsl_version="9.9.9") == []
+
+
+def test_chatflow_normalizer_repairs_start_query_and_end_node() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "name": "汽车售后多轮客服",
+            "nodes": [
+                {
+                    "id": "start",
+                    "type": "start",
+                    "title": "接收客户消息",
+                    "params": {"variables": [{"name": "query"}]},
+                },
+                {
+                    "id": "llm",
+                    "type": "llm",
+                    "title": "生成售后回复",
+                    "params": {
+                        "system_prompt": "你是汽车售后客服。",
+                        "user_prompt": "客户本轮消息：{{#start.query#}}",
+                    },
+                },
+                {
+                    "id": "end",
+                    "type": "end",
+                    "title": "返回回复",
+                    "params": {
+                        "outputs": [
+                            {"variable": "answer", "value_selector": ["llm", "text"]}
+                        ]
+                    },
+                },
+            ],
+            "edges": [
+                {"source": "start", "target": "llm"},
+                {"source": "llm", "target": "end"},
+            ],
+        },
+        app_mode="advanced-chat",
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    llm = next(node for node in plan.nodes if node.id == "llm")
+    answer = next(node for node in plan.nodes if node.type == "answer")
+    start = next(node for node in plan.nodes if node.type == "start")
+
+    assert plan.app_mode == "advanced-chat"
+    assert start.params["variables"] == []
+    assert llm.params["user_prompt"] == "客户本轮消息：{{#sys.query#}}"
+    assert llm.params["memory"] == {
+        "query_prompt_template": "客户本轮消息：{{#sys.query#}}",
+        "window": {"enabled": True, "size": 10},
+    }
+    assert answer.params["answer"] == "{{#llm.text#}}"
+    assert not [node for node in plan.nodes if node.type == "end"]
+    assert normalized.changed
+
+
+def test_chatflow_normalizer_repairs_start_scoped_system_query() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "name": "汽车售后多轮客服",
+            "app_mode": "advanced-chat",
+            "nodes": [
+                {
+                    "id": "start_1",
+                    "type": "start",
+                    "title": "接收客户消息",
+                    "params": {"variables": []},
+                },
+                {
+                    "id": "llm_1",
+                    "type": "llm",
+                    "title": "生成售后回复",
+                    "params": {
+                        "system_prompt": "你是汽车售后客服。",
+                        "user_prompt": "当前用户消息：{{#start_1.sys.query#}}",
+                        "memory": {
+                            "query_prompt_template": "当前用户消息：{{#start_1.sys.query#}}",
+                            "window": {"enabled": True, "size": 10},
+                        },
+                    },
+                },
+                {
+                    "id": "answer_1",
+                    "type": "answer",
+                    "title": "回复客户",
+                    "params": {"answer": "{{#llm_1.text#}}"},
+                },
+            ],
+            "edges": [
+                {"source": "start_1", "target": "llm_1"},
+                {"source": "llm_1", "target": "answer_1"},
+            ],
+        },
+        app_mode="advanced-chat",
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    llm = next(node for node in plan.nodes if node.id == "llm_1")
+
+    assert llm.params["user_prompt"] == "当前用户消息：{{#sys.query#}}"
+    assert llm.params["memory"]["query_prompt_template"] == "当前用户消息：{{#sys.query#}}"
+    assert any("chatflow input reference" in item for item in normalized.changes)
+
+
+def test_chatflow_validator_rejects_start_scoped_system_query() -> None:
+    plan = WorkflowPlan.model_validate(
+        {
+            "name": "汽车售后多轮客服",
+            "app_mode": "advanced-chat",
+            "nodes": [
+                {
+                    "id": "start_1",
+                    "type": "start",
+                    "title": "接收客户消息",
+                    "params": {"variables": []},
+                },
+                {
+                    "id": "llm_1",
+                    "type": "llm",
+                    "title": "生成售后回复",
+                    "params": {
+                        "system_prompt": "你是汽车售后客服。",
+                        "user_prompt": "当前用户消息：{{#start_1.sys.query#}}",
+                    },
+                },
+                {
+                    "id": "answer_1",
+                    "type": "answer",
+                    "title": "回复客户",
+                    "params": {"answer": "{{#llm_1.text#}}"},
+                },
+            ],
+            "edges": [
+                {"source": "start_1", "target": "llm_1"},
+                {"source": "llm_1", "target": "answer_1"},
+            ],
+        }
+    )
+
+    issues = validate_plan(plan)
+
+    assert "PLAN_CHATFLOW_SYSTEM_REFERENCE_INVALID" in {issue.code for issue in issues}
+
+
 def test_plan_rejects_isolated_node() -> None:
     payload = {
         "name": "bad",

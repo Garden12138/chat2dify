@@ -58,10 +58,21 @@ class DifyDslCompiler:
         output_types = _plan_output_types(plan)
         nodes: list[dict[str, Any]] = []
         for index, node in enumerate(plan.nodes):
-            graph_node = self._compile_node(node, index, output_types=output_types)
+            graph_node = self._compile_node(
+                node,
+                index,
+                output_types=output_types,
+                app_mode=plan.app_mode,
+            )
             nodes.append(graph_node)
             if node.type in {"iteration", "loop"}:
-                nodes.extend(self._compile_container_child_nodes(node, output_types=output_types))
+                nodes.extend(
+                    self._compile_container_child_nodes(
+                        node,
+                        output_types=output_types,
+                        app_mode=plan.app_mode,
+                    )
+                )
         type_by_id = {node["id"]: node["data"]["type"] for node in nodes}
         edges = [self._compile_edge(edge.model_dump(), type_by_id) for edge in plan.edges]
         for node in plan.nodes:
@@ -73,7 +84,7 @@ class DifyDslCompiler:
             "kind": "app",
             "app": {
                 "name": plan.name,
-                "mode": "workflow",
+                "mode": plan.app_mode,
                 "icon": "🤖",
                 "icon_type": "emoji",
                 "icon_background": "#FFEAD5",
@@ -100,6 +111,7 @@ class DifyDslCompiler:
         index: int,
         *,
         output_types: dict[tuple[str, str], str],
+        app_mode: str,
     ) -> dict[str, Any]:
         position = {"x": START_X + index * NODE_WIDTH_X_OFFSET, "y": START_Y}
         data = {
@@ -110,15 +122,23 @@ class DifyDslCompiler:
         }
         match node.type:
             case "start":
-                data.update(self._start_data(node))
+                data.update(self._start_data(node, app_mode=app_mode))
             case "llm":
-                data.update(self._llm_data(node, output_types=output_types))
+                data.update(
+                    self._llm_data(
+                        node,
+                        output_types=output_types,
+                        app_mode=app_mode,
+                    )
+                )
             case "code":
                 data.update(self._code_data(node))
             case "if-else":
                 data.update(self._if_else_data(node))
             case "end":
                 data.update(self._end_data(node))
+            case "answer":
+                data.update(self._answer_data(node))
             case "http-request":
                 data.update(self._http_request_data(node))
             case "template-transform":
@@ -214,6 +234,7 @@ class DifyDslCompiler:
         node: PlanNode,
         *,
         output_types: dict[tuple[str, str], str],
+        app_mode: str,
     ) -> list[dict[str, Any]]:
         children = node.params.get("children") if isinstance(node.params.get("children"), list) else []
         graph_nodes: list[dict[str, Any]] = []
@@ -221,7 +242,12 @@ class DifyDslCompiler:
             if not isinstance(child, dict):
                 continue
             child_node = PlanNode.model_validate(child)
-            graph_node = self._compile_node(child_node, index, output_types=output_types)
+            graph_node = self._compile_node(
+                child_node,
+                index,
+                output_types=output_types,
+                app_mode=app_mode,
+            )
             position = _child_position(child, index)
             graph_node["position"] = position
             graph_node["positionAbsolute"] = position.copy()
@@ -250,7 +276,7 @@ class DifyDslCompiler:
             and str(edge.get("target")) in type_by_id
         ]
 
-    def _start_data(self, node: PlanNode) -> dict[str, Any]:
+    def _start_data(self, node: PlanNode, *, app_mode: str) -> dict[str, Any]:
         variables = []
         for item in node.params.get("variables", []):
             name = item.get("name") or item.get("variable")
@@ -272,7 +298,7 @@ class DifyDslCompiler:
             variables.append(
                 variable
             )
-        if not variables:
+        if not variables and app_mode != "advanced-chat":
             variables.append(
                 {
                     "variable": "query",
@@ -290,11 +316,13 @@ class DifyDslCompiler:
         node: PlanNode,
         *,
         output_types: dict[tuple[str, str], str],
+        app_mode: str,
     ) -> dict[str, Any]:
         provider = node.params.get("model_provider") or self.default_model_provider
         name = node.params.get("model_name") or self.default_model_name
         system_prompt = node.params.get("system_prompt", "")
-        user_prompt = node.params.get("user_prompt") or "{{#start.query#}}"
+        default_user_prompt = "{{#sys.query#}}" if app_mode == "advanced-chat" else "{{#start.query#}}"
+        user_prompt = node.params.get("user_prompt") or default_user_prompt
         prompt_variables: dict[tuple[str, str], str] = {}
         prompt_template = [
             _compile_prompt_item(
@@ -302,14 +330,17 @@ class DifyDslCompiler:
                 system_prompt,
                 output_types=output_types,
                 prompt_variables=prompt_variables,
-            ),
-            _compile_prompt_item(
-                "user",
-                user_prompt,
-                output_types=output_types,
-                prompt_variables=prompt_variables,
-            ),
+            )
         ]
+        if app_mode != "advanced-chat":
+            prompt_template.append(
+                _compile_prompt_item(
+                    "user",
+                    user_prompt,
+                    output_types=output_types,
+                    prompt_variables=prompt_variables,
+                )
+            )
         data = {
             "model": {
                 "provider": provider,
@@ -321,7 +352,14 @@ class DifyDslCompiler:
             "variables": [],
             "context": {"enabled": False, "variable_selector": []},
             "vision": {"enabled": False, "configs": {"variable_selector": []}},
-            "memory": {"enabled": False, "window": {"enabled": False, "size": 50}},
+            "memory": (
+                {
+                    "query_prompt_template": user_prompt,
+                    "window": {"enabled": True, "size": 10},
+                }
+                if app_mode == "advanced-chat"
+                else {"enabled": False, "window": {"enabled": False, "size": 50}}
+            ),
             "structured_output": {"enabled": False},
             "retry_config": {
                 "enabled": False,
@@ -388,6 +426,9 @@ class DifyDslCompiler:
             {"variable": "answer", "value_selector": ["llm", "text"], "value_type": "string"}
         ]
         return {"outputs": [_normalize_output(output) for output in outputs]}
+
+    def _answer_data(self, node: PlanNode) -> dict[str, Any]:
+        return {"answer": normalize_template_refs(str(node.params.get("answer") or "{{#llm.text#}}")), "variables": []}
 
     def _http_request_data(self, node: PlanNode) -> dict[str, Any]:
         return {
@@ -1093,6 +1134,8 @@ def _unique_prompt_alias(reference: tuple[str, str], existing: set[str]) -> str:
 def _plan_output_types(plan: WorkflowPlan) -> dict[tuple[str, str], str]:
     output_types: dict[tuple[str, str], str] = {
         ("sys", "timestamp"): "number",
+        ("sys", "query"): "string",
+        ("sys", "files"): "array[file]",
     }
 
     def register(node: PlanNode) -> None:
@@ -1383,6 +1426,8 @@ def _node_height(node_type: str, data: dict[str, Any]) -> int:
         return 54
     if node_type == "end":
         return 90 + max(0, len(data.get("outputs", [])) - 1) * 26
+    if node_type == "answer":
+        return 105
     return 90
 
 

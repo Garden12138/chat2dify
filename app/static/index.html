@@ -4,13 +4,13 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>chat2dify</title>
-    <link rel="stylesheet" href="/static/styles.css?v=workbench-20260611-plugin-triggers">
+    <link rel="stylesheet" href="/static/styles.css?v=workbench-20260612-chatflows">
   </head>
   <body>
     <header class="app-header">
       <div>
         <h1>chat2dify</h1>
-        <p class="subtitle">Workflow console for the local Dify sidecar</p>
+        <p class="subtitle">Workflow and Chatflow console for the local Dify sidecar</p>
       </div>
       <div class="header-actions">
         <button id="refresh-health" type="button" class="secondary">Refresh</button>
@@ -102,7 +102,7 @@
         </form>
       </section>
 
-      <section class="tool-panel trigger-panel" aria-labelledby="trigger-title">
+      <section id="trigger-panel" class="tool-panel trigger-panel" aria-labelledby="trigger-title">
         <div class="panel-heading">
           <h2 id="trigger-title">Trigger</h2>
           <span id="trigger-status" class="panel-status status-muted">User Input</span>
@@ -262,6 +262,13 @@
         </div>
         <form id="create-form" class="form-stack">
           <label>
+            App type
+            <select id="create-app-mode">
+              <option value="workflow">Workflow</option>
+              <option value="advanced-chat">Chatflow</option>
+            </select>
+          </label>
+          <label>
             App name
             <input id="create-app-name" name="app_name" autocomplete="off" placeholder="Customer Support Flow">
           </label>
@@ -273,7 +280,7 @@
         </form>
       </section>
 
-      <section class="tool-panel" aria-labelledby="modify-title">
+      <section id="modify-panel" class="tool-panel" aria-labelledby="modify-title">
         <div class="panel-heading">
           <h2 id="modify-title">Modify Draft</h2>
           <div class="task-meta">
@@ -313,7 +320,7 @@
         </form>
       </section>
 
-      <section class="tool-panel publish-panel" aria-labelledby="publish-title">
+      <section id="publish-panel" class="tool-panel publish-panel" aria-labelledby="publish-title">
         <div class="panel-heading">
           <h2 id="publish-title">Publish & Triggers</h2>
           <div class="task-meta">
@@ -373,16 +380,37 @@
         </div>
         <form id="run-form" class="form-stack">
           <label>
+            App type
+            <select id="run-app-mode">
+              <option value="workflow">Workflow</option>
+              <option value="advanced-chat">Chatflow</option>
+            </select>
+          </label>
+          <label>
             App ID
             <input id="run-app-id" name="app_id" autocomplete="off" required placeholder="Dify app id">
           </label>
-          <label>
-            Inputs JSON
-            <textarea id="run-inputs" name="inputs" rows="6" spellcheck="false" required>{"query":"我要投诉订单配送太慢"}</textarea>
-          </label>
-          <div class="button-row">
-            <button id="format-inputs" type="button" class="secondary">Format JSON</button>
-            <button id="reset-inputs" type="button" class="secondary">Reset JSON</button>
+          <div id="run-workflow-fields" class="conditional-fields">
+            <label>
+              Inputs JSON
+              <textarea id="run-inputs" name="inputs" rows="6" spellcheck="false" required>{"query":"我要投诉订单配送太慢"}</textarea>
+            </label>
+            <div class="button-row">
+              <button id="format-inputs" type="button" class="secondary">Format JSON</button>
+              <button id="reset-inputs" type="button" class="secondary">Reset JSON</button>
+            </div>
+          </div>
+          <div id="run-chatflow-fields" class="conditional-fields is-hidden">
+            <label>
+              Query
+              <textarea id="run-chatflow-query" rows="5" placeholder="输入本轮消息"></textarea>
+            </label>
+            <label>
+              Conversation ID
+              <input id="run-conversation-id" autocomplete="off" placeholder="首轮留空；后续轮次自动复用">
+            </label>
+            <button id="new-chatflow-conversation" type="button" class="secondary">New conversation</button>
+            <p class="field-help">同一 Conversation ID 会继续多轮对话；新建会话会清空当前上下文。</p>
           </div>
           <label>
             Timeout seconds
@@ -430,6 +458,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js?v=workbench-20260611-plugin-triggers-v2" defer></script>
+    <script src="/static/app.js?v=workbench-20260612-chatflows" defer></script>
   </body>
 </html>

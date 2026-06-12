@@ -53,6 +53,51 @@ def test_decompile_dify_graph_covers_supported_node_types() -> None:
     assert next(node for node in decompiled.nodes if node.id == "extract").params["parameters"][0]["name"] == "issue"
 
 
+def test_decompile_dify_graph_covers_advanced_chat_answer_and_memory() -> None:
+    plan = WorkflowPlan.model_validate(
+        {
+            "name": "汽车售后多轮客服",
+            "app_mode": "advanced-chat",
+            "nodes": [
+                {"id": "start", "type": "start", "title": "接收客户消息", "params": {"variables": []}},
+                {
+                    "id": "llm",
+                    "type": "llm",
+                    "title": "生成售后回复",
+                    "params": {
+                        "system_prompt": "你是汽车售后客服。",
+                        "user_prompt": "本轮消息：{{#sys.query#}}",
+                    },
+                },
+                {
+                    "id": "answer",
+                    "type": "answer",
+                    "title": "回复客户",
+                    "params": {"answer": "{{#llm.text#}}"},
+                },
+            ],
+            "edges": [
+                {"source": "start", "target": "llm"},
+                {"source": "llm", "target": "answer"},
+            ],
+        }
+    )
+    graph = yaml.safe_load(_compiler().compile(plan))["workflow"]["graph"]
+
+    decompiled = decompile_dify_graph(
+        graph,
+        name="Loaded Chatflow",
+        app_mode="advanced-chat",
+    )
+    llm = next(node for node in decompiled.nodes if node.id == "llm")
+    answer = next(node for node in decompiled.nodes if node.id == "answer")
+
+    assert decompiled.app_mode == "advanced-chat"
+    assert llm.params["user_prompt"] == "本轮消息：{{#sys.query#}}"
+    assert llm.params["memory"]["window"] == {"enabled": True, "size": 10}
+    assert answer.params["answer"] == "{{#llm.text#}}"
+
+
 def test_decompile_dify_graph_covers_stable_builtin_nodes() -> None:
     plan = WorkflowPlan.model_validate(
         {

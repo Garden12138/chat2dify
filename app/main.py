@@ -27,6 +27,7 @@ from app.dify.graph import (
 from app.dify.knowledge_retrieval import apply_dataset_retrieval_settings, knowledge_dataset_ids
 from app.dify.version import read_dify_version_info
 from app.models import (
+    ChatflowRunDraftRequest,
     WorkflowModifyRequest,
     WorkflowPlan,
     WorkflowPublishRequest,
@@ -196,9 +197,19 @@ def _draft_workflow(request: WorkflowRequest, *, task_context: TaskContext | Non
     version_info = read_dify_version_info(settings.dify_source_path)
     _ensure_agent_strategy_selection_for_request(request.message, request.agent_selections)
     _ensure_agent_selections_configured(request.agent_selections)
+    if request.app_mode == "advanced-chat" and request.trigger_selection and request.trigger_selection.type != "user-input":
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "CHATFLOW_TRIGGER_NOT_SUPPORTED",
+                "message": "Chatflow uses a conversational start and cannot use workflow triggers.",
+            },
+        )
     try:
         trigger_selection = _hydrate_trigger_selection(settings, request.trigger_selection)
         planner_kwargs = _planner_selection_kwargs(request, trigger_selection=trigger_selection)
+        if request.app_mode == "advanced-chat":
+            planner_kwargs["app_mode"] = request.app_mode
         if task_context is not None:
             planner_kwargs["task_context"] = task_context
         planner_result = WorkflowPlanner(effective_settings).generate(
@@ -260,7 +271,7 @@ def _create_workflow(request: WorkflowRequest, *, task_context: TaskContext | No
                     imported_draft = None
             webhooks = (
                 _webhook_details(client, result.app_id, WorkflowPlan.model_validate(draft["plan"]))
-                if result.app_id
+                if result.app_id and request.app_mode == "workflow"
                 else []
             )
     except DifyClientError as exc:
@@ -312,6 +323,14 @@ def _publish_workflow(
                     },
                 )
             app_detail = _load_app_detail(client, app_id)
+            if app_detail and app_detail.mode == "advanced-chat":
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "CHATFLOW_PUBLISH_NOT_SUPPORTED",
+                        "message": "Publishing Chatflow is not supported in this stage.",
+                    },
+                )
             plan = decompile_dify_graph(draft.graph, name=_draft_plan_name(app_detail, app_id))
             compiler = DifyDslCompiler(
                 dsl_version=version_info.app_dsl_version,
@@ -430,7 +449,11 @@ def get_workflow_draft(app_id: str) -> dict:
             app_detail = _load_app_detail(client, app_id)
             draft = client.get_draft_workflow(app_id)
 
-        plan = decompile_dify_graph(draft.graph, name=_draft_plan_name(app_detail, app_id))
+        plan = decompile_dify_graph(
+            draft.graph,
+            name=_draft_plan_name(app_detail, app_id),
+            app_mode=app_detail.mode if app_detail and app_detail.mode == "advanced-chat" else "workflow",
+        )
         issues = validate_plan(plan)
         return {
             "app_id": app_id,
@@ -488,6 +511,15 @@ def _run_draft_workflow(
     try:
         with DifyClient(settings) as client:
             try:
+                app_detail = _load_app_detail(client, request.app_id)
+                if app_detail and app_detail.mode == "advanced-chat":
+                    raise HTTPException(
+                        status_code=422,
+                        detail={
+                            "code": "CHATFLOW_USE_CHAT_RUN_API",
+                            "message": "Use /api/chatflows/run/draft for advanced-chat apps.",
+                        },
+                    )
                 draft = client.get_draft_workflow(request.app_id)
                 plan = decompile_dify_graph(draft.graph, name=f"Dify Workflow {request.app_id}")
                 trigger_nodes = [
@@ -541,6 +573,54 @@ def _run_draft_workflow(
     return asdict(result)
 
 
+@app.post("/api/chatflows/run/draft")
+def run_draft_chatflow(request: ChatflowRunDraftRequest) -> dict:
+    return _run_draft_chatflow(request)
+
+
+def _run_draft_chatflow(
+    request: ChatflowRunDraftRequest,
+    *,
+    task_context: TaskContext | None = None,
+) -> dict:
+    settings = load_settings()
+    if task_context is not None:
+        task_context.update("connecting", None, "Connecting to the Dify Chatflow draft stream.")
+    try:
+        with DifyClient(settings) as client:
+            app_detail = _load_app_detail(client, request.app_id)
+            if app_detail and app_detail.mode != "advanced-chat":
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "APP_IS_NOT_CHATFLOW",
+                        "message": "The selected app is not an advanced-chat app.",
+                        "app_mode": app_detail.mode,
+                    },
+                )
+            run_kwargs = {
+                "query": request.query,
+                "inputs": request.inputs,
+                "files": request.files,
+                "conversation_id": request.conversation_id,
+                "parent_message_id": request.parent_message_id,
+                "timeout_seconds": request.timeout_seconds,
+            }
+            if task_context is not None:
+                run_kwargs["cancellation_check"] = task_context.raise_if_cancelled
+                run_kwargs["event_callback"] = lambda event, summary: _update_chatflow_run_task(
+                    task_context,
+                    event,
+                    summary,
+                )
+            result = client.run_draft_chatflow(request.app_id, **run_kwargs)
+    except HTTPException:
+        raise
+    except DifyClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return asdict(result)
+
+
 def _modify_workflow(
     request: WorkflowModifyRequest,
     *,
@@ -569,6 +649,14 @@ def _modify_workflow(
     try:
         with DifyClient(settings) as client:
             app_detail = _load_app_detail(client, request.app_id)
+            if app_detail and app_detail.mode == "advanced-chat":
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "CHATFLOW_MODIFY_NOT_SUPPORTED",
+                        "message": "Modifying an existing Chatflow is not supported in this stage.",
+                    },
+                )
             draft = client.get_draft_workflow(request.app_id)
             if request.expected_hash and request.expected_hash != draft.hash:
                 raise HTTPException(
@@ -741,6 +829,16 @@ def run_draft_workflow_task(request: WorkflowRunDraftRequest, http_request: Requ
     )
 
 
+@app.post("/api/tasks/chatflows/run/draft", status_code=status.HTTP_202_ACCEPTED)
+def run_draft_chatflow_task(request: ChatflowRunDraftRequest, http_request: Request) -> dict:
+    return _submit_task(
+        http_request,
+        "chatflow.run.draft",
+        request.model_dump(mode="json"),
+        lambda context: _run_draft_chatflow(request, task_context=context),
+    )
+
+
 @app.post("/api/tasks/workflows/publish", status_code=status.HTTP_202_ACCEPTED)
 def publish_workflow_task(request: WorkflowPublishTaskRequest, http_request: Request) -> dict:
     publish_request = WorkflowPublishRequest.model_validate(request.model_dump(exclude={"app_id"}))
@@ -790,6 +888,20 @@ def _update_run_task(task_context: TaskContext, event: dict, summary: dict) -> N
         "running-workflow",
         None,
         f"Dify event {event_type}; {node_finished} nodes finished, {total_events} events received.",
+    )
+
+
+def _update_chatflow_run_task(task_context: TaskContext, event: dict, summary: dict) -> None:
+    event_type = str(event.get("event") or "event")
+    node_finished = int(summary.get("node_finished") or 0)
+    message_chunks = int((summary.get("event_counts") or {}).get("message") or 0)
+    task_context.update(
+        "running-chatflow",
+        None,
+        (
+            f"Dify event {event_type}; {node_finished} nodes finished, "
+            f"{message_chunks} answer chunks received."
+        ),
     )
 
 

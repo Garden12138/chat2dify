@@ -126,6 +126,27 @@ End node params.outputs items must include variable and value_selector, for exam
 {"variable":"answer","value_selector":["llm_1","text"]}.
 """
 
+CHATFLOW_SYSTEM_PROMPT = SYSTEM_PROMPT + """
+
+The requested app_mode is advanced-chat. These chatflow rules override any
+workflow-only ending or input instructions above:
+- Set app_mode to "advanced-chat".
+- Use exactly one start node and at least one answer node.
+- Never generate end, trigger-webhook, trigger-plugin, trigger-schedule,
+  datasource, datasource-empty, or knowledge-index nodes.
+- The current user message is {{#sys.query#}} and uploaded files are
+  {{#sys.files#}}. Never use {{#start.query#}} or {{#start.files#}} in text.
+- For selectors belonging to the start node, use ["<start_id>","sys.query"]
+  or ["<start_id>","sys.files"].
+- The start-id form is only valid in selector arrays. In prompt/template text,
+  never write {{#<start_id>.sys.query#}} or {{#<start_id>.sys.files#}}.
+- Every llm node must keep system_prompt for identity/rules/output criteria and
+  user_prompt for the current task. user_prompt must include {{#sys.query#}}.
+- Finish each response path with an answer node. Its params are
+  {"answer":"{{#<upstream_node_id>.<output>#}}"}.
+- Do not create end.outputs. For a simple request use start -> llm -> answer.
+"""
+
 
 class PlannerError(RuntimeError):
     """Raised when the planner cannot produce a valid plan."""
@@ -169,6 +190,7 @@ class WorkflowPlanner:
         message: str,
         *,
         app_name: str | None = None,
+        app_mode: str = "workflow",
         dsl_version: str,
         tool_selections: list[dict[str, Any]] | None = None,
         agent_selections: list[dict[str, Any]] | None = None,
@@ -179,15 +201,18 @@ class WorkflowPlanner:
         if not runtime.api_key:
             if task_context is not None:
                 task_context.update("planning", 35, "Using the fallback workflow template.")
-            fallback = fallback_plan(message, app_name=app_name)
-            fallback_payload = _prepare_fallback_for_trigger(
-                fallback.model_dump(),
-                message=message,
-                trigger_selection=trigger_selection,
-            )
+            fallback = fallback_plan(message, app_name=app_name, app_mode=app_mode)
+            fallback_payload = fallback.model_dump()
+            if app_mode == "workflow":
+                fallback_payload = _prepare_fallback_for_trigger(
+                    fallback_payload,
+                    message=message,
+                    trigger_selection=trigger_selection,
+                )
             normalized = normalize_plan_payload(
                 fallback_payload,
                 app_name=app_name,
+                app_mode=app_mode,
                 default_dataset_ids=self.settings.dify_default_dataset_ids,
                 tool_selections=tool_selections or [],
                 agent_selections=agent_selections or [],
@@ -222,6 +247,8 @@ class WorkflowPlanner:
                 "tool_selections": tool_selections or [],
                 "agent_selections": agent_selections or [],
             }
+            if app_mode == "advanced-chat":
+                call_kwargs["app_mode"] = app_mode
             if trigger_selection is not None:
                 call_kwargs["trigger_selection"] = trigger_selection
             if task_context is not None:
@@ -240,6 +267,7 @@ class WorkflowPlanner:
                 normalized = normalize_plan_payload(
                     raw_plan,
                     app_name=app_name,
+                    app_mode=app_mode,
                     default_dataset_ids=self.settings.dify_default_dataset_ids,
                     tool_selections=tool_selections or [],
                     agent_selections=agent_selections or [],
@@ -277,12 +305,14 @@ class WorkflowPlanner:
         agent_selections: list[dict[str, Any]] | None = None,
         trigger_selection: dict[str, Any] | None = None,
         task_context: TaskContext | None = None,
+        app_mode: str = "workflow",
     ) -> str:
         runtime = self.settings.planner_runtime()
         url = _chat_completions_url(runtime.base_url)
         user_content = {
             "app_name": app_name or "Generated Workflow",
             "request": message,
+            "app_mode": app_mode,
             "selected_tools": _planner_tool_schemas(tool_selections or []),
             "selected_agents": _planner_agent_schemas(agent_selections or []),
             "selected_trigger": trigger_selection or {"type": "user-input"},
@@ -290,7 +320,10 @@ class WorkflowPlanner:
         if last_error:
             user_content["previous_validation_error"] = last_error
         messages: list[dict[str, str]] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {
+                "role": "system",
+                "content": CHATFLOW_SYSTEM_PROMPT if app_mode == "advanced-chat" else SYSTEM_PROMPT,
+            },
             {"role": "user", "content": json.dumps(user_content, ensure_ascii=False)},
         ]
 
@@ -421,23 +454,59 @@ def _read_streamed_chat_completion(
     return content
 
 
-def fallback_plan(message: str, *, app_name: str | None = None) -> WorkflowPlan:
+def fallback_plan(
+    message: str,
+    *,
+    app_name: str | None = None,
+    app_mode: str = "workflow",
+) -> WorkflowPlan:
     name = app_name or _title_from_message(message)
     subject = _subject_from_title(name)
+    chatflow = app_mode == "advanced-chat"
+    query_reference = "{{#sys.query#}}" if chatflow else "{{#start.query#}}"
+    terminal_node = (
+        {
+            "id": "answer",
+            "type": "answer",
+            "title": f"回复{subject}用户",
+            "params": {"answer": "{{#llm.text#}}"},
+        }
+        if chatflow
+        else {
+            "id": "end",
+            "type": "end",
+            "title": f"返回{subject}结果",
+            "params": {
+                "outputs": [
+                    {"variable": "answer", "value_selector": ["llm", "text"]}
+                ]
+            },
+        }
+    )
     return WorkflowPlan.model_validate(
         {
             "name": name,
             "description": "A simple workflow generated without an LLM planner.",
+            "app_mode": app_mode,
             "nodes": [
                 {
                     "id": "start",
                     "type": "start",
                     "title": f"接收{subject}诉求",
-                    "params": {
-                        "variables": [
-                            {"name": "query", "type": "paragraph", "required": True, "label": "用户输入"}
-                        ]
-                    },
+                    "params": (
+                        {"variables": []}
+                        if chatflow
+                        else {
+                            "variables": [
+                                {
+                                    "name": "query",
+                                    "type": "paragraph",
+                                    "required": True,
+                                    "label": "用户输入",
+                                }
+                            ]
+                        }
+                    ),
                 },
                 {
                     "id": "llm",
@@ -451,23 +520,14 @@ def fallback_plan(message: str, *, app_name: str | None = None) -> WorkflowPlan:
                             "输出格式：用自然中文输出，结构清楚，语气友好。\n"
                             "审核标准：回复必须贴合用户输入，不推卸责任，不承诺超出权限的赔付或处理结果。"
                         ),
-                        "user_prompt": f"请根据以下用户输入完成“{message}”任务：\n{{{{#start.query#}}}}",
+                        "user_prompt": f"请根据以下用户输入完成“{message}”任务：\n{query_reference}",
                     },
                 },
-                {
-                    "id": "end",
-                    "type": "end",
-                    "title": f"返回{subject}结果",
-                    "params": {
-                        "outputs": [
-                            {"variable": "answer", "value_selector": ["llm", "text"]}
-                        ]
-                    },
-                },
+                terminal_node,
             ],
             "edges": [
                 {"source": "start", "target": "llm"},
-                {"source": "llm", "target": "end"},
+                {"source": "llm", "target": "answer" if chatflow else "end"},
             ],
         }
     )

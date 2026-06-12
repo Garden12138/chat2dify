@@ -12,6 +12,7 @@ const PLANNER_MODEL_KEY = "chat2dify.workbench.plannerModel.v1";
 const TRIGGER_SELECTION_KEY = "chat2dify.workbench.triggerSelection.v1";
 const ACTIVE_TASKS_KEY = "chat2dify.workbench.activeTasks.v1";
 const TERMINAL_TASKS_KEY = "chat2dify.workbench.terminalTasks.v1";
+const APP_MODE_KEY = "chat2dify.workbench.appMode.v1";
 const MAX_HISTORY_ITEMS = 12;
 const DATASET_PAGE_SIZE = 50;
 const DEFAULT_RUN_INPUTS = '{"query":"我要投诉订单配送太慢"}';
@@ -65,6 +66,11 @@ const state = {
   activeTasks: {},
   terminalTasks: {},
   taskPollTimers: {},
+  appMode: "workflow",
+  chatflow: {
+    conversationId: "",
+    parentMessageId: "",
+  },
 };
 
 const els = {
@@ -86,6 +92,10 @@ const els = {
   createTaskMessage: document.querySelector("#create-task-message"),
   createTaskBar: document.querySelector("#create-task-bar"),
   createCancelTask: document.querySelector("#create-cancel-task"),
+  createAppMode: document.querySelector("#create-app-mode"),
+  triggerPanel: document.querySelector("#trigger-panel"),
+  modifyPanel: document.querySelector("#modify-panel"),
+  publishPanel: document.querySelector("#publish-panel"),
   knowledgeForm: document.querySelector("#knowledge-form"),
   knowledgeStatus: document.querySelector("#knowledge-status"),
   knowledgeSearch: document.querySelector("#knowledge-search"),
@@ -148,6 +158,12 @@ const els = {
   runTaskMessage: document.querySelector("#run-task-message"),
   runTaskBar: document.querySelector("#run-task-bar"),
   runCancelTask: document.querySelector("#run-cancel-task"),
+  runAppMode: document.querySelector("#run-app-mode"),
+  runWorkflowFields: document.querySelector("#run-workflow-fields"),
+  runChatflowFields: document.querySelector("#run-chatflow-fields"),
+  runChatflowQuery: document.querySelector("#run-chatflow-query"),
+  runConversationId: document.querySelector("#run-conversation-id"),
+  newChatflowConversation: document.querySelector("#new-chatflow-conversation"),
   publishForm: document.querySelector("#publish-form"),
   publishStatus: document.querySelector("#publish-status"),
   publishDuration: document.querySelector("#publish-duration"),
@@ -183,6 +199,7 @@ document.addEventListener("DOMContentLoaded", () => {
   state.planner.provider = loadPlannerProvider();
   state.planner.model = loadPlannerModel();
   state.triggerSelection = loadTriggerSelection();
+  state.appMode = loadAppMode();
   state.activeTasks = loadActiveTasks();
   state.terminalTasks = loadTerminalTasks();
   els.knowledgeSearch.value = state.datasets.keyword;
@@ -191,6 +208,7 @@ document.addEventListener("DOMContentLoaded", () => {
   els.toolsType.value = state.tools.providerType;
   els.agentsSearch.value = state.agents.keyword;
   restoreTriggerForm(state.triggerSelection);
+  setAppMode(state.appMode);
   bindEvents();
   renderHistory();
   renderPlannerModels();
@@ -333,6 +351,9 @@ function bindEvents() {
     event.preventDefault();
     await handleCreate();
   });
+  els.createAppMode.addEventListener("change", () => {
+    setAppMode(els.createAppMode.value);
+  });
   els.createCancelTask.addEventListener("click", () => handleTaskAction("create"));
   els.modifyCancelTask.addEventListener("click", () => handleTaskAction("modify"));
   els.runCancelTask.addEventListener("click", () => handleTaskAction("run"));
@@ -356,6 +377,16 @@ function bindEvents() {
   els.runForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     await handleRun();
+  });
+  els.runAppMode.addEventListener("change", () => {
+    setAppMode(els.runAppMode.value);
+  });
+  els.newChatflowConversation.addEventListener("click", () => {
+    state.chatflow.conversationId = "";
+    state.chatflow.parentMessageId = "";
+    els.runConversationId.value = "";
+    els.runChatflowQuery.focus();
+    setPanelStatus(els.runStatus, "New conversation", "muted");
   });
   els.publishForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -2150,15 +2181,49 @@ function pruneAgentToolBindings(agent, removedToolKey) {
   return next;
 }
 
+function loadAppMode() {
+  try {
+    return normalizedAppMode(localStorage.getItem(APP_MODE_KEY));
+  } catch (error) {
+    return "workflow";
+  }
+}
+
+function normalizedAppMode(value) {
+  return value === "advanced-chat" ? "advanced-chat" : "workflow";
+}
+
+function setAppMode(value) {
+  const appMode = normalizedAppMode(value);
+  state.appMode = appMode;
+  try {
+    localStorage.setItem(APP_MODE_KEY, appMode);
+  } catch (error) {
+    // Mode remains available for the current page session.
+  }
+  els.createAppMode.value = appMode;
+  els.runAppMode.value = appMode;
+  const isChatflow = appMode === "advanced-chat";
+  els.triggerPanel.classList.toggle("is-hidden", isChatflow);
+  els.modifyPanel.classList.toggle("is-hidden", isChatflow);
+  els.publishPanel.classList.toggle("is-hidden", isChatflow);
+  els.runWorkflowFields.classList.toggle("is-hidden", isChatflow);
+  els.runChatflowFields.classList.toggle("is-hidden", !isChatflow);
+  els.runInputs.required = !isChatflow;
+  els.runChatflowQuery.required = isChatflow;
+}
+
 async function handleCreate() {
   try {
+    const appMode = normalizedAppMode(els.createAppMode.value);
     const payload = {
       message: valueOf("#create-message"),
       app_name: optionalValue("#create-app-name"),
+      app_mode: appMode,
       dataset_ids: currentDatasetIds(),
       tool_selections: currentToolSelections(),
       agent_selections: currentAgentSelections(),
-      trigger_selection: currentTriggerSelection(),
+      trigger_selection: appMode === "workflow" ? currentTriggerSelection() : null,
       planner: currentPlannerSelection(),
     };
     ensureAgentSelectionReady(payload.message, payload.agent_selections);
@@ -2332,6 +2397,29 @@ function triggerSelectionFromPlan(plan) {
 
 async function handleRun() {
   try {
+    const appMode = normalizedAppMode(els.runAppMode.value);
+    if (appMode === "advanced-chat") {
+      const query = els.runChatflowQuery.value.trim();
+      if (!query) {
+        throw new Error("Chatflow Query is required.");
+      }
+      const conversationId = els.runConversationId.value.trim();
+      const payload = {
+        app_id: valueOf("#run-app-id"),
+        query,
+        inputs: {},
+        conversation_id: conversationId || null,
+        parent_message_id: conversationId && conversationId === state.chatflow.conversationId
+          ? state.chatflow.parentMessageId || null
+          : null,
+        timeout_seconds: Number(valueOf("#run-timeout") || 120),
+      };
+      await submitBackgroundTask("run", "/api/tasks/chatflows/run/draft", payload, {
+        kind: "chatflow-run",
+        payload,
+      });
+      return;
+    }
     const triggerNodes = workflowTriggerNodes(state.lastResponse.plan);
     if (triggerNodes.length && (state.lastResponse.app_id || "") === valueOf("#run-app-id")) {
       throw new Error(
@@ -2664,6 +2752,7 @@ async function retryTerminalTask(panelName) {
 function completeBackgroundTask(metadata, data) {
   const payload = metadata.payload || {};
   if (metadata.kind === "create") {
+    setAppMode(data.app_mode || data.plan?.app_mode || payload.app_mode);
     syncAppContext(data);
     rememberApp(data, {
       operation: "create",
@@ -2710,6 +2799,27 @@ function completeBackgroundTask(metadata, data) {
     });
     setPanelStatus(els.runStatus, data.status || "Done", runStatusTone(data));
     renderResult(data, "outputs");
+    return;
+  }
+  if (metadata.kind === "chatflow-run") {
+    state.chatflow.conversationId = data.conversation_id || payload.conversation_id || "";
+    state.chatflow.parentMessageId = data.message_id || "";
+    els.runConversationId.value = state.chatflow.conversationId;
+    setAppMode("advanced-chat");
+    syncAppContext({ ...data, app_mode: "advanced-chat" }, payload.app_id);
+    rememberApp(
+      { ...data, app_mode: "advanced-chat" },
+      {
+        operation: "chatflow draft",
+        request: payload.query,
+        appId: payload.app_id,
+        lastRunStatus: data.status,
+        conversationId: state.chatflow.conversationId,
+        messageId: state.chatflow.parentMessageId,
+      }
+    );
+    setPanelStatus(els.runStatus, data.status || "Done", runStatusTone(data));
+    renderResult({ ...data, app_mode: "advanced-chat" }, "outputs");
     return;
   }
   if (metadata.kind === "publish") {
@@ -2927,6 +3037,7 @@ function backgroundTaskPath(operation) {
     "workflow.modify.draft": "/api/tasks/workflows/modify/draft",
     "workflow.modify.apply": "/api/tasks/workflows/modify/apply",
     "workflow.run.draft": "/api/tasks/workflows/run/draft",
+    "chatflow.run.draft": "/api/tasks/chatflows/run/draft",
     "workflow.publish": "/api/tasks/workflows/publish",
   }[operation] || "";
 }
@@ -2937,6 +3048,7 @@ function backgroundTaskKind(operation) {
     "workflow.modify.draft": "modify-preview",
     "workflow.modify.apply": "modify-apply",
     "workflow.run.draft": "run",
+    "chatflow.run.draft": "chatflow-run",
     "workflow.publish": "publish",
   }[operation] || "";
 }
@@ -3056,6 +3168,8 @@ function renderSummary(data) {
     ["Triggers", Array.isArray(data.triggers) ? data.triggers.length : undefined],
     ["Run ID", data.workflow_run_id],
     ["Task ID", data.task_id],
+    ["Conversation ID", data.conversation_id],
+    ["Message ID", data.message_id],
     ["Tokens", data.total_tokens],
     ["Steps", data.total_steps],
     ["Error", data.error || data.detail?.message || data.detail],
@@ -3154,6 +3268,9 @@ function renderValidationPanel(data) {
 function renderOutputsPanel(data) {
   const panel = panelFor("outputs");
   const sections = [];
+  if (data.answer) {
+    sections.push(promptPreview("Answer", data.answer));
+  }
   if (data.outputs !== undefined && data.outputs !== null) {
     sections.push(jsonBlock("Outputs", data.outputs));
   }
@@ -3251,10 +3368,25 @@ function nodeDetails(node) {
     return [nodeLine("Inputs", variables.map((item) => item.name || item.variable).filter(Boolean).join(", ") || "none")];
   }
   if (node.type === "llm") {
-    return [
+    const details = [
       promptPreview("System", params.system_prompt),
       promptPreview("User", params.user_prompt),
     ];
+    const memory = params.memory && typeof params.memory === "object" ? params.memory : null;
+    if (memory) {
+      details.push(
+        nodeLine(
+          "Memory",
+          memory.window?.enabled
+            ? `${memory.window.size || 10} recent turns`
+            : "disabled"
+        )
+      );
+    }
+    return details;
+  }
+  if (node.type === "answer") {
+    return [promptPreview("Answer", params.answer)];
   }
   if (node.type === "end") {
     const outputs = Array.isArray(params.outputs) ? params.outputs : [];
@@ -3606,6 +3738,7 @@ function planSummary(plan) {
   const edges = Array.isArray(plan.edges) ? plan.edges : [];
   return keyValueGroup("Plan summary", {
     name: plan.name || "Untitled",
+    mode: plan.app_mode || "workflow",
     nodes: nodes.length,
     edges: edges.length,
     node_types: [...new Set(nodes.map((node) => node.type).filter(Boolean))].join(", ") || "none",
@@ -3635,6 +3768,10 @@ function syncAppContext(data, fallbackAppId = "") {
   const appId = data.app_id || fallbackAppId;
   if (!appId) {
     return;
+  }
+  const appMode = data.app_mode || data.app?.mode || data.plan?.app_mode;
+  if (appMode) {
+    setAppMode(appMode);
   }
   els.modifyAppId.value = appId;
   els.runAppId.value = appId;
@@ -4156,12 +4293,15 @@ function rememberApp(data, meta = {}) {
     ...previous,
     app_id: appId,
     app_name: meta.appName || data.plan?.name || previous.app_name || "",
+    app_mode: normalizedAppMode(data.app_mode || data.app?.mode || data.plan?.app_mode || meta.appMode || previous.app_mode),
     workflow_url: data.workflow_url || previous.workflow_url || "",
     base_hash: data.base_hash || previous.base_hash || "",
     new_hash: data.new_hash || previous.new_hash || "",
     last_request: meta.request || previous.last_request || "",
     last_operation: meta.operation || previous.last_operation || "",
     last_run_status: meta.lastRunStatus || (typeof data.ok === "boolean" ? data.status : previous.last_run_status || ""),
+    conversation_id: meta.conversationId || data.conversation_id || previous.conversation_id || "",
+    message_id: meta.messageId || data.message_id || previous.message_id || "",
     updated_at: new Date().toISOString(),
   };
   state.history = [record, ...state.history.filter((item) => item.app_id !== appId)].slice(0, MAX_HISTORY_ITEMS);
@@ -4199,7 +4339,12 @@ function renderHistory() {
 }
 
 function historyMeta(item) {
-  const parts = [item.last_operation, item.last_run_status, item.new_hash || item.base_hash ? "hash saved" : ""].filter(Boolean);
+  const parts = [
+    item.app_mode === "advanced-chat" ? "chatflow" : "workflow",
+    item.last_operation,
+    item.last_run_status,
+    item.new_hash || item.base_hash ? "hash saved" : "",
+  ].filter(Boolean);
   if (item.updated_at) {
     parts.push(new Date(item.updated_at).toLocaleString());
   }
@@ -4214,6 +4359,7 @@ function selectHistoryItem(index) {
   syncAppContext(
     {
       app_id: item.app_id,
+      app_mode: item.app_mode,
       workflow_url: item.workflow_url,
       base_hash: item.base_hash,
       new_hash: item.new_hash,
@@ -4223,9 +4369,17 @@ function selectHistoryItem(index) {
   if (item.app_name) {
     els.createAppName.value = item.app_name;
   }
+  if (item.app_mode === "advanced-chat") {
+    state.chatflow.conversationId = item.conversation_id || "";
+    state.chatflow.parentMessageId = item.message_id || "";
+    els.runConversationId.value = state.chatflow.conversationId;
+  }
   renderResult(
     {
       app_id: item.app_id,
+      app_mode: item.app_mode,
+      conversation_id: item.conversation_id,
+      message_id: item.message_id,
       workflow_url: item.workflow_url,
       base_hash: item.base_hash,
       new_hash: item.new_hash,

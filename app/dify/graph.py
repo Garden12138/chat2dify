@@ -19,6 +19,7 @@ SUPPORTED_DIFY_NODE_TYPES = {
     "code",
     "if-else",
     "end",
+    "answer",
     "http-request",
     "template-transform",
     "question-classifier",
@@ -82,7 +83,12 @@ class UnsupportedExistingNodeType(DifyGraphAdapterError):
         return f"Unsupported existing Dify node type: {self.node_type} ({self.node_id})"
 
 
-def decompile_dify_graph(graph: dict[str, Any], *, name: str = "Existing Workflow") -> WorkflowPlan:
+def decompile_dify_graph(
+    graph: dict[str, Any],
+    *,
+    name: str = "Existing Workflow",
+    app_mode: str = "workflow",
+) -> WorkflowPlan:
     nodes = graph.get("nodes")
     edges = graph.get("edges")
     if not isinstance(nodes, list) or not isinstance(edges, list):
@@ -145,9 +151,11 @@ def decompile_dify_graph(graph: dict[str, Any], *, name: str = "Existing Workflo
         {
             "name": name,
             "description": "Workflow draft loaded from Dify.",
+            "app_mode": app_mode,
             "nodes": plan_nodes,
             "edges": plan_edges,
-        }
+        },
+        app_mode=app_mode,
     )
     return WorkflowPlan.model_validate(normalized.payload)
 
@@ -215,7 +223,10 @@ def _params_from_dify_node_data(node_type: str, data: dict[str, Any]) -> dict[st
                 data.get("prompt_config"),
             )
             model = data.get("model") if isinstance(data.get("model"), dict) else {}
-            return {
+            memory = deepcopy(data.get("memory")) if isinstance(data.get("memory"), dict) else None
+            if memory and memory.get("query_prompt_template"):
+                user_prompt = str(memory.get("query_prompt_template"))
+            result = {
                 "system_prompt": system_prompt,
                 "user_prompt": user_prompt,
                 "model_provider": model.get("provider"),
@@ -223,6 +234,9 @@ def _params_from_dify_node_data(node_type: str, data: dict[str, Any]) -> dict[st
                 "model_mode": model.get("mode", "chat"),
                 "completion_params": model.get("completion_params", {"temperature": 0.7}),
             }
+            if memory is not None:
+                result["memory"] = memory
+            return result
         case "code":
             return {
                 "code": data.get("code", ""),
@@ -234,6 +248,8 @@ def _params_from_dify_node_data(node_type: str, data: dict[str, Any]) -> dict[st
             return {"cases": deepcopy(data.get("cases") or [])}
         case "end":
             return {"outputs": deepcopy(data.get("outputs") or [])}
+        case "answer":
+            return {"answer": data.get("answer", "")}
         case "http-request":
             return {
                 "variables": deepcopy(data.get("variables") or []),

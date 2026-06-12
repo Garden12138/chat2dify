@@ -17,6 +17,7 @@ SUPPORTED_NODE_TYPES = {
     "code",
     "if-else",
     "end",
+    "answer",
     "http-request",
     "template-transform",
     "question-classifier",
@@ -82,6 +83,7 @@ GENERIC_TITLES = {
     "model",
     "code",
     "end",
+    "answer",
     "output",
     "ifelse",
     "if",
@@ -208,6 +210,7 @@ def validate_plan(plan: WorkflowPlan) -> list[ValidationIssue]:
     issues.extend(_validate_graph_semantics(plan))
     issues.extend(_validate_node_params(plan))
     issues.extend(_validate_node_quality(plan))
+    issues.extend(_validate_chatflow_system_references(plan))
     issues.extend(_validate_plan_variable_references(plan))
     return issues
 
@@ -236,9 +239,14 @@ def validate_dsl(yaml_content: str, *, expected_dsl_version: str | None = None) 
         )
 
     app = data.get("app")
-    if not isinstance(app, dict) or app.get("mode") != "workflow":
+    app_mode = app.get("mode") if isinstance(app, dict) else None
+    if app_mode not in {"workflow", "advanced-chat"}:
         issues.append(
-            ValidationIssue(code="DSL_APP_MODE_INVALID", message="DSL app.mode must be workflow.", path="app.mode")
+            ValidationIssue(
+                code="DSL_APP_MODE_INVALID",
+                message="DSL app.mode must be workflow or advanced-chat.",
+                path="app.mode",
+            )
         )
 
     workflow = data.get("workflow")
@@ -263,15 +271,46 @@ def validate_dsl(yaml_content: str, *, expected_dsl_version: str | None = None) 
     if isinstance(nodes, list):
         node_ids = {node.get("id") for node in nodes if isinstance(node, dict)}
         node_types = {node.get("id"): node.get("data", {}).get("type") for node in nodes if isinstance(node, dict)}
+        types = set(node_types.values())
         entry_types = {"start", "datasource", "trigger-webhook", "trigger-plugin", "trigger-schedule"}
-        if not (set(node_types.values()) & entry_types):
-            issues.append(
-                ValidationIssue(code="DSL_ENTRY_MISSING", message="workflow graph must contain an entry node.")
-            )
-        if "end" not in set(node_types.values()):
-            issues.append(
-                ValidationIssue(code="DSL_END_MISSING", message="workflow graph must contain an end node.")
-            )
+        if app_mode == "advanced-chat":
+            if list(node_types.values()).count("start") != 1:
+                issues.append(
+                    ValidationIssue(
+                        code="DSL_CHATFLOW_START_INVALID",
+                        message="advanced-chat graph must contain exactly one start node.",
+                    )
+                )
+            if not types.isdisjoint({"end", "trigger-webhook", "trigger-plugin", "trigger-schedule", "datasource"}):
+                issues.append(
+                    ValidationIssue(
+                        code="DSL_CHATFLOW_NODE_INVALID",
+                        message="advanced-chat graph contains a workflow-only entry or end node.",
+                    )
+                )
+            if "answer" not in types:
+                issues.append(
+                    ValidationIssue(
+                        code="DSL_ANSWER_MISSING",
+                        message="advanced-chat graph must contain an answer node.",
+                    )
+                )
+        else:
+            if not (types & entry_types):
+                issues.append(
+                    ValidationIssue(code="DSL_ENTRY_MISSING", message="workflow graph must contain an entry node.")
+                )
+            if "end" not in types:
+                issues.append(
+                    ValidationIssue(code="DSL_END_MISSING", message="workflow graph must contain an end node.")
+                )
+            if "answer" in types:
+                issues.append(
+                    ValidationIssue(
+                        code="DSL_WORKFLOW_ANSWER_INVALID",
+                        message="workflow graph cannot contain answer nodes.",
+                    )
+                )
         if isinstance(edges, list):
             for edge in edges:
                 if not isinstance(edge, dict):
@@ -334,6 +373,24 @@ def _validate_graph_semantics(plan: WorkflowPlan) -> list[ValidationIssue]:
                     node_id=node.id,
                     path=f"nodes.{node.id}",
                     suggestion="删除 end 节点之后的连线，或改用非 end 节点承接后续步骤。",
+                )
+            )
+        if plan.app_mode == "advanced-chat" and node.type in {
+            "end",
+            "trigger-webhook",
+            "trigger-plugin",
+            "trigger-schedule",
+            "datasource",
+            "datasource-empty",
+            "knowledge-index",
+        }:
+            issues.append(
+                ValidationIssue(
+                    code="PLAN_CHATFLOW_NODE_INVALID",
+                    message=f"advanced-chat does not support node type: {node.type}",
+                    node_id=node.id,
+                    path=f"nodes.{node.id}.type",
+                    suggestion="使用 start 作为入口，并使用 answer 输出对话回复。",
                 )
             )
 
@@ -484,7 +541,9 @@ def _validate_node_params(plan: WorkflowPlan) -> list[ValidationIssue]:
         match node.type:
             case "start":
                 variables = params.get("variables")
-                if not isinstance(variables, list) or not variables:
+                if not isinstance(variables, list) or (
+                    plan.app_mode == "workflow" and not variables
+                ):
                     issues.append(_node_issue("PLAN_START_VARIABLES_MISSING", "start node requires variables.", node.id, "params.variables"))
                 else:
                     for idx, item in enumerate(variables):
@@ -560,6 +619,16 @@ def _validate_node_params(plan: WorkflowPlan) -> list[ValidationIssue]:
                 for idx, output in enumerate(outputs or []):
                     if not isinstance(output, dict) or not output.get("variable") or not output.get("value_selector"):
                         issues.append(_node_issue("PLAN_END_OUTPUT_INVALID", "end output requires variable and value_selector.", node.id, f"params.outputs.{idx}"))
+            case "answer":
+                if not str(params.get("answer") or "").strip():
+                    issues.append(
+                        _node_issue(
+                            "PLAN_ANSWER_CONTENT_MISSING",
+                            "answer node requires answer content.",
+                            node.id,
+                            "params.answer",
+                        )
+                    )
             case "http-request":
                 if not params.get("url"):
                     issues.append(_node_issue("PLAN_HTTP_URL_MISSING", "http-request node requires url.", node.id, "params.url"))
@@ -1749,6 +1818,37 @@ def _validate_plan_variable_references(plan: WorkflowPlan) -> list[ValidationIss
     return issues
 
 
+def _validate_chatflow_system_references(plan: WorkflowPlan) -> list[ValidationIssue]:
+    if plan.app_mode != "advanced-chat":
+        return []
+
+    start_ids = {node.id for node in plan.nodes if node.type == "start"}
+    issues: list[ValidationIssue] = []
+    for node in plan.nodes:
+        invalid_references = {
+            (match.group(1), match.group(2))
+            for text in _strings_in_value(node.params)
+            for match in TEMPLATE_REF_RE.finditer(text)
+            if match.group(1) in start_ids
+            and match.group(2) in {"sys.query", "sys.files"}
+        }
+        for start_id, variable in sorted(invalid_references):
+            reference = f"{{{{#{start_id}.{variable}#}}}}"
+            issues.append(
+                ValidationIssue(
+                    code="PLAN_CHATFLOW_SYSTEM_REFERENCE_INVALID",
+                    message=(
+                        "Chatflow system variables cannot use a start-node "
+                        f"prefix: {reference}"
+                    ),
+                    node_id=node.id,
+                    path=f"nodes.{node.id}.params",
+                    suggestion=f"在文本中改用 {{{{#{variable}#}}}}。",
+                )
+            )
+    return issues
+
+
 def _known_outputs(plan: WorkflowPlan) -> dict[str, set[str]]:
     outputs: dict[str, set[str]] = {"sys": set(SYSTEM_OUTPUTS)}
     for node in plan.nodes:
@@ -1759,7 +1859,10 @@ def _known_outputs(plan: WorkflowPlan) -> dict[str, set[str]]:
                     for item in node.params.get("variables") or node.params.get("inputs", [])
                     if item.get("name") or item.get("variable")
                 }
-                outputs[node.id] = names or {"query"}
+                if plan.app_mode == "advanced-chat":
+                    outputs[node.id] = {*names, "sys.query", "sys.files"}
+                else:
+                    outputs[node.id] = names or {"query"}
             case "llm":
                 outputs[node.id] = {"text"}
             case "code":
@@ -1818,7 +1921,7 @@ def _known_outputs(plan: WorkflowPlan) -> dict[str, set[str]]:
                 outputs[node.id] = set()
             case "assigner":
                 outputs[node.id] = set()
-            case "end" | "if-else":
+            case "end" | "answer" | "if-else":
                 outputs[node.id] = set()
         children = node.params.get("children") if isinstance(node.params.get("children"), list) else []
         for child in children:
@@ -1829,6 +1932,20 @@ def _known_outputs(plan: WorkflowPlan) -> dict[str, set[str]]:
                 child.get("params") if isinstance(child.get("params"), dict) else {},
             )
     return outputs
+
+
+def _strings_in_value(value: Any) -> list[str]:
+    strings: list[str] = []
+    if isinstance(value, str):
+        strings.append(value)
+    elif isinstance(value, dict):
+        for key, child in value.items():
+            if key != "_raw_data":
+                strings.extend(_strings_in_value(child))
+    elif isinstance(value, list):
+        for child in value:
+            strings.extend(_strings_in_value(child))
+    return strings
 
 
 def _outputs_for_node(node_type: str, params: dict[str, Any]) -> set[str]:
