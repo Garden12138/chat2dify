@@ -526,6 +526,114 @@ def test_list_agent_strategies_refreshes_after_401() -> None:
     assert "POST /console/api/refresh-token" in calls
 
 
+def test_list_trigger_providers_and_subscriptions_returns_slim_metadata() -> None:
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/console/api/login":
+            return httpx.Response(200, json={"result": "success"}, headers=[("set-cookie", "csrf_token=csrf123; Path=/")])
+        if request.url.path == "/console/api/workspaces/current/triggers":
+            seen["csrf"] = request.headers.get(CSRF_HEADER_NAME, "")
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "name": "langgenius/github/github",
+                        "label": {"zh_Hans": "GitHub"},
+                        "description": {"zh_Hans": "GitHub 事件"},
+                        "plugin_id": "langgenius/github",
+                        "plugin_unique_identifier": "langgenius/github:1.0.0",
+                        "supported_creation_methods": ["OAUTH"],
+                        "events": [
+                            {
+                                "name": "issue_created",
+                                "identity": {"name": "issue_created", "label": {"zh_Hans": "Issue 创建"}},
+                                "description": {"zh_Hans": "收到新 Issue"},
+                                "parameters": [
+                                    {
+                                        "name": "repository",
+                                        "label": {"zh_Hans": "仓库"},
+                                        "type": "string",
+                                        "required": True,
+                                    }
+                                ],
+                                "output_schema": {"properties": {"title": {"type": "string"}}},
+                            }
+                        ],
+                    }
+                ],
+            )
+        if request.url.path == "/console/api/workspaces/current/trigger-provider/langgenius/github/github/subscriptions/list":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": "sub-1",
+                        "name": "GitHub Production",
+                        "provider": "langgenius/github/github",
+                        "credential_type": "oauth2",
+                        "credentials": {"token": "******"},
+                        "endpoint": "https://example.test/hook",
+                        "parameters": {"owner": "garden"},
+                        "properties": {"account": "garden"},
+                        "workflows_in_use": 2,
+                    }
+                ],
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+    providers = client.list_trigger_providers(keyword="issue")
+    subscriptions = client.list_trigger_subscriptions("langgenius/github/github")
+
+    assert seen["csrf"] == "csrf123"
+    assert providers.count == 1
+    assert providers.data[0].provider_id == "langgenius/github/github"
+    assert providers.data[0].event_name == "issue_created"
+    assert providers.data[0].parameters[0]["name"] == "repository"
+    assert providers.data[0].output_schema["properties"]["title"]["type"] == "string"
+    assert subscriptions.count == 1
+    assert subscriptions.data[0].provider_id == "langgenius/github/github"
+    assert subscriptions.data[0].workflows_in_use == 2
+    assert not hasattr(subscriptions.data[0], "credentials")
+
+
+def test_list_trigger_providers_refreshes_after_401() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(f"{request.method} {request.url.path}")
+        if request.url.path == "/console/api/login":
+            return httpx.Response(200, json={"result": "success"}, headers=[("set-cookie", "csrf_token=csrf123; Path=/")])
+        if request.url.path == "/console/api/refresh-token":
+            return httpx.Response(200, json={"result": "success"})
+        if request.url.path == "/console/api/workspaces/current/triggers":
+            if calls.count("GET /console/api/workspaces/current/triggers") == 1:
+                return httpx.Response(401, json={"message": "expired"})
+            return httpx.Response(200, json=[])
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+    result = client.list_trigger_providers()
+
+    assert result.data == []
+    assert calls.count("GET /console/api/workspaces/current/triggers") == 2
+    assert "POST /console/api/refresh-token" in calls
+
+
+def test_list_trigger_subscriptions_invalid_json_is_wrapped() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/console/api/login":
+            return httpx.Response(200, json={"result": "success"}, headers=[("set-cookie", "csrf_token=csrf123; Path=/")])
+        if request.url.path.endswith("/subscriptions/list"):
+            return httpx.Response(200, text="not json")
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+    with pytest.raises(DifyClientError, match="Invalid Dify JSON response"):
+        client.list_trigger_subscriptions("langgenius/github/github")
+
+
 def test_sync_draft_workflow_conflict_is_typed() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/console/api/login":

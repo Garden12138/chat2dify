@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>chat2dify</title>
-    <link rel="stylesheet" href="/static/styles.css?v=workbench-20260609-triggers">
+    <link rel="stylesheet" href="/static/styles.css?v=workbench-20260611-plugin-triggers">
   </head>
   <body>
     <header class="app-header">
@@ -113,6 +113,7 @@
             <select id="trigger-type">
               <option value="user-input">User Input</option>
               <option value="webhook">Webhook</option>
+              <option value="plugin">Plugin Trigger</option>
               <option value="schedule">Schedule</option>
             </select>
           </label>
@@ -168,6 +169,29 @@
               <textarea id="trigger-webhook-response" rows="3" spellcheck="false" placeholder='{"ok":true}'></textarea>
             </label>
             <p class="field-help">One parameter per line: <code>name:type*</code>. The asterisk marks it required.</p>
+          </div>
+
+          <div id="trigger-plugin-fields" class="conditional-fields is-hidden">
+            <label>
+              Search provider or event
+              <input id="trigger-plugin-search" autocomplete="off" placeholder="GitHub, Slack, issue created">
+            </label>
+            <button id="refresh-trigger-plugins" type="button" class="secondary">Refresh trigger providers</button>
+            <label>
+              Provider event
+              <select id="trigger-plugin-event">
+                <option value="">Select an installed trigger event</option>
+              </select>
+            </label>
+            <label>
+              Existing subscription
+              <select id="trigger-plugin-subscription">
+                <option value="">Select a configured subscription</option>
+              </select>
+            </label>
+            <div id="trigger-plugin-parameters" class="tool-config"></div>
+            <div id="trigger-plugin-message" class="selection-summary"></div>
+            <p class="field-help">Only Dify subscriptions that already exist are listed. Event inputs are saved as constants.</p>
           </div>
 
           <div id="trigger-schedule-fields" class="conditional-fields is-hidden">
@@ -406,6 +430,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js?v=workbench-20260611-schedule-fix" defer></script>
+    <script src="/static/app.js?v=workbench-20260611-plugin-triggers-v2" defer></script>
   </body>
 </html>

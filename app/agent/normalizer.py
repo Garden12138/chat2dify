@@ -353,6 +353,8 @@ def normalize_plan_payload(
                 node["params"] = _normalize_agent_params(params, agent_selections or [])
             case "trigger-webhook":
                 node["params"] = _normalize_trigger_webhook_params(params)
+            case "trigger-plugin":
+                node["params"] = _normalize_trigger_plugin_params(params)
             case "trigger-schedule":
                 node["params"] = _normalize_trigger_schedule_params(params)
             case node_type if node_type in EXTERNAL_DEPENDENCY_NODE_TYPES:
@@ -395,6 +397,7 @@ def normalize_plan_payload(
         node_params = node.get("params") if isinstance(node.get("params"), dict) else {}
         if node_type in EXTERNAL_DEPENDENCY_NODE_TYPES and node_type not in {
             "trigger-webhook",
+            "trigger-plugin",
             "trigger-schedule",
         } and not (
             node_type in {"tool", "agent"} and "_raw_data" not in node_params
@@ -438,6 +441,8 @@ def normalize_plan_payload(
             if old_handle != new_handle:
                 edge["source_handle"] = new_handle
                 changes.append(f"normalized human-input edge handle for {edge.get('source')} -> {edge.get('target')}")
+
+    _repair_code_edge_variable_bindings(nodes, edges, changes)
 
     return NormalizationResult(payload=data, changed=bool(changes), changes=changes)
 
@@ -2276,7 +2281,11 @@ def _apply_trigger_selection(
                 node
                 for node in nodes
                 if isinstance(node, dict)
-                and str(node.get("type") or "") in {"trigger-webhook", "trigger-schedule"}
+                and str(node.get("type") or "") in {
+                    "trigger-webhook",
+                    "trigger-plugin",
+                    "trigger-schedule",
+                }
             ),
             None,
         )
@@ -2288,7 +2297,7 @@ def _apply_trigger_selection(
         target["params"] = {"variables": _start_variables_from_trigger(existing_params)}
         changes.append(f"replaced trigger entry {target.get('id', '<unknown>')} with start")
         return
-    if selection_type not in {"webhook", "schedule"}:
+    if selection_type not in {"webhook", "schedule", "plugin"}:
         return
 
     target_type = f"trigger-{selection_type}"
@@ -2313,13 +2322,20 @@ def _apply_trigger_selection(
     target["title"] = (
         str(target.get("title") or "")
         if old_type == target_type
-        else ("接收 Webhook 请求" if selection_type == "webhook" else "按计划启动工作流")
+        else (
+            "接收 Webhook 请求"
+            if selection_type == "webhook"
+            else str(trigger_selection.get("event_label") or "接收插件事件")
+            if selection_type == "plugin"
+            else "按计划启动工作流"
+        )
     )
-    selected_params = (
-        _normalize_trigger_webhook_params(trigger_selection)
-        if selection_type == "webhook"
-        else _normalize_trigger_schedule_params(trigger_selection)
-    )
+    if selection_type == "webhook":
+        selected_params = _normalize_trigger_webhook_params(trigger_selection)
+    elif selection_type == "plugin":
+        selected_params = _normalize_trigger_plugin_params(trigger_selection)
+    else:
+        selected_params = _normalize_trigger_schedule_params(trigger_selection)
     existing_params = target.get("params") if isinstance(target.get("params"), dict) else {}
     if isinstance(existing_params.get("_raw_data"), dict):
         existing_params = existing_params["_raw_data"]
@@ -2448,6 +2464,93 @@ def _normalize_trigger_webhook_params(params: dict[str, Any]) -> dict[str, Any]:
         "timeout": max(1, min(300, timeout)),
         "variables": variables,
     }
+
+
+def _normalize_trigger_plugin_params(params: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(params.get("_raw_data"), dict):
+        return _normalize_external_dependency_params(params)
+
+    raw = deepcopy(params)
+    schemas = _normalize_trigger_parameter_schemas(
+        raw.get("parameters_schema")
+        if isinstance(raw.get("parameters_schema"), list)
+        else raw.get("paramSchemas")
+    )
+    raw_parameters = raw.get("event_parameters")
+    if not isinstance(raw_parameters, dict):
+        raw_parameters = raw.get("config") if isinstance(raw.get("config"), dict) else {}
+    event_parameters: dict[str, dict[str, Any]] = {}
+    schema_names: set[str] = set()
+    for schema in schemas:
+        name = str(schema.get("name") or schema.get("variable") or "")
+        if not name:
+            continue
+        schema_names.add(name)
+        value = raw_parameters.get(name)
+        if value is None and schema.get("default") not in (None, ""):
+            value = schema.get("default")
+        if value is not None:
+            event_parameters[name] = _normalize_trigger_constant_input(value)
+    for name, value in raw_parameters.items():
+        if str(name) in schema_names or value is None:
+            continue
+        event_parameters[str(name)] = _normalize_trigger_constant_input(value)
+
+    result = {
+        key: deepcopy(value)
+        for key, value in raw.items()
+        if key not in {"type", "title", "desc", "selected", "_raw_data", "paramSchemas"}
+    }
+    result.update(
+        {
+            "provider_id": str(raw.get("provider_id") or ""),
+            "provider_type": str(raw.get("provider_type") or "trigger"),
+            "provider_name": str(raw.get("provider_name") or raw.get("provider_id") or ""),
+            "plugin_id": str(raw.get("plugin_id") or ""),
+            "plugin_unique_identifier": str(raw.get("plugin_unique_identifier") or ""),
+            "event_name": str(raw.get("event_name") or ""),
+            "event_label": str(raw.get("event_label") or raw.get("event_name") or ""),
+            "subscription_id": str(raw.get("subscription_id") or ""),
+            "event_parameters": event_parameters,
+            "event_configurations": deepcopy(raw.get("event_configurations"))
+            if isinstance(raw.get("event_configurations"), dict)
+            else {},
+            "config": deepcopy(event_parameters),
+            "parameters_schema": schemas,
+            "output_schema": deepcopy(raw.get("output_schema"))
+            if isinstance(raw.get("output_schema"), dict)
+            else {},
+            "version": str(raw.get("version") or "1"),
+            "event_node_version": str(raw.get("event_node_version") or "1"),
+        }
+    )
+    return result
+
+
+def _normalize_trigger_parameter_schemas(value: Any) -> list[dict[str, Any]]:
+    schemas: list[dict[str, Any]] = []
+    for item in value if isinstance(value, list) else []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("variable") or "").strip()
+        if not name:
+            continue
+        schema = deepcopy(item)
+        schema["name"] = name
+        schema["variable"] = name
+        schema["type"] = str(schema.get("type") or "string")
+        schema["required"] = bool(schema.get("required", False))
+        schemas.append(schema)
+    return schemas
+
+
+def _normalize_trigger_constant_input(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict) and "value" in value:
+        return {
+            "type": str(value.get("type") or "constant"),
+            "value": deepcopy(value.get("value")),
+        }
+    return {"type": "constant", "value": deepcopy(value)}
 
 
 def _normalize_webhook_parameters(
@@ -3399,8 +3502,108 @@ def _normalize_variables(items: Any, inputs: Any = None) -> list[dict[str, Any]]
             variables.append(_normalize_output(normalized_variable))
     if isinstance(inputs, dict):
         for variable, ref in inputs.items():
-            variables.append(_normalize_output({"variable": str(variable), "value_selector": _selector_from_ref(str(ref))}))
+            if isinstance(ref, dict):
+                raw_selector = (
+                    ref.get("value_selector")
+                    or ref.get("variable_selector")
+                    or ref.get("selector")
+                    or ref.get("value")
+                )
+                if raw_selector in (None, "", [], {}):
+                    continue
+                selector = _normalize_selector(raw_selector)
+            else:
+                selector = _selector_from_ref(str(ref))
+            if len(selector) >= 2:
+                variables.append(
+                    _normalize_output(
+                        {
+                            "variable": str(variable),
+                            "value_selector": selector,
+                        }
+                    )
+                )
     return variables
+
+
+def _repair_code_edge_variable_bindings(
+    nodes: list[Any],
+    edges: list[Any],
+    changes: list[str],
+) -> None:
+    node_by_id = {
+        str(node.get("id")): node
+        for node in nodes
+        if isinstance(node, dict) and node.get("id")
+    }
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        source_id = str(edge.get("source") or "")
+        target_id = str(edge.get("target") or "")
+        source_handle = str(edge.get("source_handle") or "")
+        target_handle = str(edge.get("target_handle") or "")
+        target = node_by_id.get(target_id)
+        source = node_by_id.get(source_id)
+        if (
+            not source
+            or not target
+            or str(target.get("type") or "") != "code"
+            or source_handle in {"", SOURCE_HANDLE}
+            or target_handle in {"", "target"}
+        ):
+            continue
+
+        params = target.get("params") if isinstance(target.get("params"), dict) else {}
+        variables = params.get("variables") if isinstance(params.get("variables"), list) else []
+        selector = [source_id, *[part for part in source_handle.split(".") if part]]
+        value_type = _source_output_value_type(source, source_handle)
+        existing = next(
+            (
+                item
+                for item in variables
+                if isinstance(item, dict) and str(item.get("variable") or "") == target_handle
+            ),
+            None,
+        )
+        if existing is None:
+            variables.append(
+                {
+                    "variable": target_handle,
+                    "value_selector": selector,
+                    "value_type": value_type,
+                }
+            )
+            changes.append(
+                f"bound code variable {target_id}.{target_handle} to "
+                f"{source_id}.{source_handle} from edge handles"
+            )
+        elif existing.get("value_selector") != selector:
+            existing["value_selector"] = selector
+            existing["value_type"] = value_type
+            changes.append(
+                f"repaired code variable {target_id}.{target_handle} binding to "
+                f"{source_id}.{source_handle}"
+            )
+        params["variables"] = variables
+        target["params"] = params
+
+
+def _source_output_value_type(source: dict[str, Any], output_name: str) -> str:
+    params = source.get("params") if isinstance(source.get("params"), dict) else {}
+    node_type = str(source.get("type") or "")
+    if node_type == "trigger-plugin":
+        schema = params.get("output_schema") if isinstance(params.get("output_schema"), dict) else {}
+        properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        config = properties.get(output_name)
+        if isinstance(config, dict):
+            return _normalize_code_output_type(config.get("type"))
+    if node_type == "code":
+        outputs = params.get("outputs") if isinstance(params.get("outputs"), dict) else {}
+        config = outputs.get(output_name)
+        if isinstance(config, dict):
+            return _normalize_code_output_type(config.get("type"))
+    return "string"
 
 
 def _normalize_key_value_text(value: Any) -> str:

@@ -231,6 +231,104 @@ class DifyAgentStrategyListResult:
 
 
 @dataclass(frozen=True)
+class DifyTriggerProviderListItem:
+    provider_id: str
+    provider_type: str
+    provider_name: str
+    provider_label: str
+    description: str
+    event_name: str
+    event_label: str
+    event_description: str
+    parameters: list[dict[str, Any]]
+    output_schema: dict[str, Any]
+    plugin_id: str | None = None
+    plugin_unique_identifier: str | None = None
+    supported_creation_methods: list[str] | None = None
+
+
+@dataclass(frozen=True)
+class DifyTriggerProviderListResult:
+    data: list[DifyTriggerProviderListItem]
+    count: int
+    providers: list[str]
+
+    @classmethod
+    def from_payload(
+        cls,
+        payload: list[dict[str, Any]],
+        *,
+        keyword: str | None = None,
+    ) -> "DifyTriggerProviderListResult":
+        items: list[DifyTriggerProviderListItem] = []
+        for provider in payload:
+            if isinstance(provider, dict):
+                items.extend(_trigger_event_items_from_provider(provider))
+        if keyword:
+            needle = keyword.strip().lower()
+            items = [
+                item
+                for item in items
+                if needle
+                in " ".join(
+                    [
+                        item.provider_id,
+                        item.provider_name,
+                        item.provider_label,
+                        item.event_name,
+                        item.event_label,
+                        item.description,
+                        item.event_description,
+                    ]
+                ).lower()
+            ]
+        providers = sorted({item.provider_id for item in items})
+        return cls(data=items, count=len(items), providers=providers)
+
+
+@dataclass(frozen=True)
+class DifyTriggerSubscriptionListItem:
+    id: str
+    name: str
+    provider_id: str
+    credential_type: str
+    endpoint: str
+    parameters: dict[str, Any]
+    properties: dict[str, Any]
+    workflows_in_use: int
+
+
+@dataclass(frozen=True)
+class DifyTriggerSubscriptionListResult:
+    data: list[DifyTriggerSubscriptionListItem]
+    count: int
+    provider_id: str
+
+    @classmethod
+    def from_payload(
+        cls,
+        payload: list[dict[str, Any]],
+        *,
+        provider_id: str,
+    ) -> "DifyTriggerSubscriptionListResult":
+        items = [
+            DifyTriggerSubscriptionListItem(
+                id=str(item.get("id") or ""),
+                name=str(item.get("name") or item.get("id") or ""),
+                provider_id=str(item.get("provider") or provider_id),
+                credential_type=str(item.get("credential_type") or ""),
+                endpoint=str(item.get("endpoint") or ""),
+                parameters=deepcopy(item.get("parameters")) if isinstance(item.get("parameters"), dict) else {},
+                properties=deepcopy(item.get("properties")) if isinstance(item.get("properties"), dict) else {},
+                workflows_in_use=_int_or_none(item.get("workflows_in_use")) or 0,
+            )
+            for item in payload
+            if isinstance(item, dict) and item.get("id")
+        ]
+        return cls(data=items, count=len(items), provider_id=provider_id)
+
+
+@dataclass(frozen=True)
 class DifyDraftWorkflow:
     id: str
     graph: dict[str, Any]
@@ -541,6 +639,41 @@ class DifyClient:
             providers.append(detail_payload)
 
         return DifyAgentStrategyListResult.from_provider_payloads(providers, keyword=keyword)
+
+    def list_trigger_providers(self, *, keyword: str | None = None) -> DifyTriggerProviderListResult:
+        self._ensure_logged_in()
+        response = self._get_with_auth_retry("/workspaces/current/triggers")
+        self._raise_for_response(response)
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise DifyClientError(f"Invalid Dify JSON response: {response.text}") from exc
+        if not isinstance(payload, list):
+            raise DifyClientError("Dify trigger providers response must be a JSON list.")
+        return DifyTriggerProviderListResult.from_payload(
+            [item for item in payload if isinstance(item, dict)],
+            keyword=keyword,
+        )
+
+    def list_trigger_subscriptions(self, provider_id: str) -> DifyTriggerSubscriptionListResult:
+        self._ensure_logged_in()
+        provider = str(provider_id or "").strip()
+        if not provider:
+            raise DifyClientError("Trigger provider_id is required.")
+        response = self._get_with_auth_retry(
+            f"/workspaces/current/trigger-provider/{provider}/subscriptions/list"
+        )
+        self._raise_for_response(response)
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise DifyClientError(f"Invalid Dify JSON response: {response.text}") from exc
+        if not isinstance(payload, list):
+            raise DifyClientError("Dify trigger subscriptions response must be a JSON list.")
+        return DifyTriggerSubscriptionListResult.from_payload(
+            [item for item in payload if isinstance(item, dict)],
+            provider_id=provider,
+        )
 
     def get_draft_workflow(self, app_id: str) -> DifyDraftWorkflow:
         self._ensure_logged_in()
@@ -1004,6 +1137,69 @@ def _agent_parameter_payload(parameter: dict[str, Any]) -> dict[str, Any]:
         "auto_generate": deepcopy(parameter.get("auto_generate")) if parameter.get("auto_generate") is not None else None,
         "min": parameter.get("min"),
         "max": parameter.get("max"),
+    }
+    return {key: value for key, value in result.items() if value is not None}
+
+
+def _trigger_event_items_from_provider(provider: dict[str, Any]) -> list[DifyTriggerProviderListItem]:
+    provider_id = str(provider.get("name") or "").strip()
+    if not provider_id:
+        return []
+    provider_label = _localized_text(provider.get("label")) or provider_id
+    provider_description = _localized_text(provider.get("description"))
+    plugin_id = _string_or_none(provider.get("plugin_id"))
+    plugin_unique_identifier = _string_or_none(provider.get("plugin_unique_identifier"))
+    creation_methods = [str(item) for item in provider.get("supported_creation_methods") or [] if item]
+    items: list[DifyTriggerProviderListItem] = []
+    for event in provider.get("events") if isinstance(provider.get("events"), list) else []:
+        if not isinstance(event, dict):
+            continue
+        identity = event.get("identity") if isinstance(event.get("identity"), dict) else {}
+        event_name = str(event.get("name") or identity.get("name") or "").strip()
+        if not event_name:
+            continue
+        parameters = [
+            _trigger_parameter_payload(parameter)
+            for parameter in event.get("parameters") or []
+            if isinstance(parameter, dict)
+        ]
+        output_schema = event.get("output_schema") if isinstance(event.get("output_schema"), dict) else {}
+        items.append(
+            DifyTriggerProviderListItem(
+                provider_id=provider_id,
+                provider_type="trigger",
+                provider_name=provider_id,
+                provider_label=provider_label,
+                description=provider_description,
+                event_name=event_name,
+                event_label=_localized_text(identity.get("label")) or event_name,
+                event_description=_localized_text(event.get("description")),
+                parameters=parameters,
+                output_schema=deepcopy(output_schema),
+                plugin_id=plugin_id,
+                plugin_unique_identifier=plugin_unique_identifier,
+                supported_creation_methods=creation_methods,
+            )
+        )
+    return items
+
+
+def _trigger_parameter_payload(parameter: dict[str, Any]) -> dict[str, Any]:
+    name = str(parameter.get("name") or parameter.get("variable") or "").strip()
+    result = {
+        "name": name,
+        "variable": name,
+        "label": deepcopy(parameter.get("label")),
+        "description": deepcopy(parameter.get("description")),
+        "type": parameter.get("type"),
+        "required": bool(parameter.get("required", False)),
+        "multiple": bool(parameter.get("multiple", False)),
+        "default": deepcopy(parameter.get("default")),
+        "options": deepcopy(parameter.get("options")) if isinstance(parameter.get("options"), list) else None,
+        "scope": deepcopy(parameter.get("scope")) if parameter.get("scope") is not None else None,
+        "min": parameter.get("min"),
+        "max": parameter.get("max"),
+        "precision": parameter.get("precision"),
     }
     return {key: value for key, value in result.items() if value is not None}
 

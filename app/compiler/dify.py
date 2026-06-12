@@ -153,6 +153,8 @@ class DifyDslCompiler:
                 data.update(_agent_data(node))
             case "trigger-webhook":
                 data.update(self._trigger_webhook_data(node))
+            case "trigger-plugin":
+                data.update(self._trigger_plugin_data(node))
             case "trigger-schedule":
                 data.update(self._trigger_schedule_data(node))
             case node_type if node_type in EXTERNAL_DEPENDENCY_NODE_TYPES:
@@ -571,6 +573,29 @@ class DifyDslCompiler:
                 "monthly_days": deepcopy(visual.get("monthly_days") or [1]),
             },
             "timezone": str(params.get("timezone") or "Asia/Shanghai"),
+        }
+
+    def _trigger_plugin_data(self, node: PlanNode) -> dict[str, Any]:
+        if isinstance(node.params.get("_raw_data"), dict):
+            return _external_dependency_data(node)
+        params = node.params
+        event_parameters = deepcopy(params.get("event_parameters") or {})
+        return {
+            "provider_id": str(params.get("provider_id") or ""),
+            "provider_type": str(params.get("provider_type") or "trigger"),
+            "provider_name": str(params.get("provider_name") or params.get("provider_id") or ""),
+            "plugin_id": str(params.get("plugin_id") or ""),
+            "plugin_unique_identifier": str(params.get("plugin_unique_identifier") or ""),
+            "event_name": str(params.get("event_name") or ""),
+            "event_label": str(params.get("event_label") or params.get("event_name") or ""),
+            "subscription_id": str(params.get("subscription_id") or ""),
+            "event_parameters": event_parameters,
+            "event_configurations": deepcopy(params.get("event_configurations") or {}),
+            "config": deepcopy(params.get("config") or event_parameters),
+            "parameters_schema": deepcopy(params.get("parameters_schema") or []),
+            "output_schema": deepcopy(params.get("output_schema") or {}),
+            "version": str(params.get("version") or "1"),
+            "event_node_version": str(params.get("event_node_version") or "1"),
         }
 
     def _model_config(self, node: PlanNode) -> dict[str, Any]:
@@ -1110,6 +1135,13 @@ def _node_output_types(node: PlanNode) -> dict[str, str]:
                     variable = str(item["name"]).replace("-", "_") if group == "headers" else str(item["name"])
                     result[variable] = str(item.get("type") or "string")
             return result
+        case "trigger-plugin":
+            schema = params.get("output_schema") if isinstance(params.get("output_schema"), dict) else {}
+            properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+            return {
+                str(name): str(config.get("type") or "object") if isinstance(config, dict) else "object"
+                for name, config in properties.items()
+            }
         case "llm":
             return {"text": "string"}
         case "code":

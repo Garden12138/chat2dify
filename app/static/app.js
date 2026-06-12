@@ -49,6 +49,13 @@ const state = {
     selected: [],
     keyword: "",
   },
+  pluginTriggers: {
+    items: [],
+    subscriptions: [],
+    keyword: "",
+    loaded: false,
+    loading: false,
+  },
   triggerSelection: null,
   workflowTriggers: [],
   defaultModel: {
@@ -109,6 +116,13 @@ const els = {
   triggerWebhookStatusCode: document.querySelector("#trigger-webhook-status-code"),
   triggerWebhookTimeout: document.querySelector("#trigger-webhook-timeout"),
   triggerWebhookResponse: document.querySelector("#trigger-webhook-response"),
+  triggerPluginFields: document.querySelector("#trigger-plugin-fields"),
+  triggerPluginSearch: document.querySelector("#trigger-plugin-search"),
+  triggerPluginRefresh: document.querySelector("#refresh-trigger-plugins"),
+  triggerPluginEvent: document.querySelector("#trigger-plugin-event"),
+  triggerPluginSubscription: document.querySelector("#trigger-plugin-subscription"),
+  triggerPluginParameters: document.querySelector("#trigger-plugin-parameters"),
+  triggerPluginMessage: document.querySelector("#trigger-plugin-message"),
   triggerScheduleFields: document.querySelector("#trigger-schedule-fields"),
   triggerScheduleMode: document.querySelector("#trigger-schedule-mode"),
   triggerScheduleTimezone: document.querySelector("#trigger-schedule-timezone"),
@@ -189,6 +203,9 @@ document.addEventListener("DOMContentLoaded", () => {
   loadDatasets({ reset: true });
   loadTools();
   loadAgentStrategies();
+  if (state.triggerSelection?.type === "plugin") {
+    loadTriggerProviders();
+  }
   renderResult({});
   restoreActiveTasks();
   restoreTerminalTasks();
@@ -288,6 +305,29 @@ function bindEvents() {
   });
   els.triggerForm.addEventListener("input", handleTriggerFormChange);
   els.triggerForm.addEventListener("change", handleTriggerFormChange);
+  els.triggerPluginRefresh.addEventListener("click", async () => {
+    await loadTriggerProviders();
+  });
+  els.triggerPluginSearch.addEventListener("input", () => {
+    state.pluginTriggers.keyword = els.triggerPluginSearch.value.trim();
+    renderPluginTriggerForm();
+  });
+  els.triggerPluginEvent.addEventListener("change", async () => {
+    const event = selectedPluginTriggerEvent();
+    state.triggerSelection = event
+      ? {
+          type: "plugin",
+          provider_id: event.provider_id,
+          event_name: event.event_name,
+          subscription_id: "",
+          event_parameters: {},
+        }
+      : { type: "plugin" };
+    saveTriggerSelection();
+    await loadTriggerSubscriptions(event?.provider_id || "");
+    renderPluginTriggerForm();
+    markModifyPreviewDirty();
+  });
 
   els.createForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -1613,11 +1653,16 @@ function agentToolKeyFromValue(value = {}) {
   return [value.type || "", value.provider_name || value.provider_id || "", value.tool_name || ""].join("::");
 }
 
-function handleTriggerFormChange() {
-  renderTriggerForm();
+function handleTriggerFormChange(event) {
+  const changedInsidePluginPanel = Boolean(
+    event?.target?.closest && event.target.closest("#trigger-plugin-fields")
+  );
+  if (!changedInsidePluginPanel) {
+    renderTriggerForm();
+  }
   try {
     state.triggerSelection = currentTriggerSelection();
-    localStorage.setItem(TRIGGER_SELECTION_KEY, JSON.stringify(state.triggerSelection));
+    saveTriggerSelection();
     setPanelStatus(
       els.triggerStatus,
       triggerTypeLabel(state.triggerSelection.type),
@@ -1632,10 +1677,17 @@ function handleTriggerFormChange() {
 function renderTriggerForm() {
   const type = els.triggerType.value || "user-input";
   els.triggerWebhookFields.classList.toggle("is-hidden", type !== "webhook");
+  els.triggerPluginFields.classList.toggle("is-hidden", type !== "plugin");
   els.triggerScheduleFields.classList.toggle("is-hidden", type !== "schedule");
   const cronMode = type === "schedule" && els.triggerScheduleMode.value === "cron";
   els.triggerScheduleVisual.classList.toggle("is-hidden", cronMode);
   els.triggerScheduleCronField.classList.toggle("is-hidden", !cronMode);
+  if (type === "plugin") {
+    renderPluginTriggerForm();
+    if (!state.pluginTriggers.loaded && !state.pluginTriggers.loading) {
+      loadTriggerProviders();
+    }
+  }
   setPanelStatus(els.triggerStatus, triggerTypeLabel(type), type === "user-input" ? "muted" : "ok");
 }
 
@@ -1655,6 +1707,38 @@ function currentTriggerSelection() {
       status_code: boundedNumber(els.triggerWebhookStatusCode.value, 100, 599, 200),
       response_body: els.triggerWebhookResponse.value || "",
       timeout: boundedNumber(els.triggerWebhookTimeout.value, 1, 300, 30),
+    };
+  }
+  if (type === "plugin") {
+    const event = selectedPluginTriggerEvent();
+    if (!event) {
+      throw new Error("Select a Plugin Trigger provider event.");
+    }
+    const subscriptionId = els.triggerPluginSubscription.value;
+    if (!subscriptionId) {
+      throw new Error("Select an existing Dify Trigger subscription.");
+    }
+    const eventParameters = {};
+    for (const schema of event.parameters || []) {
+      const name = schemaVariable(schema);
+      if (!name) {
+        continue;
+      }
+      const field = els.triggerPluginParameters.querySelector(`[data-trigger-plugin-param="${cssEscape(name)}"]`);
+      const value = pluginTriggerFieldValue(field, schema);
+      if (schema.required && pluginTriggerValueMissing(value)) {
+        throw new Error(`Plugin Trigger parameter "${localizedLabel(schema.label) || name}" is required.`);
+      }
+      if (!pluginTriggerValueMissing(value)) {
+        eventParameters[name] = { type: "constant", value };
+      }
+    }
+    return {
+      type: "plugin",
+      provider_id: event.provider_id,
+      event_name: event.event_name,
+      subscription_id: subscriptionId,
+      event_parameters: eventParameters,
     };
   }
   const mode = els.triggerScheduleMode.value || "visual";
@@ -1726,6 +1810,10 @@ function restoreTriggerForm(selection) {
   els.triggerScheduleWeekdays.value = (visual.weekdays || ["mon"]).join(",");
   els.triggerScheduleMonthlyDays.value = (visual.monthly_days || [1]).join(",");
   els.triggerScheduleCron.value = value.cron_expression || "0 9 * * *";
+  if (value.type === "plugin") {
+    state.pluginTriggers.keyword = "";
+    els.triggerPluginSearch.value = "";
+  }
 }
 
 function loadTriggerSelection() {
@@ -1748,8 +1836,262 @@ function triggerTypeLabel(type) {
   return {
     "user-input": "User Input",
     webhook: "Webhook",
+    plugin: "Plugin Trigger",
     schedule: "Schedule",
   }[type] || type;
+}
+
+function saveTriggerSelection() {
+  localStorage.setItem(
+    TRIGGER_SELECTION_KEY,
+    JSON.stringify(state.triggerSelection || { type: "user-input" })
+  );
+}
+
+async function loadTriggerProviders() {
+  const keyword = els.triggerPluginSearch.value.trim();
+  const params = new URLSearchParams();
+  if (keyword) {
+    params.set("keyword", keyword);
+  }
+  try {
+    state.pluginTriggers.loading = true;
+    els.triggerPluginRefresh.disabled = true;
+    els.triggerPluginMessage.textContent = "Loading installed Trigger Providers...";
+    const suffix = params.toString() ? `?${params.toString()}` : "";
+    const data = await requestJson(`/api/dify/trigger-providers${suffix}`);
+    state.pluginTriggers.items = Array.isArray(data.data) ? data.data : [];
+    state.pluginTriggers.loaded = true;
+    state.pluginTriggers.keyword = keyword;
+    renderPluginTriggerForm();
+    const selected = selectedPluginTriggerEvent();
+    if (selected) {
+      await loadTriggerSubscriptions(selected.provider_id);
+    }
+    renderPluginTriggerForm();
+  } catch (error) {
+    state.pluginTriggers.items = [];
+    state.pluginTriggers.subscriptions = [];
+    state.pluginTriggers.loaded = true;
+    renderPluginTriggerForm(error.message);
+  } finally {
+    state.pluginTriggers.loading = false;
+    els.triggerPluginRefresh.disabled = false;
+  }
+}
+
+async function loadTriggerSubscriptions(providerId) {
+  state.pluginTriggers.subscriptions = [];
+  if (!providerId) {
+    renderPluginTriggerForm();
+    return;
+  }
+  try {
+    els.triggerPluginMessage.textContent = "Loading existing subscriptions...";
+    const data = await requestJson(
+      `/api/dify/trigger-subscriptions?provider_id=${encodeURIComponent(providerId)}`
+    );
+    state.pluginTriggers.subscriptions = Array.isArray(data.data) ? data.data : [];
+  } catch (error) {
+    state.pluginTriggers.subscriptions = [];
+    renderPluginTriggerForm(error.message);
+  }
+}
+
+function renderPluginTriggerForm(errorMessage = "") {
+  const saved = state.triggerSelection?.type === "plugin" ? state.triggerSelection : {};
+  const currentKey = els.triggerPluginEvent.value
+    || pluginTriggerEventKey(saved.provider_id, saved.event_name);
+  const visibleItems = state.pluginTriggers.items.filter((item) => {
+    const needle = els.triggerPluginSearch.value.trim().toLowerCase();
+    if (!needle) {
+      return true;
+    }
+    return [
+      item.provider_id,
+      item.provider_label,
+      item.event_name,
+      item.event_label,
+      item.description,
+      item.event_description,
+    ].filter(Boolean).join(" ").toLowerCase().includes(needle);
+  });
+  const options = [new Option("Select an installed trigger event", "")];
+  for (const item of visibleItems) {
+    options.push(
+      new Option(
+        `${item.provider_label || item.provider_name || item.provider_id} · ${item.event_label || item.event_name}`,
+        pluginTriggerEventKey(item.provider_id, item.event_name)
+      )
+    );
+  }
+  els.triggerPluginEvent.replaceChildren(...options);
+  if (visibleItems.some((item) => pluginTriggerEventKey(item.provider_id, item.event_name) === currentKey)) {
+    els.triggerPluginEvent.value = currentKey;
+  }
+
+  const event = selectedPluginTriggerEvent();
+  const subscriptionOptions = [new Option("Select a configured subscription", "")];
+  for (const item of state.pluginTriggers.subscriptions) {
+    subscriptionOptions.push(
+      new Option(
+        `${item.name || item.id}${item.workflows_in_use ? ` · ${item.workflows_in_use} workflow(s)` : ""}`,
+        item.id
+      )
+    );
+  }
+  els.triggerPluginSubscription.replaceChildren(...subscriptionOptions);
+  const savedSubscription = String(saved.subscription_id || "");
+  if (state.pluginTriggers.subscriptions.some((item) => item.id === savedSubscription)) {
+    els.triggerPluginSubscription.value = savedSubscription;
+  }
+
+  renderPluginTriggerParameters(event, saved);
+  if (errorMessage) {
+    els.triggerPluginMessage.textContent = errorMessage;
+    return;
+  }
+  if (!state.pluginTriggers.loaded) {
+    els.triggerPluginMessage.textContent = "Select Plugin Trigger to load installed providers.";
+  } else if (!state.pluginTriggers.items.length) {
+    els.triggerPluginMessage.textContent = "No installed Trigger Provider found in Dify.";
+  } else if (!event) {
+    els.triggerPluginMessage.textContent = `${state.pluginTriggers.items.length} event(s) found.`;
+  } else if (!state.pluginTriggers.subscriptions.length) {
+    els.triggerPluginMessage.textContent = "No existing subscription for this provider. Create one in Dify first.";
+  } else {
+    els.triggerPluginMessage.textContent = `${state.pluginTriggers.subscriptions.length} subscription(s) available.`;
+  }
+}
+
+function renderPluginTriggerParameters(event, saved) {
+  if (!event) {
+    els.triggerPluginParameters.replaceChildren(emptyState("Select an event to configure its constant parameters."));
+    return;
+  }
+  const schemas = Array.isArray(event.parameters) ? event.parameters : [];
+  if (!schemas.length) {
+    els.triggerPluginParameters.replaceChildren(emptyState("This event has no parameters."));
+    return;
+  }
+  const savedMatches = saved.provider_id === event.provider_id && saved.event_name === event.event_name;
+  const values = savedMatches && saved.event_parameters && typeof saved.event_parameters === "object"
+    ? saved.event_parameters
+    : {};
+  const section = document.createElement("div");
+  section.className = "tool-config-section";
+  const heading = document.createElement("div");
+  heading.className = "tool-config-heading";
+  heading.textContent = `EVENT PARAMETERS · ${schemas.length}`;
+  section.append(heading);
+  for (const schema of schemas) {
+    section.append(pluginTriggerParameterField(schema, values[schemaVariable(schema)]));
+  }
+  els.triggerPluginParameters.replaceChildren(section);
+}
+
+function pluginTriggerParameterField(schema, configured) {
+  const name = schemaVariable(schema);
+  const wrapper = document.createElement("label");
+  wrapper.className = "tool-config-field";
+  const label = document.createElement("span");
+  label.className = "tool-config-label";
+  label.textContent = `${localizedLabel(schema.label) || name}${schema.required ? " *" : ""}`;
+  const meta = document.createElement("span");
+  meta.className = "tool-config-meta";
+  meta.textContent = `${name} · ${normalizedSchemaType(schema)} · constant`;
+  wrapper.append(label, meta);
+
+  const value = configured && typeof configured === "object" && "value" in configured
+    ? configured.value
+    : schema.default;
+  const type = normalizedSchemaType(schema);
+  let field;
+  if (type === "boolean" || type === "checkbox") {
+    const line = document.createElement("span");
+    line.className = "compact-checkbox";
+    field = document.createElement("input");
+    field.type = "checkbox";
+    field.checked = value === true || String(value).toLowerCase() === "true";
+    line.append(field, document.createTextNode("Enabled"));
+    wrapper.append(line);
+  } else if (type === "select" || type === "dynamic-select") {
+    field = document.createElement("select");
+    const options = Array.isArray(schema.options) ? schema.options : [];
+    field.append(new Option("Select a value", ""));
+    for (const option of options) {
+      field.append(new Option(localizedLabel(option.label) || String(option.value), String(option.value)));
+    }
+    field.value = value === undefined || value === null ? "" : String(value);
+    wrapper.append(field);
+  } else {
+    field = document.createElement("input");
+    field.type = type === "number" ? "number" : "text";
+    field.value = value === undefined || value === null
+      ? ""
+      : typeof value === "object"
+      ? JSON.stringify(value)
+      : String(value);
+    field.placeholder = localizedLabel(schema.description) || "Constant value";
+    wrapper.append(field);
+  }
+  field.dataset.triggerPluginParam = name;
+  field.dataset.triggerPluginParamType = type;
+  return wrapper;
+}
+
+function pluginTriggerFieldValue(field, schema) {
+  if (!field) {
+    return schema.default;
+  }
+  const type = normalizedSchemaType(schema);
+  if (type === "boolean" || type === "checkbox") {
+    return Boolean(field.checked);
+  }
+  const raw = String(field.value ?? "").trim();
+  if (!raw) {
+    return "";
+  }
+  if (type === "number") {
+    const number = Number(raw);
+    return Number.isNaN(number) ? raw : number;
+  }
+  if (["object", "array", "files"].includes(type)) {
+    try {
+      return JSON.parse(raw);
+    } catch (error) {
+      throw new Error(`Plugin Trigger parameter "${schemaVariable(schema)}" must be valid JSON.`);
+    }
+  }
+  return raw;
+}
+
+function pluginTriggerValueMissing(value) {
+  return value === undefined || value === null || value === ""
+    || (Array.isArray(value) && value.length === 0);
+}
+
+function selectedPluginTriggerEvent() {
+  const [providerId, eventName] = splitPluginTriggerEventKey(els.triggerPluginEvent.value);
+  return state.pluginTriggers.items.find(
+    (item) => item.provider_id === providerId && item.event_name === eventName
+  );
+}
+
+function pluginTriggerEventKey(providerId, eventName) {
+  return `${String(providerId || "")}::${String(eventName || "")}`;
+}
+
+function splitPluginTriggerEventKey(value) {
+  const separator = String(value || "").indexOf("::");
+  if (separator < 0) {
+    return ["", ""];
+  }
+  return [value.slice(0, separator), value.slice(separator + 2)];
+}
+
+function cssEscape(value) {
+  return window.CSS?.escape ? window.CSS.escape(String(value)) : String(value).replace(/["\\]/g, "\\$&");
 }
 
 function splitValues(value) {
@@ -1946,6 +2288,23 @@ function triggerSelectionFromPlan(plan) {
     };
   }
 
+  const plugin = nodes.find((node) => node?.type === "trigger-plugin");
+  if (plugin) {
+    const params = plugin.params && typeof plugin.params === "object" ? plugin.params : {};
+    const raw = params._raw_data && typeof params._raw_data === "object" ? params._raw_data : params;
+    return {
+      type: "plugin",
+      provider_id: raw.provider_id || "",
+      event_name: raw.event_name || "",
+      subscription_id: raw.subscription_id || "",
+      event_parameters: raw.event_parameters && typeof raw.event_parameters === "object"
+        ? raw.event_parameters
+        : raw.config && typeof raw.config === "object"
+        ? raw.config
+        : {},
+    };
+  }
+
   const schedule = nodes.find((node) => node?.type === "trigger-schedule");
   if (schedule) {
     const params = schedule.params && typeof schedule.params === "object" ? schedule.params : {};
@@ -1976,7 +2335,7 @@ async function handleRun() {
     const triggerNodes = workflowTriggerNodes(state.lastResponse.plan);
     if (triggerNodes.length && (state.lastResponse.app_id || "") === valueOf("#run-app-id")) {
       throw new Error(
-        "This workflow starts from a trigger. Publish it, then use its Webhook URL or schedule instead of Run Draft inputs."
+        "This workflow starts from a trigger. Publish it, then invoke its Webhook, schedule, or external plugin event instead of Run Draft inputs."
       );
     }
     const payload = {
@@ -3034,6 +3393,15 @@ function nodeDetails(node) {
               Array.isArray(visual.monthly_days) ? visual.monthly_days.join(",") : "",
             ].filter(Boolean).join(" · ")
       ),
+    ];
+  }
+  if (node.type === "trigger-plugin" && !params._raw_data) {
+    return [
+      nodeLine("Provider", [params.provider_name || params.provider_id, params.provider_type].filter(Boolean).join(" / ") || "not configured"),
+      nodeLine("Event", params.event_label || params.event_name || "not configured"),
+      nodeLine("Subscription", params.subscription_id || "not configured"),
+      nodeLine("Parameters", toolBindingSummary(params.event_parameters || {})),
+      nodeLine("Outputs", externalOutputSummary(params)),
     ];
   }
   if (node.type === "tool" && !params._raw_data) {

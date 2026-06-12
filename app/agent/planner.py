@@ -25,9 +25,9 @@ question-classifier, parameter-extractor, variable-aggregator,
 document-extractor, list-operator, knowledge-retrieval, human-input,
 iteration, loop. iteration-start, loop-start, and loop-end are internal
 container children only; never place them in top-level nodes.
-Do not generate datasource, datasource-empty, trigger-plugin, or knowledge-index
-nodes in new workflows. Generate trigger-webhook or trigger-schedule only when
-selected_trigger explicitly contains that trigger type. When
+Do not generate datasource, datasource-empty, or knowledge-index nodes in new
+workflows. Generate trigger-webhook, trigger-plugin, or trigger-schedule only
+when selected_trigger explicitly contains that trigger type. When
 selected_trigger.type is user-input, keep a normal start entry. A trigger entry
 replaces the start node; start and trigger nodes must never coexist.
 For trigger-webhook, copy the selected method, content_type, headers, params,
@@ -46,6 +46,14 @@ LLM prompt and never use {{#<schedule_node_id>.time#}} or similar schedule-node
 references. In cron mode include only mode, cron_expression, and timezone; do
 not include frequency or visual_config. In visual mode include frequency,
 visual_config, and timezone; do not include cron_expression.
+For trigger-plugin, copy provider_id, provider_type, provider_name, plugin_id,
+plugin_unique_identifier, event_name, event_label, subscription_id,
+event_parameters, parameters_schema, and output_schema exactly from
+selected_trigger. Never invent or change the provider, event, subscription, or
+plugin identifiers. Event parameters must use
+{"type":"constant","value":...}; Plugin Trigger has no upstream variables.
+Downstream nodes may reference only properties declared in
+selected_trigger.output_schema, for example {{#trigger_1.issue#}}.
 Generate agent nodes only when the user explicitly asks for an Agent, 智能体,
 autonomous planning, multi-step execution, or self-directed reasoning, and
 selected_agents is non-empty in the user message. Never invent agent strategy
@@ -474,7 +482,7 @@ def _prepare_fallback_for_trigger(
     if not isinstance(trigger_selection, dict):
         return payload
     trigger_type = str(trigger_selection.get("type") or "user-input")
-    if trigger_type not in {"webhook", "schedule"}:
+    if trigger_type not in {"webhook", "schedule", "plugin"}:
         return payload
 
     data = json.loads(json.dumps(payload, ensure_ascii=False))
@@ -492,6 +500,26 @@ def _prepare_fallback_for_trigger(
     params = llm_node.setdefault("params", {})
     if trigger_type == "schedule":
         params["user_prompt"] = f"请执行以下定时工作要求，并生成本次执行结果：\n{message}"
+        return data
+    if trigger_type == "plugin":
+        output_schema = (
+            trigger_selection.get("output_schema")
+            if isinstance(trigger_selection.get("output_schema"), dict)
+            else {}
+        )
+        properties = (
+            output_schema.get("properties")
+            if isinstance(output_schema.get("properties"), dict)
+            else {}
+        )
+        variable = next(iter(properties), "")
+        if variable:
+            params["user_prompt"] = (
+                f"请根据插件事件本次传入的数据完成任务：{{{{#start.{variable}#}}}}\n"
+                f"任务要求：{message}"
+            )
+        else:
+            params["user_prompt"] = f"请处理本次插件事件，并完成任务：\n{message}"
         return data
 
     declared: list[str] = []

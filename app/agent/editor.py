@@ -38,10 +38,13 @@ Prefer the smallest safe change that satisfies the request.
 Preserve existing node ids when a node keeps the same purpose.
 Preserve existing tool, agent, datasource, datasource-empty, knowledge-index,
 trigger-webhook, trigger-plugin, and trigger-schedule nodes exactly unless the
-user explicitly asks to remove them. Do not add datasource, trigger-plugin, or
-knowledge-index nodes. Add trigger-webhook or trigger-schedule only when
+user explicitly asks to remove them. Do not add datasource or knowledge-index
+nodes. Add trigger-webhook, trigger-plugin, or trigger-schedule only when
 selected_trigger explicitly contains that type; it replaces start and copies
-the selected configuration exactly. When selected_trigger.type is user-input,
+the selected configuration exactly. For trigger-plugin, never invent or change
+provider_id, event_name, subscription_id, plugin identifiers, schemas, or event
+parameter bindings; copy them from selected_trigger, and only reference outputs
+declared in selected_trigger.output_schema. When selected_trigger.type is user-input,
 use a normal start entry instead. A trigger-schedule node has no time output;
 when readable date/time is needed, format {{#sys.timestamp#}} in a code node
 using the configured timezone, then give the LLM the code node's date/datetime

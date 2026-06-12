@@ -177,6 +177,11 @@ h2 {
   min-width: 0;
 }
 
+#trigger-plugin-parameters {
+  max-height: 320px;
+  overflow: auto;
+}
+
 .field-help {
   color: var(--muted);
   font-size: 11px;

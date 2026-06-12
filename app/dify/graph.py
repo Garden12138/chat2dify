@@ -392,6 +392,20 @@ def _params_from_dify_node_data(node_type: str, data: dict[str, Any]) -> dict[st
                 "timeout": data.get("timeout", 30),
                 "variables": deepcopy(data.get("variables") or []),
             }
+        case "trigger-plugin":
+            if all(data.get(key) for key in ("provider_id", "event_name", "subscription_id")):
+                return {
+                    key: deepcopy(value)
+                    for key, value in data.items()
+                    if key not in COMMON_DATA_KEYS
+                }
+            return {
+                "_raw_data": {
+                    key: deepcopy(value)
+                    for key, value in data.items()
+                    if key not in COMMON_DATA_KEYS
+                }
+            }
         case "trigger-schedule":
             mode = data.get("mode", "visual")
             if mode == "cron":

@@ -380,6 +380,37 @@ Create a daily schedule workflow:
 }
 ```
 
+Discover installed Plugin Trigger events and their existing subscriptions:
+
+```bash
+curl 'http://127.0.0.1:8000/api/dify/trigger-providers?keyword=github'
+curl 'http://127.0.0.1:8000/api/dify/trigger-subscriptions?provider_id=langgenius/github/github'
+```
+
+Create a Plugin Trigger workflow by selecting the provider event and an
+existing subscription in the Web UI Trigger panel, or by passing only the
+selected identifiers and constant event parameters:
+
+```json
+{
+  "message": "收到新的售后工单事件后，分析事件中的 title 和 description，生成处理建议并返回 answer",
+  "app_name": "插件事件售后分析",
+  "trigger_selection": {
+    "type": "plugin",
+    "provider_id": "INSTALLED_PROVIDER_ID",
+    "event_name": "INSTALLED_EVENT_NAME",
+    "subscription_id": "EXISTING_SUBSCRIPTION_ID",
+    "event_parameters": {
+      "scope": {"type": "constant", "value": "after-sales"}
+    }
+  }
+}
+```
+
+chat2dify resolves provider, plugin, event schema, and output schema metadata
+again from Dify before planning. It does not accept guessed plugin identifiers,
+create subscriptions, or handle Trigger Provider credentials.
+
 Create and Modify only update the Dify draft. Publishing is always explicit:
 
 ```bash
@@ -492,10 +523,14 @@ user explicitly asks for an Agent/智能体/autonomous multi-step flow. Agent
 parameters use the same Dify `{type,value}` input structure, and Agent
 tool-selector parameters must bind tools selected in the Web UI Tools panel.
 Existing `_raw_data` agent nodes are still preserved as passthrough for old
-draft compatibility. `trigger-webhook` and `trigger-schedule` are structured
-entry nodes that can be configured in the Web UI, generated only from an
-explicit `trigger_selection`, published explicitly, and enabled or disabled
-after publication. `trigger-plugin`, `datasource`, `datasource-empty`, and
+draft compatibility. `trigger-webhook`, `trigger-plugin`, and
+`trigger-schedule` are structured entry nodes that can be configured in the Web
+UI, generated only from an explicit `trigger_selection`, published explicitly,
+and enabled or disabled after publication. Plugin Trigger creation only uses
+Trigger Providers and subscriptions already configured in Dify; event
+parameters are constant bindings and downstream references are restricted to
+the selected event's output schema. Legacy `_raw_data` Plugin Trigger nodes
+remain passthrough-compatible. `datasource`, `datasource-empty`, and
 `knowledge-index` remain passthrough-only external dependency nodes.
 
 Example file workflow request:

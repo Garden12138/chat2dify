@@ -20,6 +20,10 @@ from app.dify.client import (
     DifyPublishResult,
     DifyToolListItem,
     DifyToolListResult,
+    DifyTriggerProviderListItem,
+    DifyTriggerProviderListResult,
+    DifyTriggerSubscriptionListItem,
+    DifyTriggerSubscriptionListResult,
     DifyWebhookTrigger,
     DifyWorkflowTrigger,
 )
@@ -69,6 +73,10 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert "Agent Strategies" in index.text
     assert 'id="trigger-form"' in index.text
     assert 'id="trigger-type"' in index.text
+    assert 'id="trigger-plugin-fields"' in index.text
+    assert 'id="trigger-plugin-event"' in index.text
+    assert 'id="trigger-plugin-subscription"' in index.text
+    assert 'id="trigger-plugin-parameters"' in index.text
     assert 'id="publish-form"' in index.text
     assert 'id="workflow-trigger-list"' in index.text
     assert 'id="result-tabs"' in index.text
@@ -433,6 +441,262 @@ def test_list_dify_agent_strategies_api_returns_slim_strategy_list(monkeypatch) 
     assert data["providers"] == ["langgenius/agent/react"]
     assert data["data"][0]["agent_strategy_name"] == "react"
     assert data["data"][0]["output_schema"] == {"properties": {"answer": {"type": "string"}}}
+
+
+def test_list_dify_trigger_providers_and_subscriptions_api(monkeypatch) -> None:
+    seen = {}
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def list_trigger_providers(self, *, keyword=None):
+            seen["keyword"] = keyword
+            return DifyTriggerProviderListResult(
+                data=[
+                    DifyTriggerProviderListItem(
+                        provider_id="langgenius/github/github",
+                        provider_type="trigger",
+                        provider_name="langgenius/github/github",
+                        provider_label="GitHub",
+                        description="GitHub events",
+                        event_name="issue_created",
+                        event_label="Issue created",
+                        event_description="New issue",
+                        parameters=[{"name": "repository", "type": "string", "required": True}],
+                        output_schema={"properties": {"title": {"type": "string"}}},
+                        plugin_id="langgenius/github",
+                        plugin_unique_identifier="langgenius/github:1.0.0",
+                    )
+                ],
+                count=1,
+                providers=["langgenius/github/github"],
+            )
+
+        def list_trigger_subscriptions(self, provider_id):
+            seen["provider_id"] = provider_id
+            return DifyTriggerSubscriptionListResult(
+                data=[
+                    DifyTriggerSubscriptionListItem(
+                        id="sub-1",
+                        name="GitHub",
+                        provider_id=provider_id,
+                        credential_type="oauth2",
+                        endpoint="https://example.test/hook",
+                        parameters={},
+                        properties={},
+                        workflows_in_use=0,
+                    )
+                ],
+                count=1,
+                provider_id=provider_id,
+            )
+
+    monkeypatch.setattr("app.main.load_settings", _test_settings)
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+
+    with TestClient(app) as client:
+        providers = client.get("/api/dify/trigger-providers?keyword=issue")
+        subscriptions = client.get(
+            "/api/dify/trigger-subscriptions?provider_id=langgenius%2Fgithub%2Fgithub"
+        )
+
+    assert providers.status_code == 200
+    assert subscriptions.status_code == 200
+    assert seen == {
+        "keyword": "issue",
+        "provider_id": "langgenius/github/github",
+    }
+    assert providers.json()["data"][0]["event_name"] == "issue_created"
+    assert subscriptions.json()["data"][0]["id"] == "sub-1"
+
+
+def test_draft_workflow_hydrates_plugin_trigger_before_planning(monkeypatch) -> None:
+    seen = {}
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def list_trigger_providers(self, *, keyword=None):
+            return DifyTriggerProviderListResult(
+                data=[
+                    DifyTriggerProviderListItem(
+                        provider_id="provider-1",
+                        provider_type="trigger",
+                        provider_name="provider-1",
+                        provider_label="Provider",
+                        description="",
+                        event_name="created",
+                        event_label="Created",
+                        event_description="",
+                        parameters=[{"name": "scope", "type": "string", "required": True}],
+                        output_schema={"properties": {"title": {"type": "string"}}},
+                        plugin_id="trusted-plugin",
+                        plugin_unique_identifier="trusted-plugin:1",
+                    )
+                ],
+                count=1,
+                providers=["provider-1"],
+            )
+
+        def list_trigger_subscriptions(self, provider_id):
+            return DifyTriggerSubscriptionListResult(
+                data=[
+                    DifyTriggerSubscriptionListItem(
+                        id="sub-1",
+                        name="Configured",
+                        provider_id=provider_id,
+                        credential_type="oauth2",
+                        endpoint="",
+                        parameters={},
+                        properties={},
+                        workflows_in_use=0,
+                    )
+                ],
+                count=1,
+                provider_id=provider_id,
+            )
+
+    class TriggerAwarePlanner:
+        def __init__(self, _settings):
+            pass
+
+        def generate(self, message, *, app_name=None, dsl_version, trigger_selection=None, **_kwargs):
+            seen["trigger_selection"] = trigger_selection
+            normalized = normalize_plan_payload(
+                fallback_plan(message, app_name=app_name).model_dump(),
+                trigger_selection=trigger_selection,
+            )
+            plan = WorkflowPlan.model_validate(normalized.payload)
+            return PlannerResult(
+                plan=plan,
+                raw_plan=plan.model_dump(),
+                mode="llm",
+                attempts=1,
+                used_fallback=False,
+                repaired=False,
+            )
+
+    monkeypatch.setattr("app.main.load_settings", _test_settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+    monkeypatch.setattr("app.main.WorkflowPlanner", TriggerAwarePlanner)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/draft",
+            json={
+                "message": "Handle the selected plugin event",
+                "trigger_selection": {
+                    "type": "plugin",
+                    "provider_id": "provider-1",
+                    "event_name": "created",
+                    "subscription_id": "sub-1",
+                    "plugin_id": "untrusted-plugin",
+                    "event_parameters": {
+                        "scope": {"type": "constant", "value": "support"},
+                    },
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    assert seen["trigger_selection"]["plugin_id"] == "trusted-plugin"
+    assert seen["trigger_selection"]["parameters_schema"][0]["name"] == "scope"
+    assert seen["trigger_selection"]["subscription_id"] == "sub-1"
+    assert any(node["type"] == "trigger-plugin" for node in response.json()["plan"]["nodes"])
+
+
+def test_draft_workflow_rejects_plugin_subscription_from_another_provider(monkeypatch) -> None:
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def list_trigger_providers(self, *, keyword=None):
+            return DifyTriggerProviderListResult(
+                data=[
+                    DifyTriggerProviderListItem(
+                        provider_id="provider-1",
+                        provider_type="trigger",
+                        provider_name="provider-1",
+                        provider_label="Provider",
+                        description="",
+                        event_name="created",
+                        event_label="Created",
+                        event_description="",
+                        parameters=[],
+                        output_schema={},
+                        plugin_id="plugin",
+                        plugin_unique_identifier="plugin:1",
+                    )
+                ],
+                count=1,
+                providers=["provider-1"],
+            )
+
+        def list_trigger_subscriptions(self, provider_id):
+            return DifyTriggerSubscriptionListResult(
+                data=[
+                    DifyTriggerSubscriptionListItem(
+                        id="sub-1",
+                        name="Wrong provider",
+                        provider_id="provider-2",
+                        credential_type="oauth2",
+                        endpoint="",
+                        parameters={},
+                        properties={},
+                        workflows_in_use=0,
+                    )
+                ],
+                count=1,
+                provider_id=provider_id,
+            )
+
+    monkeypatch.setattr("app.main.load_settings", _test_settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/draft",
+            json={
+                "message": "Handle event",
+                "trigger_selection": {
+                    "type": "plugin",
+                    "provider_id": "provider-1",
+                    "event_name": "created",
+                    "subscription_id": "sub-1",
+                },
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "PLUGIN_TRIGGER_SUBSCRIPTION_NOT_FOUND"
 
 
 def test_draft_workflow_passes_tool_selections_to_planner(monkeypatch) -> None:
@@ -1005,6 +1269,12 @@ def test_apply_workflow_modification_with_preview_plan_does_not_replan(monkeypat
                 "message": "apply reviewed preview",
                 "expected_hash": "hash-1",
                 "plan": preview_plan.model_dump(),
+                "trigger_selection": {
+                    "type": "plugin",
+                    "provider_id": "stale-provider",
+                    "event_name": "stale-event",
+                    "subscription_id": "stale-subscription",
+                },
             },
         )
 
@@ -1017,6 +1287,7 @@ def test_apply_workflow_modification_with_preview_plan_does_not_replan(monkeypat
     assert data["sync"]["result"] == "success"
     assert seen["sync_hash"] == "hash-1"
     assert seen["sync_graph"]["nodes"]
+    assert any(node["data"]["type"] == "start" for node in seen["sync_graph"]["nodes"])
 
 
 def test_apply_workflow_modification_with_preview_plan_preserves_preview_dataset_ids(monkeypatch) -> None:

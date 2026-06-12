@@ -81,6 +81,175 @@ def test_schedule_selection_compiles_visual_configuration() -> None:
     assert not [issue for issue in validate_plan(plan) if issue.severity == "error"]
 
 
+def test_plugin_trigger_selection_compiles_structured_configuration() -> None:
+    payload = fallback_plan("处理 GitHub Issue").model_dump()
+    llm = next(node for node in payload["nodes"] if node["type"] == "llm")
+    llm["params"]["user_prompt"] = "请分析新 Issue：{{#start.title#}}"
+    normalized = normalize_plan_payload(
+        payload,
+        trigger_selection={
+            "type": "plugin",
+            "provider_id": "langgenius/github/github",
+            "provider_type": "trigger",
+            "provider_name": "langgenius/github/github",
+            "plugin_id": "langgenius/github",
+            "plugin_unique_identifier": "langgenius/github:1.0.0",
+            "event_name": "issue_created",
+            "event_label": "Issue 创建",
+            "subscription_id": "sub-1",
+            "event_parameters": {
+                "repository": {"type": "constant", "value": "garden/project"},
+            },
+            "parameters_schema": [
+                {"name": "repository", "type": "string", "required": True},
+            ],
+            "output_schema": {
+                "type": "object",
+                "properties": {"title": {"type": "string"}},
+            },
+        },
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    trigger = next(node for node in plan.nodes if node.type == "trigger-plugin")
+    graph = yaml.safe_load(_compiler().compile(plan))["workflow"]["graph"]
+    graph_trigger = next(node for node in graph["nodes"] if node["data"]["type"] == "trigger-plugin")
+
+    assert not any(node.type == "start" for node in plan.nodes)
+    assert trigger.params["subscription_id"] == "sub-1"
+    assert trigger.params["event_parameters"]["repository"] == {
+        "type": "constant",
+        "value": "garden/project",
+    }
+    assert graph_trigger["data"]["provider_id"] == "langgenius/github/github"
+    assert graph_trigger["data"]["event_name"] == "issue_created"
+    assert graph_trigger["data"]["output_schema"]["properties"]["title"]["type"] == "string"
+    assert not [issue for issue in validate_plan(plan) if issue.severity == "error"]
+
+
+def test_plugin_trigger_code_inputs_are_bound_from_explicit_edge_handles() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "name": "RSS订阅更新摘要工作流",
+            "nodes": [
+                {
+                    "id": "trigger",
+                    "type": "trigger-plugin",
+                    "title": "接收订阅更新",
+                    "params": {
+                        "provider_id": "langgenius/rsshub_trigger/rsshub_trigger",
+                        "plugin_id": "langgenius/rsshub_trigger",
+                        "plugin_unique_identifier": "langgenius/rsshub_trigger:0.0.6",
+                        "event_name": "feed_update",
+                        "subscription_id": "sub-1",
+                        "output_schema": {
+                            "type": "object",
+                            "properties": {
+                                "feed": {"type": "object", "properties": {}},
+                                "data": {"type": "object", "properties": {}},
+                            },
+                        },
+                    },
+                },
+                {
+                    "id": "format",
+                    "type": "code",
+                    "title": "整理订阅条目",
+                    "params": {
+                        "inputs": {
+                            "feed": {"type": "object", "children": {}},
+                            "data": {"type": "object", "children": {}},
+                        },
+                        "code": (
+                            "def main(feed: dict, data: dict) -> dict:\n"
+                            "    return {\"feed_title\": feed.get(\"title\", \"\"), "
+                            "\"item_count\": len(data.get(\"items_new\", []))}\n"
+                        ),
+                        "outputs": {
+                            "feed_title": {"type": "string"},
+                            "item_count": {"type": "number"},
+                        },
+                    },
+                },
+                {
+                    "id": "end",
+                    "type": "end",
+                    "params": {
+                        "outputs": [
+                            {
+                                "variable": "answer",
+                                "value_selector": ["format", "feed_title"],
+                            }
+                        ]
+                    },
+                },
+            ],
+            "edges": [
+                {
+                    "source": "trigger",
+                    "target": "format",
+                    "source_handle": "feed",
+                    "target_handle": "feed",
+                },
+                {
+                    "source": "trigger",
+                    "target": "format",
+                    "source_handle": "data",
+                    "target_handle": "data",
+                },
+                {"source": "format", "target": "end"},
+            ],
+        }
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    code = next(node for node in plan.nodes if node.id == "format")
+
+    assert code.params["variables"] == [
+        {
+            "variable": "feed",
+            "value_selector": ["trigger", "feed"],
+            "value_type": "object",
+        },
+        {
+            "variable": "data",
+            "value_selector": ["trigger", "data"],
+            "value_type": "object",
+        },
+    ]
+    assert not [issue for issue in validate_plan(plan) if issue.severity == "error"]
+
+    graph = yaml.safe_load(_compiler().compile(plan))["workflow"]["graph"]
+    graph_code = next(node for node in graph["nodes"] if node["id"] == "format")
+    assert graph_code["data"]["variables"] == code.params["variables"]
+
+
+def test_plugin_trigger_rejects_missing_required_parameter_and_variable_binding() -> None:
+    payload = fallback_plan("处理插件事件").model_dump()
+    normalized = normalize_plan_payload(
+        payload,
+        trigger_selection={
+            "type": "plugin",
+            "provider_id": "provider",
+            "plugin_id": "plugin",
+            "plugin_unique_identifier": "plugin:1",
+            "event_name": "created",
+            "subscription_id": "sub-1",
+            "event_parameters": {
+                "optional": {"type": "variable", "value": ["start", "query"]},
+            },
+            "parameters_schema": [
+                {"name": "repository", "type": "string", "required": True},
+                {"name": "optional", "type": "string", "required": False},
+            ],
+            "output_schema": {"properties": {"title": {"type": "string"}}},
+        },
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    issues = validate_plan(plan)
+
+    assert any(issue.code == "PLAN_PLUGIN_TRIGGER_PARAMETER_REQUIRED" for issue in issues)
+    assert any(issue.code == "PLAN_PLUGIN_TRIGGER_PARAMETER_NOT_CONSTANT" for issue in issues)
+
+
 def test_schedule_time_reference_is_rewritten_to_system_timestamp() -> None:
     payload = fallback_plan("每天生成售后复盘检查清单").model_dump()
     start = next(node for node in payload["nodes"] if node["type"] == "start")

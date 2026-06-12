@@ -184,7 +184,7 @@ class WorkflowTriggerParameter(BaseModel):
 
 
 class WorkflowTriggerSelection(BaseModel):
-    type: Literal["user-input", "webhook", "schedule"] = "user-input"
+    type: Literal["user-input", "webhook", "schedule", "plugin"] = "user-input"
     method: Literal["GET", "POST", "HEAD", "PATCH", "PUT", "DELETE"] = "POST"
     content_type: Literal[
         "application/json",
@@ -211,6 +211,17 @@ class WorkflowTriggerSelection(BaseModel):
         }
     )
     timezone: str = "Asia/Shanghai"
+    provider_id: str | None = None
+    provider_type: str | None = None
+    provider_name: str | None = None
+    plugin_id: str | None = None
+    plugin_unique_identifier: str | None = None
+    event_name: str | None = None
+    event_label: str | None = None
+    subscription_id: str | None = None
+    event_parameters: dict[str, Any] = Field(default_factory=dict)
+    parameters_schema: list[dict[str, Any]] = Field(default_factory=list)
+    output_schema: dict[str, Any] = Field(default_factory=dict)
 
 
 class WorkflowRequest(BaseModel):

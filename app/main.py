@@ -160,6 +160,28 @@ def list_dify_agent_strategies(keyword: str | None = Query(default=None)) -> dic
     return asdict(result)
 
 
+@app.get("/api/dify/trigger-providers")
+def list_dify_trigger_providers(keyword: str | None = Query(default=None)) -> dict:
+    settings = load_settings()
+    try:
+        with DifyClient(settings) as client:
+            result = client.list_trigger_providers(keyword=keyword.strip() if keyword else None)
+    except DifyClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return asdict(result)
+
+
+@app.get("/api/dify/trigger-subscriptions")
+def list_dify_trigger_subscriptions(provider_id: str = Query(min_length=1)) -> dict:
+    settings = load_settings()
+    try:
+        with DifyClient(settings) as client:
+            result = client.list_trigger_subscriptions(provider_id.strip())
+    except DifyClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return asdict(result)
+
+
 @app.post("/api/workflows/draft")
 def draft_workflow(request: WorkflowRequest) -> dict:
     return _draft_workflow(request)
@@ -175,7 +197,8 @@ def _draft_workflow(request: WorkflowRequest, *, task_context: TaskContext | Non
     _ensure_agent_strategy_selection_for_request(request.message, request.agent_selections)
     _ensure_agent_selections_configured(request.agent_selections)
     try:
-        planner_kwargs = _planner_selection_kwargs(request)
+        trigger_selection = _hydrate_trigger_selection(settings, request.trigger_selection)
+        planner_kwargs = _planner_selection_kwargs(request, trigger_selection=trigger_selection)
         if task_context is not None:
             planner_kwargs["task_context"] = task_context
         planner_result = WorkflowPlanner(effective_settings).generate(
@@ -184,6 +207,8 @@ def _draft_workflow(request: WorkflowRequest, *, task_context: TaskContext | Non
             dsl_version=version_info.app_dsl_version,
             **planner_kwargs,
         )
+    except DifyClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     except PlannerError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     if task_context is not None:
@@ -572,7 +597,7 @@ def _modify_workflow(
                     default_dataset_ids=effective_settings.dify_default_dataset_ids,
                     tool_selections=_tool_selection_payloads(request.tool_selections),
                     agent_selections=_agent_selection_payloads(request.agent_selections),
-                    trigger_selection=_trigger_selection_payload(request.trigger_selection),
+                    trigger_selection=None,
                 )
                 plan = WorkflowPlan.model_validate(normalized.payload)
                 raw_plan = plan.model_dump()
@@ -581,7 +606,14 @@ def _modify_workflow(
                     settings=effective_settings,
                 )
             else:
-                edit_kwargs = _planner_selection_kwargs(request)
+                trigger_selection = _hydrate_trigger_selection_with_client(
+                    client,
+                    request.trigger_selection,
+                )
+                edit_kwargs = _planner_selection_kwargs(
+                    request,
+                    trigger_selection=trigger_selection,
+                )
                 if task_context is not None:
                     edit_kwargs["task_context"] = task_context
                 edit_result = WorkflowEditPlanner(effective_settings).generate(
@@ -862,7 +894,7 @@ def _agent_selection_payloads(agent_selections) -> list[dict]:
     return result
 
 
-def _planner_selection_kwargs(request) -> dict:
+def _planner_selection_kwargs(request, *, trigger_selection: dict | None = None) -> dict:
     kwargs: dict = {}
     tool_selections = _tool_selection_payloads(getattr(request, "tool_selections", None))
     agent_selections = _agent_selection_payloads(getattr(request, "agent_selections", None))
@@ -870,7 +902,8 @@ def _planner_selection_kwargs(request) -> dict:
         kwargs["tool_selections"] = tool_selections
     if agent_selections:
         kwargs["agent_selections"] = agent_selections
-    trigger_selection = _trigger_selection_payload(getattr(request, "trigger_selection", None))
+    if trigger_selection is None:
+        trigger_selection = _trigger_selection_payload(getattr(request, "trigger_selection", None))
     if trigger_selection:
         kwargs["trigger_selection"] = trigger_selection
     return kwargs
@@ -884,6 +917,82 @@ def _trigger_selection_payload(trigger_selection) -> dict | None:
     if isinstance(trigger_selection, dict):
         return {key: value for key, value in trigger_selection.items() if value is not None}
     return None
+
+
+def _hydrate_trigger_selection(settings: Settings, trigger_selection) -> dict | None:
+    payload = _trigger_selection_payload(trigger_selection)
+    if not payload or payload.get("type") != "plugin":
+        return payload
+    with DifyClient(settings) as client:
+        return _hydrate_trigger_selection_with_client(client, payload)
+
+
+def _hydrate_trigger_selection_with_client(client: DifyClient, trigger_selection) -> dict | None:
+    payload = _trigger_selection_payload(trigger_selection)
+    if not payload or payload.get("type") != "plugin":
+        return payload
+
+    provider_id = str(payload.get("provider_id") or "").strip()
+    event_name = str(payload.get("event_name") or "").strip()
+    subscription_id = str(payload.get("subscription_id") or "").strip()
+    if not provider_id or not event_name or not subscription_id:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "PLUGIN_TRIGGER_SELECTION_INCOMPLETE",
+                "message": "Plugin Trigger requires provider_id, event_name, and subscription_id.",
+            },
+        )
+
+    providers = client.list_trigger_providers()
+    event = next(
+        (
+            item
+            for item in providers.data
+            if item.provider_id == provider_id and item.event_name == event_name
+        ),
+        None,
+    )
+    if event is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "PLUGIN_TRIGGER_EVENT_NOT_FOUND",
+                "message": "The selected Plugin Trigger provider/event is not installed in Dify.",
+                "provider_id": provider_id,
+                "event_name": event_name,
+            },
+        )
+
+    subscriptions = client.list_trigger_subscriptions(provider_id)
+    subscription = next((item for item in subscriptions.data if item.id == subscription_id), None)
+    if subscription is None or subscription.provider_id != provider_id:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "PLUGIN_TRIGGER_SUBSCRIPTION_NOT_FOUND",
+                "message": "The selected subscription does not belong to the selected Trigger Provider.",
+                "provider_id": provider_id,
+                "subscription_id": subscription_id,
+            },
+        )
+
+    return {
+        "type": "plugin",
+        "provider_id": event.provider_id,
+        "provider_type": event.provider_type,
+        "provider_name": event.provider_name,
+        "plugin_id": event.plugin_id,
+        "plugin_unique_identifier": event.plugin_unique_identifier,
+        "event_name": event.event_name,
+        "event_label": event.event_label,
+        "subscription_id": subscription.id,
+        "event_parameters": payload.get("event_parameters")
+        if isinstance(payload.get("event_parameters"), dict)
+        else {},
+        "parameters_schema": event.parameters,
+        "output_schema": event.output_schema,
+    }
 
 
 def _ensure_agent_strategy_selection_for_request(message: str, agent_selections) -> None:

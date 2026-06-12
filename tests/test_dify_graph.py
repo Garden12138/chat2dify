@@ -398,6 +398,61 @@ def test_decompile_and_compile_external_dependency_nodes_as_passthrough() -> Non
     assert compiled_nodes["webhook"]["data"]["webhook_url"] == "https://example.test/hook"
 
 
+def test_decompile_and_compile_structured_plugin_trigger() -> None:
+    graph = {
+        "nodes": [
+            {
+                "id": "trigger",
+                "type": "custom",
+                "position": {"x": 10, "y": 20},
+                "data": {
+                    "type": "trigger-plugin",
+                    "title": "Issue 创建",
+                    "provider_id": "langgenius/github/github",
+                    "provider_type": "trigger",
+                    "provider_name": "langgenius/github/github",
+                    "plugin_id": "langgenius/github",
+                    "plugin_unique_identifier": "langgenius/github:1.0.0",
+                    "event_name": "issue_created",
+                    "event_label": "Issue 创建",
+                    "subscription_id": "sub-1",
+                    "event_parameters": {
+                        "repository": {"type": "constant", "value": "garden/project"},
+                    },
+                    "parameters_schema": [
+                        {"name": "repository", "type": "string", "required": True},
+                    ],
+                    "output_schema": {
+                        "properties": {"title": {"type": "string"}},
+                    },
+                },
+            },
+            {
+                "id": "end",
+                "type": "custom",
+                "position": {"x": 310, "y": 20},
+                "data": {
+                    "type": "end",
+                    "title": "返回结果",
+                    "outputs": [{"variable": "answer", "value_selector": ["trigger", "title"]}],
+                },
+            },
+        ],
+        "edges": [{"source": "trigger", "target": "end", "sourceHandle": "source", "targetHandle": "target"}],
+    }
+
+    plan = decompile_dify_graph(graph, name="Plugin Trigger")
+    trigger = next(node for node in plan.nodes if node.type == "trigger-plugin")
+    compiled = compile_plan_to_dify_graph(plan, compiler=_compiler(), base_graph=graph)
+    compiled_trigger = next(node for node in compiled["nodes"] if node["id"] == "trigger")
+
+    assert "_raw_data" not in trigger.params
+    assert trigger.params["subscription_id"] == "sub-1"
+    assert not [issue for issue in validate_plan(plan) if issue.severity == "error"]
+    assert compiled_trigger["data"]["event_parameters"]["repository"]["value"] == "garden/project"
+    assert compiled_trigger["position"] == {"x": 10, "y": 20}
+
+
 def test_decompile_rejects_unsupported_existing_node_type() -> None:
     graph = {
         "nodes": [{"id": "mystery", "data": {"type": "mystery-node"}}],

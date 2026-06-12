@@ -496,6 +496,35 @@ def _validate_node_params(plan: WorkflowPlan) -> list[ValidationIssue]:
             case "code":
                 if not params.get("code"):
                     issues.append(_node_issue("PLAN_CODE_MISSING", "code node requires code.", node.id, "params.code"))
+                variables = params.get("variables")
+                if not isinstance(variables, list):
+                    issues.append(
+                        _node_issue(
+                            "PLAN_CODE_VARIABLES_INVALID",
+                            "code node variables must be a list.",
+                            node.id,
+                            "params.variables",
+                        )
+                    )
+                else:
+                    for idx, variable in enumerate(variables):
+                        selector = variable.get("value_selector") if isinstance(variable, dict) else None
+                        if (
+                            not isinstance(variable, dict)
+                            or not variable.get("variable")
+                            or not isinstance(selector, list)
+                            or len(selector) < 2
+                            or not all(isinstance(part, str) and part for part in selector)
+                        ):
+                            issues.append(
+                                _node_issue(
+                                    "PLAN_CODE_VARIABLE_SELECTOR_INVALID",
+                                    "code variable requires a valid value_selector.",
+                                    node.id,
+                                    f"params.variables.{idx}.value_selector",
+                                    suggestion='使用 ["node_id", "output_name"] 形式绑定已有节点输出。',
+                                )
+                            )
                 outputs = params.get("outputs")
                 if not isinstance(outputs, dict) or not outputs:
                     issues.append(_node_issue("PLAN_CODE_OUTPUTS_MISSING", "code node requires outputs.", node.id, "params.outputs"))
@@ -885,6 +914,8 @@ def _validate_node_params(plan: WorkflowPlan) -> list[ValidationIssue]:
                 issues.extend(_validate_agent_node(node))
             case "trigger-webhook":
                 issues.extend(_validate_trigger_webhook_node(node))
+            case "trigger-plugin":
+                issues.extend(_validate_trigger_plugin_node(node))
             case "trigger-schedule":
                 issues.extend(_validate_trigger_schedule_node(node))
             case node_type if node_type in EXTERNAL_DEPENDENCY_NODE_TYPES:
@@ -1017,6 +1048,115 @@ def _validate_trigger_webhook_node(node: PlanNode) -> list[ValidationIssue]:
             )
         )
     return issues
+
+
+def _validate_trigger_plugin_node(node: PlanNode) -> list[ValidationIssue]:
+    params = node.params
+    if isinstance(params.get("_raw_data"), dict):
+        return [
+            _node_issue(
+                "PLAN_EXTERNAL_DEPENDENCY_NODE_PASSTHROUGH",
+                "trigger-plugin node is preserved from an existing Dify draft.",
+                node.id,
+                "type",
+                suggestion="该节点依赖 Dify 已安装的 Trigger Provider 和 subscription，chat2dify 只原样保留旧配置。",
+            ).model_copy(update={"severity": "warning"})
+        ]
+
+    issues: list[ValidationIssue] = []
+    required_fields = {
+        "provider_id": "provider",
+        "event_name": "event",
+        "subscription_id": "subscription",
+        "plugin_id": "plugin",
+        "plugin_unique_identifier": "plugin unique identifier",
+    }
+    for field, label in required_fields.items():
+        if not str(params.get(field) or "").strip():
+            issues.append(
+                _node_issue(
+                    f"PLAN_PLUGIN_TRIGGER_{field.upper()}_MISSING",
+                    f"Plugin Trigger requires a {label}.",
+                    node.id,
+                    f"params.{field}",
+                )
+            )
+
+    event_parameters = params.get("event_parameters")
+    if not isinstance(event_parameters, dict):
+        issues.append(
+            _node_issue(
+                "PLAN_PLUGIN_TRIGGER_PARAMETERS_INVALID",
+                "Plugin Trigger event_parameters must be an object.",
+                node.id,
+                "params.event_parameters",
+            )
+        )
+        event_parameters = {}
+
+    schemas = params.get("parameters_schema")
+    if not isinstance(schemas, list):
+        issues.append(
+            _node_issue(
+                "PLAN_PLUGIN_TRIGGER_SCHEMA_INVALID",
+                "Plugin Trigger parameters_schema must be a list.",
+                node.id,
+                "params.parameters_schema",
+            )
+        )
+        schemas = []
+
+    for idx, schema in enumerate(schemas):
+        if not isinstance(schema, dict):
+            continue
+        name = str(schema.get("name") or schema.get("variable") or "").strip()
+        if not name:
+            continue
+        value = event_parameters.get(name)
+        if schema.get("required") and _plugin_trigger_value_missing(value):
+            issues.append(
+                _node_issue(
+                    "PLAN_PLUGIN_TRIGGER_PARAMETER_REQUIRED",
+                    f"Plugin Trigger parameter is required: {name}",
+                    node.id,
+                    f"params.event_parameters.{name}",
+                )
+            )
+        if value is not None and (
+            not isinstance(value, dict) or value.get("type") != "constant"
+        ):
+            issues.append(
+                _node_issue(
+                    "PLAN_PLUGIN_TRIGGER_PARAMETER_NOT_CONSTANT",
+                    f"Plugin Trigger parameter must use a constant binding: {name}",
+                    node.id,
+                    f"params.event_parameters.{name}",
+                    suggestion="Plugin Trigger 是入口节点，没有上游变量；请在 Web UI 中填写常量。",
+                )
+            )
+
+    for name, value in event_parameters.items():
+        if not isinstance(value, dict) or value.get("type") != "constant":
+            if not any(
+                issue.path == f"nodes.{node.id}.params.event_parameters.{name}"
+                for issue in issues
+            ):
+                issues.append(
+                    _node_issue(
+                        "PLAN_PLUGIN_TRIGGER_PARAMETER_NOT_CONSTANT",
+                        f"Plugin Trigger parameter must use a constant binding: {name}",
+                        node.id,
+                        f"params.event_parameters.{name}",
+                    )
+                )
+    return issues
+
+
+def _plugin_trigger_value_missing(value: Any) -> bool:
+    if not isinstance(value, dict) or value.get("type") != "constant":
+        return True
+    raw = value.get("value")
+    return raw is None or raw == "" or (isinstance(raw, list) and not raw)
 
 
 def _validate_trigger_schedule_node(node: PlanNode) -> list[ValidationIssue]:
@@ -1756,8 +1896,12 @@ def _schema_output_names(params: dict[str, Any]) -> set[str]:
 
 
 def _external_trigger_outputs(params: dict[str, Any]) -> set[str]:
-    raw_data = params.get("_raw_data") if isinstance(params.get("_raw_data"), dict) else params
-    outputs = {"payload"}
+    passthrough = isinstance(params.get("_raw_data"), dict)
+    raw_data = params.get("_raw_data") if passthrough else params
+    schema_names = _schema_output_names(params)
+    if schema_names:
+        return schema_names
+    outputs = {"payload"} if passthrough else set()
     variables = raw_data.get("variables") if isinstance(raw_data, dict) else None
     for item in variables if isinstance(variables, list) else []:
         if isinstance(item, dict):
