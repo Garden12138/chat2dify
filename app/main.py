@@ -55,7 +55,7 @@ async def lifespan(application: FastAPI):
         task_manager.close()
 
 
-app = FastAPI(title="chat2dify", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="chat2dify", version="1.1.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -323,15 +323,12 @@ def _publish_workflow(
                     },
                 )
             app_detail = _load_app_detail(client, app_id)
-            if app_detail and app_detail.mode == "advanced-chat":
-                raise HTTPException(
-                    status_code=422,
-                    detail={
-                        "code": "CHATFLOW_PUBLISH_NOT_SUPPORTED",
-                        "message": "Publishing Chatflow is not supported in this stage.",
-                    },
-                )
-            plan = decompile_dify_graph(draft.graph, name=_draft_plan_name(app_detail, app_id))
+            app_mode = _app_mode(app_detail, draft.graph)
+            plan = decompile_dify_graph(
+                draft.graph,
+                name=_draft_plan_name(app_detail, app_id),
+                app_mode=app_mode,
+            )
             compiler = DifyDslCompiler(
                 dsl_version=version_info.app_dsl_version,
                 default_model_provider=settings.dify_default_model_provider,
@@ -363,11 +360,12 @@ def _publish_workflow(
                 marked_name=request.marked_name,
                 marked_comment=request.marked_comment,
             )
-            triggers = client.list_workflow_triggers(app_id)
-            webhooks = _webhook_details(client, app_id, plan)
+            triggers = client.list_workflow_triggers(app_id) if app_mode == "workflow" else []
+            webhooks = _webhook_details(client, app_id, plan) if app_mode == "workflow" else []
             return {
                 "status": "published",
                 "app_id": app_id,
+                "app_mode": app_mode,
                 "workflow_url": settings.workflow_url(app_id),
                 "base_hash": draft.hash,
                 "publish": asdict(published),
@@ -452,7 +450,7 @@ def get_workflow_draft(app_id: str) -> dict:
         plan = decompile_dify_graph(
             draft.graph,
             name=_draft_plan_name(app_detail, app_id),
-            app_mode=app_detail.mode if app_detail and app_detail.mode == "advanced-chat" else "workflow",
+            app_mode=_app_mode(app_detail, draft.graph),
         )
         issues = validate_plan(plan)
         return {
@@ -649,15 +647,11 @@ def _modify_workflow(
     try:
         with DifyClient(settings) as client:
             app_detail = _load_app_detail(client, request.app_id)
-            if app_detail and app_detail.mode == "advanced-chat":
-                raise HTTPException(
-                    status_code=422,
-                    detail={
-                        "code": "CHATFLOW_MODIFY_NOT_SUPPORTED",
-                        "message": "Modifying an existing Chatflow is not supported in this stage.",
-                    },
-                )
+            app_mode = _app_mode(app_detail)
+            _ensure_chatflow_trigger_selection(app_mode, request.trigger_selection)
             draft = client.get_draft_workflow(request.app_id)
+            app_mode = _app_mode(app_detail, draft.graph)
+            _ensure_chatflow_trigger_selection(app_mode, request.trigger_selection)
             if request.expected_hash and request.expected_hash != draft.hash:
                 raise HTTPException(
                     status_code=409,
@@ -669,7 +663,11 @@ def _modify_workflow(
                     },
                 )
 
-            before_plan = decompile_dify_graph(draft.graph, name=_draft_plan_name(app_detail, request.app_id))
+            before_plan = decompile_dify_graph(
+                draft.graph,
+                name=_draft_plan_name(app_detail, request.app_id),
+                app_mode=app_mode,
+            )
             if task_context is not None:
                 task_context.update("decompiling", 25, "Converted the current Dify graph into Plan IR.")
             if apply and request.plan is not None:
@@ -682,6 +680,7 @@ def _modify_workflow(
                 normalized = normalize_plan_payload(
                     request.plan.model_dump(),
                     app_name=before_plan.name,
+                    app_mode=before_plan.app_mode,
                     default_dataset_ids=effective_settings.dify_default_dataset_ids,
                     tool_selections=_tool_selection_payloads(request.tool_selections),
                     agent_selections=_agent_selection_payloads(request.agent_selections),
@@ -694,9 +693,10 @@ def _modify_workflow(
                     settings=effective_settings,
                 )
             else:
-                trigger_selection = _hydrate_trigger_selection_with_client(
-                    client,
-                    request.trigger_selection,
+                trigger_selection = (
+                    _hydrate_trigger_selection_with_client(client, request.trigger_selection)
+                    if app_mode == "workflow"
+                    else None
                 )
                 edit_kwargs = _planner_selection_kwargs(
                     request,
@@ -765,7 +765,11 @@ def _modify_workflow(
             )
             response["new_hash"] = sync.hash
             response["sync"] = asdict(sync)
-            response["webhooks"] = _webhook_details(client, request.app_id, plan)
+            response["webhooks"] = (
+                _webhook_details(client, request.app_id, plan)
+                if app_mode == "workflow"
+                else []
+            )
             return response
     except HTTPException:
         raise
@@ -930,6 +934,7 @@ def _build_modify_response(
 
     response = {
         "app_id": app_id,
+        "app_mode": plan.app_mode,
         "workflow_url": settings.workflow_url(app_id),
         "base_hash": draft_hash,
         "app": _app_payload(app_detail),
@@ -1310,6 +1315,37 @@ def _draft_plan_name(app_detail: DifyAppDetail | None, app_id: str) -> str:
     if app_detail and app_detail.name:
         return app_detail.name
     return f"Dify Workflow {app_id}"
+
+
+def _app_mode(app_detail: DifyAppDetail | None, graph: dict | None = None) -> str:
+    if app_detail and app_detail.mode == "advanced-chat":
+        return "advanced-chat"
+    if app_detail and app_detail.mode == "workflow":
+        return "workflow"
+    nodes = graph.get("nodes") if isinstance(graph, dict) else []
+    if any(
+        isinstance(node, dict)
+        and isinstance(node.get("data"), dict)
+        and node["data"].get("type") == "answer"
+        for node in nodes or []
+    ):
+        return "advanced-chat"
+    return "workflow"
+
+
+def _ensure_chatflow_trigger_selection(app_mode: str, trigger_selection) -> None:
+    if (
+        app_mode == "advanced-chat"
+        and trigger_selection is not None
+        and trigger_selection.type != "user-input"
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "CHATFLOW_TRIGGER_NOT_SUPPORTED",
+                "message": "Chatflow uses a conversational start and cannot use workflow triggers.",
+            },
+        )
 
 
 def _app_payload(app_detail: DifyAppDetail | None) -> dict | None:

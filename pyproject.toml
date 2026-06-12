@@ -1,6 +1,6 @@
 [project]
 name = "chat2dify"
-version = "0.1.0"
+version = "1.1.0"
 description = "Generate Dify workflows from natural language through a sidecar service."
 requires-python = ">=3.11"
 dependencies = [
@@ -19,4 +19,3 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-

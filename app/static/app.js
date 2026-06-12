@@ -93,8 +93,10 @@ const els = {
   createTaskBar: document.querySelector("#create-task-bar"),
   createCancelTask: document.querySelector("#create-cancel-task"),
   createAppMode: document.querySelector("#create-app-mode"),
+  createSubmit: document.querySelector("#create-submit"),
   triggerPanel: document.querySelector("#trigger-panel"),
   modifyPanel: document.querySelector("#modify-panel"),
+  modifyTitle: document.querySelector("#modify-title"),
   publishPanel: document.querySelector("#publish-panel"),
   knowledgeForm: document.querySelector("#knowledge-form"),
   knowledgeStatus: document.querySelector("#knowledge-status"),
@@ -173,6 +175,10 @@ const els = {
   publishCancelTask: document.querySelector("#publish-cancel-task"),
   publishAppId: document.querySelector("#publish-app-id"),
   publishExpectedHash: document.querySelector("#publish-expected-hash"),
+  publishTitle: document.querySelector("#publish-title"),
+  publishSubmit: document.querySelector("#publish-submit"),
+  refreshWorkflowTriggers: document.querySelector("#refresh-workflow-triggers"),
+  publishHelp: document.querySelector("#publish-help"),
   workflowTriggerList: document.querySelector("#workflow-trigger-list"),
   createAppName: document.querySelector("#create-app-name"),
   modifyAppId: document.querySelector("#modify-app-id"),
@@ -392,7 +398,7 @@ function bindEvents() {
     event.preventDefault();
     await handlePublish();
   });
-  document.querySelector("#refresh-workflow-triggers").addEventListener("click", async () => {
+  els.refreshWorkflowTriggers.addEventListener("click", async () => {
     await loadWorkflowTriggers();
   });
   els.workflowTriggerList.addEventListener("click", handleWorkflowTriggerAction);
@@ -2205,12 +2211,21 @@ function setAppMode(value) {
   els.runAppMode.value = appMode;
   const isChatflow = appMode === "advanced-chat";
   els.triggerPanel.classList.toggle("is-hidden", isChatflow);
-  els.modifyPanel.classList.toggle("is-hidden", isChatflow);
-  els.publishPanel.classList.toggle("is-hidden", isChatflow);
+  els.modifyPanel.classList.remove("is-hidden");
+  els.publishPanel.classList.remove("is-hidden");
+  els.refreshWorkflowTriggers.classList.toggle("is-hidden", isChatflow);
+  els.workflowTriggerList.classList.toggle("is-hidden", isChatflow);
   els.runWorkflowFields.classList.toggle("is-hidden", isChatflow);
   els.runChatflowFields.classList.toggle("is-hidden", !isChatflow);
   els.runInputs.required = !isChatflow;
   els.runChatflowQuery.required = isChatflow;
+  els.createSubmit.textContent = isChatflow ? "Create chatflow" : "Create workflow";
+  els.modifyTitle.textContent = isChatflow ? "Modify Chatflow Draft" : "Modify Workflow Draft";
+  els.publishTitle.textContent = isChatflow ? "Publish Chatflow" : "Publish & Triggers";
+  els.publishSubmit.textContent = isChatflow ? "Publish chatflow" : "Publish workflow";
+  els.publishHelp.textContent = isChatflow
+    ? "Publishing is explicit. Create and Apply only update the Chatflow draft."
+    : "Publishing is explicit. Create and Apply only update the Workflow draft.";
 }
 
 async function handleCreate() {
@@ -2249,7 +2264,7 @@ async function handleModify(path, mode) {
       dataset_ids: currentDatasetIds(),
       tool_selections: currentToolSelections(),
       agent_selections: currentAgentSelections(),
-      trigger_selection: currentTriggerSelection(),
+      trigger_selection: state.appMode === "workflow" ? currentTriggerSelection() : null,
       planner: currentPlannerSelection(),
     };
     ensureAgentSelectionReady(payload.message, payload.agent_selections);
@@ -3807,7 +3822,7 @@ function currentModifyPayload() {
     dataset_ids: currentDatasetIds(),
     tool_selections: currentToolSelections(),
     agent_selections: currentAgentSelections(),
-    trigger_selection: currentTriggerSelection(),
+    trigger_selection: state.appMode === "workflow" ? currentTriggerSelection() : null,
     planner: currentPlannerSelection(),
   };
 }
@@ -3827,7 +3842,7 @@ function storeModifyPreview(data, payload) {
     dataset_ids: payload.dataset_ids || [],
     tool_selections: payload.tool_selections || [],
     agent_selections: payload.agent_selections || [],
-    trigger_selection: payload.trigger_selection || { type: "user-input" },
+    trigger_selection: payload.trigger_selection ?? null,
     planner: payload.planner || null,
   };
   state.modifyPreviewDirty = false;

@@ -62,3 +62,68 @@ def test_guard_blocks_mass_node_removal() -> None:
     assert guard.ok is False
     assert guard.risk == "high"
     assert any(issue.code == "PLAN_CHANGE_MASS_NODE_REMOVAL" for issue in guard.issues)
+
+
+def test_guard_blocks_chatflow_answer_removal() -> None:
+    before = WorkflowPlan.model_validate(
+        {
+            "name": "Chatflow Guard",
+            "app_mode": "advanced-chat",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": []}},
+                {
+                    "id": "llm",
+                    "type": "llm",
+                    "params": {"user_prompt": "{{#sys.query#}}"},
+                },
+                {
+                    "id": "answer_primary",
+                    "type": "answer",
+                    "params": {"answer": "{{#llm.text#}}"},
+                },
+                {
+                    "id": "answer_secondary",
+                    "type": "answer",
+                    "params": {"answer": "{{#llm.text#}}"},
+                },
+            ],
+            "edges": [
+                {"source": "start", "target": "llm"},
+                {"source": "llm", "target": "answer_primary"},
+                {"source": "llm", "target": "answer_secondary"},
+            ],
+        }
+    )
+    after = WorkflowPlan.model_validate(
+        {
+            "name": "Chatflow Guard",
+            "app_mode": "advanced-chat",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": []}},
+                {
+                    "id": "llm",
+                    "type": "llm",
+                    "params": {"user_prompt": "{{#sys.query#}}"},
+                },
+                {
+                    "id": "answer_primary",
+                    "type": "answer",
+                    "params": {"answer": "{{#llm.text#}}"},
+                },
+            ],
+            "edges": [
+                {"source": "start", "target": "llm"},
+                {"source": "llm", "target": "answer_primary"},
+            ],
+        }
+    )
+
+    guard = guard_plan_change(before, after, diff_plans(before, after))
+
+    assert guard.ok is False
+    assert guard.risk == "high"
+    terminal_issue = next(
+        issue for issue in guard.issues
+        if issue.code == "PLAN_CHANGE_TERMINAL_NODE_REMOVED"
+    )
+    assert terminal_issue.details["removed_node_ids"] == ["answer_secondary"]

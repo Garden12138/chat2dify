@@ -2,6 +2,13 @@
 
 Generate Dify Workflows and Chatflows via Natural Language Conversation.
 
+## v1.1.0
+
+Chatflow now supports the same reviewed modification and explicit publishing
+flow as Workflow. Existing `advanced-chat` drafts can be loaded, revised through
+Modify Preview, applied with draft hash protection, run across multiple
+conversation turns, and published without introducing Workflow triggers.
+
 ## Phase 1 MVP
 
 This repository runs as an independent FastAPI sidecar. It does not modify Dify
@@ -55,7 +62,8 @@ Dify draft workflow generated from the repair after-sales example:
 
 ![Dify workflow canvas](docs/images/dify-workflow-canvas.png)
 
-The third-stage edit flow modifies an existing Dify draft in place:
+The third-stage edit flow modifies an existing Dify Workflow or Chatflow draft
+in place:
 
 ```text
 app_id + edit request -> Dify draft graph -> WorkflowPlan IR -> revised WorkflowPlan IR -> validation -> /console/api/apps/{app_id}/workflows/draft
@@ -65,10 +73,12 @@ Use `POST /api/workflows/modify/draft` to preview a modification and
 `POST /api/workflows/modify/apply` to write it back to the Dify draft. Both
 accept `app_id`, `message`, and optional `expected_hash`; apply returns the new
 Dify draft `hash`. Third-stage edits support the stabilized node set listed
-below and do not publish the workflow. Edits run in safe mode by default:
-large node deletions, start/end rewrites, or broad edge rewiring are reported in
-`guard` and blocked on apply unless `allow_destructive=true` is sent. No-op
-edits return `sync.result="noop"` and are not written back to Dify.
+below and do not publish the app. Chatflow edits preserve `advanced-chat`,
+conversational `start`, `answer`, `sys.query`, and LLM memory semantics. Edits
+run in safe mode by default: large node deletions, start/end/answer rewrites, or
+broad edge rewiring are reported in `guard` and blocked on apply unless
+`allow_destructive=true` is sent. No-op edits return `sync.result="noop"` and
+are not written back to Dify.
 
 Use `GET /api/workflows/{app_id}/draft` to inspect the current Dify draft
 without calling an LLM or writing anything back. The response includes the
@@ -385,8 +395,10 @@ curl -X POST http://127.0.0.1:8000/api/chatflows/run/draft \
   }'
 ```
 
-The background equivalent is `POST /api/tasks/chatflows/run/draft`. Chatflow
-Modify and Publish are intentionally not supported in this stage.
+The background equivalent is `POST /api/tasks/chatflows/run/draft`. Use the
+same `/api/workflows/modify/draft`, `/api/workflows/modify/apply`, and
+`/api/workflows/{app_id}/publish` endpoints for Chatflow modification and
+publishing. Chatflow modification rejects Workflow trigger selections.
 
 Create a POST Webhook workflow by selecting Webhook in the Web UI Trigger
 panel, or by passing a structured selection:
@@ -635,9 +647,9 @@ Example selected agent workflow request:
 创建智能体售后分析工作流。使用我在 Web UI 勾选的 Agent Strategy 对客户问题进行多步分析，必要时调用已绑定工具，最后生成处理建议并返回 answer。
 ```
 
-Chatflow modification and publishing, plugin installation, credential editing,
-automatic creation of data-source nodes, Agent Roster management, and model
-capability registry sync remain out of scope for now.
+Plugin installation, credential editing, automatic creation of data-source
+nodes, Chatflow conversation-variable management, Agent Roster management, and
+model capability registry sync remain out of scope for now.
 
 ## Test
 

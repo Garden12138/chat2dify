@@ -276,13 +276,13 @@
             Request
             <textarea id="create-message" name="message" rows="7" required>Build a workflow that responds politely to customer complaints and summarizes the issue.</textarea>
           </label>
-          <button type="submit">Create workflow</button>
+          <button id="create-submit" type="submit">Create workflow</button>
         </form>
       </section>
 
       <section id="modify-panel" class="tool-panel" aria-labelledby="modify-title">
         <div class="panel-heading">
-          <h2 id="modify-title">Modify Draft</h2>
+          <h2 id="modify-title">Modify Workflow Draft</h2>
           <div class="task-meta">
             <span id="modify-duration" class="task-duration">耗时 --</span>
             <span id="modify-status" class="panel-status"></span>
@@ -355,10 +355,10 @@
             </label>
           </div>
           <div class="button-row">
-            <button type="submit">Publish workflow</button>
+            <button id="publish-submit" type="submit">Publish workflow</button>
             <button id="refresh-workflow-triggers" type="button" class="secondary">Refresh status</button>
           </div>
-          <p class="field-help">Publishing is always explicit. Create and Apply only update the draft.</p>
+          <p id="publish-help" class="field-help">Publishing is explicit. Create and Apply only update the Workflow draft.</p>
         </form>
         <div id="workflow-trigger-list" class="trigger-management-list"></div>
       </section>
@@ -458,6 +458,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js?v=workbench-20260612-chatflows" defer></script>
+    <script src="/static/app.js?v=workbench-20260612-chatflow-v1.1.0" defer></script>
   </body>
 </html>

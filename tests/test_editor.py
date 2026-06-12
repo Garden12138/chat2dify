@@ -91,6 +91,41 @@ def test_edit_planner_self_repairs_after_validation_failure() -> None:
     assert "PLAN_VARIABLE_UNKNOWN" in planner.last_errors[1]
 
 
+def test_chatflow_edit_planner_locks_mode_and_repairs_chatflow_contract() -> None:
+    current = fallback_plan(
+        "创建汽车售后多轮客服",
+        app_name="汽车售后多轮客服",
+        app_mode="advanced-chat",
+    )
+    revised = current.model_dump()
+    revised["app_mode"] = "workflow"
+    revised["nodes"][0]["params"] = {"variables": [{"name": "query"}]}
+    revised["nodes"][1]["params"]["user_prompt"] = "客户问题：{{#start.query#}}"
+    revised["nodes"][1]["params"].pop("memory", None)
+    revised["nodes"][2] = {
+        "id": "answer",
+        "type": "end",
+        "title": "回复客户",
+        "params": {
+            "outputs": [
+                {"variable": "answer", "value_selector": ["llm", "text"]}
+            ]
+        },
+    }
+    planner = FakeEditPlanner([json.dumps(revised)])
+
+    result = planner.generate("把回复改得更温暖", current_plan=current, dsl_version="9.9.9")
+    llm = next(node for node in result.plan.nodes if node.type == "llm")
+
+    assert result.plan.app_mode == "advanced-chat"
+    assert not [node for node in result.plan.nodes if node.type == "end"]
+    assert next(node for node in result.plan.nodes if node.type == "answer").id == "answer"
+    assert llm.params["user_prompt"] == "客户问题：{{#sys.query#}}"
+    assert llm.params["memory"]["query_prompt_template"] == "客户问题：{{#sys.query#}}"
+    assert llm.params["memory"]["window"] == {"enabled": True, "size": 10}
+    assert result.repaired is True
+
+
 def test_edit_planner_fails_after_three_bad_attempts() -> None:
     current = fallback_plan("hello")
     planner = FakeEditPlanner(["{}", "{}", "{}"])

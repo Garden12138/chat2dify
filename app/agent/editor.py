@@ -91,6 +91,25 @@ If an if-else node has cases, every case needs an outgoing edge whose source_han
 and the else branch must use source_handle "false".
 """
 
+CHATFLOW_EDIT_SYSTEM_PROMPT = EDIT_SYSTEM_PROMPT + """
+
+The current plan is an advanced-chat Chatflow. These rules override any
+workflow-only instructions above:
+- Preserve app_mode as "advanced-chat"; never convert the app to workflow.
+- Keep exactly one start node and at least one answer node.
+- Never generate end, trigger-webhook, trigger-plugin, trigger-schedule,
+  datasource, datasource-empty, or knowledge-index nodes.
+- Preserve answer nodes and their ids unless the user explicitly requests a
+  response-path restructure. Every response path must still finish at answer.
+- The current user message is {{#sys.query#}} and uploaded files are
+  {{#sys.files#}}. Never use {{#start.query#}} or {{#start.files#}} in text.
+- For selectors belonging to the start node, use ["<start_id>","sys.query"]
+  or ["<start_id>","sys.files"].
+- Every llm node must keep memory enabled. Its query_prompt_template must use
+  {{#sys.query#}} and its memory window must remain enabled.
+- Do not add or modify workflow triggers. selected_trigger is always user-input.
+"""
+
 
 @dataclass(frozen=True)
 class WorkflowEditResult:
@@ -170,10 +189,11 @@ class WorkflowEditPlanner:
                 normalized = normalize_plan_payload(
                     raw_plan,
                     app_name=current_plan.name,
+                    app_mode=current_plan.app_mode,
                     default_dataset_ids=self.settings.dify_default_dataset_ids,
                     tool_selections=tool_selections or [],
                     agent_selections=agent_selections or [],
-                    trigger_selection=trigger_selection,
+                    trigger_selection=trigger_selection if current_plan.app_mode == "workflow" else None,
                 )
                 plan = WorkflowPlan.model_validate(normalized.payload)
                 issues = _validate_compiled_plan(plan, settings=self.settings, dsl_version=dsl_version)
@@ -236,8 +256,13 @@ class WorkflowEditPlanner:
         }
         if last_error:
             user_content["previous_validation_error"] = last_error
+        system_prompt = (
+            CHATFLOW_EDIT_SYSTEM_PROMPT
+            if current_plan.app_mode == "advanced-chat"
+            else EDIT_SYSTEM_PROMPT
+        )
         messages: list[dict[str, str]] = [
-            {"role": "system", "content": EDIT_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(user_content, ensure_ascii=False)},
         ]
 

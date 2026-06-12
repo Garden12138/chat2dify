@@ -49,6 +49,7 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert "chat2dify" in index.text
     assert 'id="create-form"' in index.text
     assert 'id="create-app-mode"' in index.text
+    assert 'id="create-submit"' in index.text
     assert 'id="planner-form"' in index.text
     assert 'id="planner-provider"' in index.text
     assert 'id="planner-model"' in index.text
@@ -84,6 +85,8 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert 'id="trigger-plugin-subscription"' in index.text
     assert 'id="trigger-plugin-parameters"' in index.text
     assert 'id="publish-form"' in index.text
+    assert 'id="publish-submit"' in index.text
+    assert 'id="publish-help"' in index.text
     assert 'id="workflow-trigger-list"' in index.text
     assert 'id="result-tabs"' in index.text
     assert 'id="load-draft"' in index.text
@@ -92,6 +95,9 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert "chatflow.run.draft" in script.text
     assert "chatflow-run" in script.text
     assert "setAppMode" in script.text
+    assert 'state.appMode === "workflow" ? currentTriggerSelection() : null' in script.text
+    assert 'els.modifyPanel.classList.remove("is-hidden")' in script.text
+    assert 'els.publishPanel.classList.remove("is-hidden")' in script.text
     assert "loadPlannerProviders" in script.text
     assert "currentPlannerSelection" in script.text
     assert "formatTaskDuration" in script.text
@@ -118,6 +124,7 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert "tool_configurations" in script.text
     assert "tool_parameters" in script.text
     assert "loadAgentStrategies" in script.text
+    assert app.version == "1.1.0"
     assert "currentAgentSelections" in script.text
     assert "agentConfigurationPanel" in script.text
     assert "agent_parameters" in script.text
@@ -2103,7 +2110,89 @@ def test_run_draft_chatflow_api_reuses_conversation(monkeypatch) -> None:
     }
 
 
-def test_chatflow_modify_is_rejected_before_loading_draft(monkeypatch) -> None:
+def test_chatflow_modify_preview_uses_advanced_chat_plan(monkeypatch) -> None:
+    settings = _test_settings()
+    current_plan = fallback_plan(
+        "创建汽车售后多轮客服",
+        app_name="汽车售后多轮客服",
+        app_mode="advanced-chat",
+    )
+    graph = yaml.safe_load(
+        DifyDslCompiler(
+            dsl_version="9.9.9",
+            default_model_provider="openai",
+            default_model_name="gpt-4o-mini",
+        ).compile(current_plan)
+    )["workflow"]["graph"]
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get_app_detail(self, app_id):
+            return DifyAppDetail(
+                id=app_id,
+                name="汽车售后多轮客服",
+                mode="advanced-chat",
+                description="",
+                raw={},
+            )
+
+        def get_draft_workflow(self, _app_id):
+            return DifyDraftWorkflow(
+                id="workflow-1",
+                graph=graph,
+                features={"file_upload": {"enabled": False}},
+                hash="hash-1",
+                version="draft",
+                environment_variables=[],
+                conversation_variables=[{"name": "topic", "value_type": "string", "value": ""}],
+                raw={},
+            )
+
+    class FakeEditPlanner:
+        def __init__(self, _settings):
+            pass
+
+        def generate(self, message, *, current_plan, dsl_version, trigger_selection=None, **_kwargs):
+            assert current_plan.app_mode == "advanced-chat"
+            assert trigger_selection is None
+            revised = current_plan.model_copy(deep=True)
+            revised.nodes[1].params["system_prompt"] = f"温暖地回复：{message}"
+            return WorkflowEditResult(
+                plan=revised,
+                raw_plan=revised.model_dump(),
+                attempts=1,
+                repaired=False,
+            )
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr("app.main.read_dify_version_info", lambda _: DifyVersionInfo("../dify", "test", "9.9.9"))
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+    monkeypatch.setattr("app.main.WorkflowEditPlanner", FakeEditPlanner)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/modify/draft",
+            json={"app_id": "chat-app-1", "message": "把回复改得更温暖"},
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["app_mode"] == "advanced-chat"
+    assert data["plan"]["app_mode"] == "advanced-chat"
+    assert data["validation"]["ok"] is True
+    assert data["base_hash"] == "hash-1"
+    assert any(change["type"] == "prompt_changed" for change in data["changes"])
+
+
+def test_chatflow_modify_rejects_workflow_trigger_before_loading_draft(monkeypatch) -> None:
     settings = _test_settings()
 
     class FakeDifyClient:
@@ -2126,7 +2215,7 @@ def test_chatflow_modify_is_rejected_before_loading_draft(monkeypatch) -> None:
             )
 
         def get_draft_workflow(self, _app_id):
-            raise AssertionError("Chatflow modify should stop before loading the draft.")
+            raise AssertionError("Invalid Chatflow trigger should be rejected before loading the draft.")
 
     monkeypatch.setattr("app.main.load_settings", lambda: settings)
     monkeypatch.setattr("app.main.read_dify_version_info", lambda _: DifyVersionInfo("../dify", "test", "9.9.9"))
@@ -2135,11 +2224,239 @@ def test_chatflow_modify_is_rejected_before_loading_draft(monkeypatch) -> None:
     with TestClient(app) as client:
         response = client.post(
             "/api/workflows/modify/draft",
-            json={"app_id": "chat-app-1", "message": "把回复改得更温暖"},
+            json={
+                "app_id": "chat-app-1",
+                "message": "把回复改得更温暖",
+                "trigger_selection": {"type": "webhook"},
+            },
         )
 
     assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "CHATFLOW_MODIFY_NOT_SUPPORTED"
+    assert response.json()["detail"]["code"] == "CHATFLOW_TRIGGER_NOT_SUPPORTED"
+
+
+def test_chatflow_modify_rejects_trigger_when_mode_is_inferred_from_graph(monkeypatch) -> None:
+    settings = _test_settings()
+    plan = fallback_plan(
+        "创建汽车售后多轮客服",
+        app_name="汽车售后多轮客服",
+        app_mode="advanced-chat",
+    )
+    graph = yaml.safe_load(
+        DifyDslCompiler(
+            dsl_version="9.9.9",
+            default_model_provider="openai",
+            default_model_name="gpt-4o-mini",
+        ).compile(plan)
+    )["workflow"]["graph"]
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get_app_detail(self, _app_id):
+            raise DifyClientError("metadata temporarily unavailable")
+
+        def get_draft_workflow(self, _app_id):
+            return DifyDraftWorkflow(
+                id="workflow-1",
+                graph=graph,
+                features={},
+                hash="hash-1",
+                version="draft",
+                environment_variables=[],
+                conversation_variables=[],
+                raw={},
+            )
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr("app.main.read_dify_version_info", lambda _: DifyVersionInfo("../dify", "test", "9.9.9"))
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/modify/draft",
+            json={
+                "app_id": "chat-app-1",
+                "message": "把回复改得更温暖",
+                "trigger_selection": {"type": "schedule"},
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "CHATFLOW_TRIGGER_NOT_SUPPORTED"
+
+
+def test_chatflow_apply_reviewed_preview_preserves_draft_metadata(monkeypatch) -> None:
+    settings = _test_settings()
+    current_plan = fallback_plan(
+        "创建汽车售后多轮客服",
+        app_name="汽车售后多轮客服",
+        app_mode="advanced-chat",
+    )
+    preview_plan = current_plan.model_copy(deep=True)
+    preview_plan.nodes[1].params["system_prompt"] = "你是温暖、简洁的汽车售后客服。"
+    graph = yaml.safe_load(
+        DifyDslCompiler(
+            dsl_version="9.9.9",
+            default_model_provider="openai",
+            default_model_name="gpt-4o-mini",
+        ).compile(current_plan)
+    )["workflow"]["graph"]
+    seen = {}
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get_app_detail(self, app_id):
+            return DifyAppDetail(
+                id=app_id,
+                name=current_plan.name,
+                mode="advanced-chat",
+                description="",
+                raw={},
+            )
+
+        def get_draft_workflow(self, _app_id):
+            return DifyDraftWorkflow(
+                id="workflow-1",
+                graph=graph,
+                features={"file_upload": {"enabled": True}},
+                hash="hash-1",
+                version="draft",
+                environment_variables=[{"name": "store", "value_type": "string", "value": "west"}],
+                conversation_variables=[{"name": "topic", "value_type": "string", "value": ""}],
+                raw={},
+            )
+
+        def sync_draft_workflow(self, app_id, **kwargs):
+            seen.update(kwargs)
+            return DifyDraftSyncResult(
+                result="success",
+                hash="hash-2",
+                updated_at="123",
+                workflow_url=settings.workflow_url(app_id),
+            )
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr("app.main.read_dify_version_info", lambda _: DifyVersionInfo("../dify", "test", "9.9.9"))
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/modify/apply",
+            json={
+                "app_id": "chat-app-1",
+                "message": "应用已审核预览",
+                "expected_hash": "hash-1",
+                "plan": preview_plan.model_dump(),
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["app_mode"] == "advanced-chat"
+    assert data["new_hash"] == "hash-2"
+    assert data["webhooks"] == []
+    assert seen["features"] == {"file_upload": {"enabled": True}}
+    assert seen["environment_variables"][0]["name"] == "store"
+    assert seen["conversation_variables"][0]["name"] == "topic"
+    assert any(node["data"]["type"] == "answer" for node in seen["graph"]["nodes"])
+
+
+def test_chatflow_publish_validates_and_skips_workflow_triggers(monkeypatch) -> None:
+    settings = _test_settings()
+    plan = fallback_plan(
+        "创建汽车售后多轮客服",
+        app_name="汽车售后多轮客服",
+        app_mode="advanced-chat",
+    )
+    graph = yaml.safe_load(
+        DifyDslCompiler(
+            dsl_version="9.9.9",
+            default_model_provider="openai",
+            default_model_name="gpt-4o-mini",
+        ).compile(plan)
+    )["workflow"]["graph"]
+    seen = {}
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get_draft_workflow(self, _app_id):
+            return DifyDraftWorkflow(
+                id="workflow-1",
+                graph=graph,
+                features={},
+                hash="hash-1",
+                version="draft",
+                environment_variables=[],
+                conversation_variables=[],
+                raw={},
+            )
+
+        def get_app_detail(self, app_id):
+            return DifyAppDetail(
+                id=app_id,
+                name=plan.name,
+                mode="advanced-chat",
+                description="",
+                raw={},
+            )
+
+        def publish_workflow(self, app_id, *, marked_name=None, marked_comment=None):
+            seen["publish"] = (app_id, marked_name, marked_comment)
+            return DifyPublishResult(result="success", created_at="2026-06-12T12:00:00")
+
+        def list_workflow_triggers(self, _app_id):
+            raise AssertionError("Chatflow publish must not list workflow triggers.")
+
+        def get_webhook_trigger(self, _app_id, _node_id):
+            raise AssertionError("Chatflow publish must not load workflow webhooks.")
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr("app.main.read_dify_version_info", lambda _: DifyVersionInfo("../dify", "test", "9.9.9"))
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/chat-app-1/publish",
+            json={
+                "expected_hash": "hash-1",
+                "marked_name": "v1.1",
+                "marked_comment": "Chatflow release",
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "published"
+    assert data["app_mode"] == "advanced-chat"
+    assert data["plan"]["app_mode"] == "advanced-chat"
+    assert data["validation"]["ok"] is True
+    assert data["triggers"] == []
+    assert data["webhooks"] == []
+    assert seen["publish"] == ("chat-app-1", "v1.1", "Chatflow release")
 
 
 def test_publish_and_trigger_management_apis(monkeypatch) -> None:

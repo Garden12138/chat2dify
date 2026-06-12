@@ -82,13 +82,13 @@ def guard_plan_change(before: WorkflowPlan, after: WorkflowPlan, changes: list[d
     removed_terminal_ids = [
         node_id
         for node_id in removed_ids
-        if before_nodes[node_id].type in {"start", "end"}
+        if before_nodes[node_id].type in {"start", "end", "answer"}
     ]
     if removed_terminal_ids:
         issues.append(
             ChangeGuardIssue(
                 code="PLAN_CHANGE_TERMINAL_NODE_REMOVED",
-                message="修改删除了 start/end 关键节点。",
+                message="修改删除了 start/end/answer 关键节点。",
                 severity="error",
                 suggestion="确认确实要删除关键节点后，使用 allow_destructive=true。",
                 details={"removed_node_ids": removed_terminal_ids},
