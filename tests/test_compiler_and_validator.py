@@ -5,6 +5,7 @@ from uuid import UUID
 from app.agent.planner import fallback_plan
 from app.agent.normalizer import normalize_plan_payload
 from app.compiler.dify import DifyDslCompiler
+from app.dify.graph import decompile_dify_graph
 from app.dify.knowledge_retrieval import apply_dataset_retrieval_settings
 from app.models import WorkflowPlan
 from app.validator import has_errors, validate_dsl, validate_plan
@@ -217,6 +218,292 @@ def test_chatflow_validator_rejects_start_scoped_system_query() -> None:
     issues = validate_plan(plan)
 
     assert "PLAN_CHATFLOW_SYSTEM_REFERENCE_INVALID" in {issue.code for issue in issues}
+
+
+def test_chatflow_normalizer_converts_all_branch_end_nodes_to_answers() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "name": "售后问题分流",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+                {
+                    "id": "classifier",
+                    "type": "question-classifier",
+                    "params": {
+                        "query_variable_selector": ["start", "query"],
+                        "classes": [
+                            {"id": "complaint", "name": "投诉"},
+                            {"id": "consult", "name": "咨询"},
+                        ],
+                    },
+                },
+                {"id": "complaint_llm", "type": "llm", "params": {"user_prompt": "处理投诉：{{#start.query#}}"}},
+                {"id": "consult_llm", "type": "llm", "params": {"user_prompt": "处理咨询：{{#start.query#}}"}},
+                {
+                    "id": "complaint_end",
+                    "type": "end",
+                    "params": {"outputs": [{"variable": "answer", "value_selector": ["complaint_llm", "text"]}]},
+                },
+                {
+                    "id": "consult_end",
+                    "type": "end",
+                    "params": {"outputs": [{"variable": "answer", "value_selector": ["consult_llm", "text"]}]},
+                },
+            ],
+            "edges": [
+                {"source": "start", "target": "classifier"},
+                {"source": "classifier", "target": "complaint_llm", "source_handle": "complaint"},
+                {"source": "classifier", "target": "consult_llm", "source_handle": "consult"},
+                {"source": "complaint_llm", "target": "complaint_end"},
+                {"source": "consult_llm", "target": "consult_end"},
+            ],
+        },
+        app_mode="advanced-chat",
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+
+    assert {node.id for node in plan.nodes if node.type == "answer"} == {
+        "complaint_end",
+        "consult_end",
+    }
+    assert not [node for node in plan.nodes if node.type == "end"]
+    assert next(node for node in plan.nodes if node.id == "classifier").params[
+        "query_variable_selector"
+    ] == ["start", "sys.query"]
+    assert validate_plan(plan) == []
+
+
+def test_chatflow_validator_requires_every_path_to_finish_at_answer() -> None:
+    dangling = WorkflowPlan.model_validate(
+        {
+            "name": "存在悬空分支的 Chatflow",
+            "app_mode": "advanced-chat",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": []}},
+                {
+                    "id": "branch",
+                    "type": "if-else",
+                    "params": {
+                        "cases": [
+                            {
+                                "case_id": "matched",
+                                "conditions": [
+                                    {
+                                        "variable_selector": ["start", "sys.query"],
+                                        "comparison_operator": "contains",
+                                        "value": "投诉",
+                                        "varType": "string",
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                },
+                {"id": "reply", "type": "llm", "params": {"user_prompt": "回复 {{#sys.query#}}"}},
+                {"id": "answer", "type": "answer", "params": {"answer": "{{#reply.text#}}"}},
+                {"id": "dangling", "type": "code", "params": {
+                    "code": "def main() -> dict:\n    return {\"result\": \"no reply\"}\n",
+                    "variables": [],
+                    "outputs": {"result": {"type": "string", "children": None}},
+                }},
+            ],
+            "edges": [
+                {"source": "start", "target": "branch"},
+                {"source": "branch", "target": "reply", "source_handle": "matched"},
+                {"source": "branch", "target": "dangling", "source_handle": "false"},
+                {"source": "reply", "target": "answer"},
+            ],
+        }
+    )
+    answer_outgoing = WorkflowPlan.model_validate(
+        {
+            "name": "Answer 后仍继续执行",
+            "app_mode": "advanced-chat",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": []}},
+                {"id": "answer", "type": "answer", "params": {"answer": "{{#sys.query#}}"}},
+                {"id": "after", "type": "llm", "params": {"user_prompt": "{{#sys.query#}}"}},
+            ],
+            "edges": [
+                {"source": "start", "target": "answer"},
+                {"source": "answer", "target": "after"},
+            ],
+        }
+    )
+    cyclic = WorkflowPlan.model_validate(
+        {
+            "name": "存在普通节点环的 Chatflow",
+            "app_mode": "advanced-chat",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": []}},
+                {"id": "step_a", "type": "llm", "params": {"user_prompt": "A {{#sys.query#}}"}},
+                {"id": "step_b", "type": "llm", "params": {"user_prompt": "B {{#sys.query#}}"}},
+                {"id": "answer", "type": "answer", "params": {"answer": "{{#step_b.text#}}"}},
+            ],
+            "edges": [
+                {"source": "start", "target": "step_a"},
+                {"source": "step_a", "target": "step_b"},
+                {"source": "step_b", "target": "step_a"},
+                {"source": "step_b", "target": "answer"},
+            ],
+        }
+    )
+
+    assert "PLAN_CHATFLOW_PATH_WITHOUT_ANSWER" in {
+        issue.code for issue in validate_plan(dangling)
+    }
+    assert "PLAN_ANSWER_HAS_OUTGOING_EDGE" in {
+        issue.code for issue in validate_plan(answer_outgoing)
+    }
+    assert "DSL_CHATFLOW_PATH_WITHOUT_ANSWER" in {
+        issue.code
+        for issue in validate_dsl(
+            _compiler().compile(dangling),
+            expected_dsl_version="9.9.9",
+        )
+    }
+    assert "DSL_ANSWER_HAS_OUTGOING_EDGE" in {
+        issue.code
+        for issue in validate_dsl(
+            _compiler().compile(answer_outgoing),
+            expected_dsl_version="9.9.9",
+        )
+    }
+    assert "PLAN_CHATFLOW_CYCLE_INVALID" in {
+        issue.code for issue in validate_plan(cyclic)
+    }
+    assert "DSL_CHATFLOW_CYCLE_INVALID" in {
+        issue.code
+        for issue in validate_dsl(
+            _compiler().compile(cyclic),
+            expected_dsl_version="9.9.9",
+        )
+    }
+
+
+def test_chatflow_certified_branch_nodes_compile_and_round_trip() -> None:
+    normalized = normalize_plan_payload(
+        _chatflow_branch_plan(),
+        app_mode="advanced-chat",
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    dsl = _compiler().compile(plan)
+    graph = yaml.safe_load(dsl)["workflow"]["graph"]
+    restored = decompile_dify_graph(
+        graph,
+        name=plan.name,
+        app_mode="advanced-chat",
+    )
+
+    assert validate_plan(plan) == []
+    assert validate_dsl(dsl, expected_dsl_version="9.9.9") == []
+    assert validate_plan(restored) == []
+    assert {node.type for node in restored.nodes} >= {
+        "question-classifier",
+        "parameter-extractor",
+        "if-else",
+        "answer",
+    }
+    classifier = next(node for node in plan.nodes if node.id == "classifier")
+    extractor = next(node for node in plan.nodes if node.id == "extract")
+    assert classifier.params["query_variable_selector"] == ["start", "sys.query"]
+    assert extractor.params["query"] == ["start", "sys.query"]
+
+
+def test_chatflow_certified_data_nodes_compile_and_round_trip() -> None:
+    normalized = normalize_plan_payload(
+        _chatflow_data_plan(),
+        app_mode="advanced-chat",
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    dsl = _compiler().compile(plan)
+    graph = yaml.safe_load(dsl)["workflow"]["graph"]
+    restored = decompile_dify_graph(
+        graph,
+        name=plan.name,
+        app_mode="advanced-chat",
+    )
+
+    assert validate_plan(plan) == []
+    assert validate_dsl(dsl, expected_dsl_version="9.9.9") == []
+    assert validate_plan(restored) == []
+    assert {node.type for node in restored.nodes} >= {
+        "document-extractor",
+        "variable-aggregator",
+        "code",
+        "list-operator",
+        "http-request",
+        "template-transform",
+    }
+    assert next(node for node in plan.nodes if node.id == "doc").params[
+        "variable_selector"
+    ] == ["start", "sys.files"]
+    assert next(node for node in plan.nodes if node.id == "list").params[
+        "variable"
+    ] == ["start", "items", "records"]
+    assert "{{#sys.query#}}" in next(
+        node for node in plan.nodes if node.id == "http"
+    ).params["url"]
+    assert "{{#sys.query#}}" in next(
+        node for node in plan.nodes if node.id == "http"
+    ).params["body"]["data"]
+    assert ["start", "sys.query"] in next(
+        node for node in plan.nodes if node.id == "aggregate"
+    ).params["variables"]
+
+
+def test_chatflow_rag_tool_and_agent_use_selected_resources_and_round_trip() -> None:
+    tool_selection = {
+        "provider_id": "provider-real",
+        "provider_type": "builtin",
+        "provider_name": "websearch",
+        "tool_name": "search",
+        "tool_label": "搜索",
+        "parameters": [{"name": "query", "form": "llm", "type": "string", "required": True}],
+        "output_schema": {"properties": {"answer": {"type": "string"}}},
+        "plugin_unique_identifier": "websearch:1.0.0",
+        "tool_parameters": {"query": {"type": "mixed", "value": "{{#start.query#}}"}},
+    }
+    agent_selection = {
+        "agent_strategy_provider_name": "langgenius/agent/react",
+        "agent_strategy_name": "react",
+        "agent_strategy_label": "ReAct",
+        "parameters": [{"name": "query", "type": "text-input", "required": True}],
+        "output_schema": {"properties": {"answer": {"type": "string"}}},
+        "plugin_unique_identifier": "langgenius/agent:1.0.0",
+        "agent_parameters": {"query": {"type": "constant", "value": "{{#start.query#}}"}},
+    }
+    normalized = normalize_plan_payload(
+        _chatflow_resource_plan(),
+        app_mode="advanced-chat",
+        default_dataset_ids=["dataset-real"],
+        tool_selections=[tool_selection],
+        agent_selections=[agent_selection],
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    dsl = _compiler_with_datasets().compile(plan)
+    graph = yaml.safe_load(dsl)["workflow"]["graph"]
+    restored = decompile_dify_graph(
+        graph,
+        name=plan.name,
+        app_mode="advanced-chat",
+    )
+    tool = next(node for node in plan.nodes if node.id == "tool")
+    agent = next(node for node in plan.nodes if node.id == "agent")
+
+    assert validate_plan(plan) == []
+    assert validate_dsl(dsl, expected_dsl_version="9.9.9") == []
+    assert validate_plan(restored) == []
+    assert tool.params["provider_id"] == "provider-real"
+    assert tool.params["tool_name"] == "search"
+    assert set(tool.params["tool_parameters"]) == {"query"}
+    assert tool.params["tool_parameters"]["query"]["value"] == "{{#sys.query#}}"
+    assert agent.params["agent_strategy_name"] == "react"
+    assert set(agent.params["agent_parameters"]) == {"query"}
+    assert agent.params["agent_parameters"]["query"]["value"] == "{{#sys.query#}}"
+    assert next(node for node in plan.nodes if node.id == "knowledge").params[
+        "dataset_ids"
+    ] == ["dataset-real"]
 
 
 def test_plan_rejects_isolated_node() -> None:
@@ -2279,5 +2566,249 @@ def _shorthand_branch_plan() -> dict:
             {"source": "llm_refund", "target": "end_refund"},
             {"source": "llm_invoice", "target": "end_invoice"},
             {"source": "llm_general", "target": "end_general"},
+        ],
+    }
+
+
+def _chatflow_branch_plan() -> dict:
+    return {
+        "name": "售后诉求智能分流",
+        "nodes": [
+            {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+            {
+                "id": "classifier",
+                "type": "question-classifier",
+                "params": {
+                    "query_variable_selector": ["start", "query"],
+                    "classes": [
+                        {"id": "complaint", "name": "投诉"},
+                        {"id": "consult", "name": "咨询"},
+                    ],
+                    "instruction": "判断客户是投诉还是一般咨询。",
+                },
+            },
+            {
+                "id": "extract",
+                "type": "parameter-extractor",
+                "params": {
+                    "query": ["start", "query"],
+                    "parameters": [
+                        {
+                            "name": "issue",
+                            "type": "string",
+                            "description": "客户投诉问题",
+                            "required": True,
+                        }
+                    ],
+                    "instruction": "提取客户投诉问题。",
+                },
+            },
+            {
+                "id": "urgent",
+                "type": "if-else",
+                "params": {
+                    "cases": [
+                        {
+                            "case_id": "urgent",
+                            "conditions": [
+                                {
+                                    "variable_selector": ["extract", "issue"],
+                                    "comparison_operator": "contains",
+                                    "value": "安全",
+                                    "varType": "string",
+                                }
+                            ],
+                        }
+                    ]
+                },
+            },
+            {
+                "id": "urgent_llm",
+                "type": "llm",
+                "params": {"user_prompt": "优先处理安全投诉：{{#extract.issue#}}\n{{#start.query#}}"},
+            },
+            {
+                "id": "complaint_llm",
+                "type": "llm",
+                "params": {"user_prompt": "处理一般投诉：{{#extract.issue#}}\n{{#start.query#}}"},
+            },
+            {
+                "id": "consult_llm",
+                "type": "llm",
+                "params": {"user_prompt": "回答客户咨询：{{#start.query#}}"},
+            },
+            {"id": "urgent_answer", "type": "answer", "params": {"answer": "{{#urgent_llm.text#}}"}},
+            {
+                "id": "complaint_answer",
+                "type": "answer",
+                "params": {"answer": "{{#complaint_llm.text#}}"},
+            },
+            {"id": "consult_answer", "type": "answer", "params": {"answer": "{{#consult_llm.text#}}"}},
+        ],
+        "edges": [
+            {"source": "start", "target": "classifier"},
+            {"source": "classifier", "target": "extract", "source_handle": "complaint"},
+            {"source": "classifier", "target": "consult_llm", "source_handle": "consult"},
+            {"source": "extract", "target": "urgent"},
+            {"source": "urgent", "target": "urgent_llm", "source_handle": "urgent"},
+            {"source": "urgent", "target": "complaint_llm", "source_handle": "false"},
+            {"source": "urgent_llm", "target": "urgent_answer"},
+            {"source": "complaint_llm", "target": "complaint_answer"},
+            {"source": "consult_llm", "target": "consult_answer"},
+        ],
+    }
+
+
+def _chatflow_data_plan() -> dict:
+    return {
+        "name": "附件与记录综合处理",
+        "nodes": [
+            {
+                "id": "start",
+                "type": "start",
+                "params": {
+                    "variables": [
+                        {"name": "query"},
+                        {"name": "files", "type": "file-list"},
+                        {"name": "items", "type": "json"},
+                    ]
+                },
+            },
+            {
+                "id": "doc",
+                "type": "document-extractor",
+                "params": {"variable_selector": ["start", "files"], "is_array_file": True},
+            },
+            {
+                "id": "aggregate",
+                "type": "variable-aggregator",
+                "params": {
+                    "variables": [["doc", "text"], ["start", "query"]],
+                    "output_type": "string",
+                },
+            },
+            {
+                "id": "code",
+                "type": "code",
+                "params": {
+                    "code": "def main(text: str) -> dict:\n    return {\"result\": text.strip()}\n",
+                    "variables": [{"variable": "text", "value_selector": ["aggregate", "output"]}],
+                    "outputs": {"result": {"type": "string", "children": None}},
+                },
+            },
+            {
+                "id": "list",
+                "type": "list-operator",
+                "params": {
+                    "variable": ["start", "items", "records"],
+                    "var_type": "array[string]",
+                    "item_var_type": "string",
+                    "limit": {"enabled": True, "size": 3},
+                },
+            },
+            {
+                "id": "http",
+                "type": "http-request",
+                "params": {
+                    "method": "POST",
+                    "url": "https://example.com/search?q={{#start.query#}}",
+                    "body": {
+                        "type": "raw-text",
+                        "data": '{"query":"{{#start.query#}}"}',
+                    },
+                },
+            },
+            {
+                "id": "template",
+                "type": "template-transform",
+                "params": {
+                    "template": "接口结果：{{#http.body#}}",
+                    "variables": [{"variable": "body", "value_selector": ["http", "body"]}],
+                },
+            },
+            {
+                "id": "llm",
+                "type": "llm",
+                "params": {
+                    "user_prompt": (
+                        "客户问题：{{#start.query#}}\n"
+                        "附件：{{#code.result#}}\n"
+                        "记录：{{#list.result#}}\n"
+                        "接口：{{#template.output#}}"
+                    )
+                },
+            },
+            {"id": "answer", "type": "answer", "params": {"answer": "{{#llm.text#}}"}},
+        ],
+        "edges": [
+            {"source": "start", "target": "doc"},
+            {"source": "doc", "target": "aggregate"},
+            {"source": "aggregate", "target": "code"},
+            {"source": "code", "target": "list"},
+            {"source": "list", "target": "http"},
+            {"source": "http", "target": "template"},
+            {"source": "template", "target": "llm"},
+            {"source": "llm", "target": "answer"},
+        ],
+    }
+
+
+def _chatflow_resource_plan() -> dict:
+    return {
+        "name": "知识工具智能体客服",
+        "nodes": [
+            {"id": "start", "type": "start", "params": {"variables": [{"name": "query"}]}},
+            {
+                "id": "knowledge",
+                "type": "knowledge-retrieval",
+                "params": {"query_variable_selector": ["start", "query"]},
+            },
+            {
+                "id": "tool",
+                "type": "tool",
+                "params": {
+                    "provider_id": "invented-provider",
+                    "provider_type": "api",
+                    "tool_name": "invented-tool",
+                    "parameters": [
+                        {"name": "invented", "form": "llm", "type": "string", "required": False}
+                    ],
+                    "tool_parameters": {
+                        "invented": {"type": "mixed", "value": "{{#start.query#}}"}
+                    },
+                },
+            },
+            {
+                "id": "agent",
+                "type": "agent",
+                "params": {
+                    "agent_strategy_provider_name": "invented/agent",
+                    "agent_strategy_name": "invented",
+                    "parameters": [{"name": "invented", "type": "text-input"}],
+                    "agent_parameters": {
+                        "invented": {"type": "constant", "value": "{{#start.query#}}"}
+                    },
+                },
+            },
+            {
+                "id": "llm",
+                "type": "llm",
+                "params": {
+                    "user_prompt": (
+                        "问题：{{#start.query#}}\n"
+                        "知识：{{#knowledge.result#}}\n"
+                        "工具：{{#tool.answer#}}\n"
+                        "智能体：{{#agent.answer#}}"
+                    )
+                },
+            },
+            {"id": "answer", "type": "answer", "params": {"answer": "{{#llm.text#}}"}},
+        ],
+        "edges": [
+            {"source": "start", "target": "knowledge"},
+            {"source": "knowledge", "target": "tool"},
+            {"source": "tool", "target": "agent"},
+            {"source": "agent", "target": "llm"},
+            {"source": "llm", "target": "answer"},
         ],
     }

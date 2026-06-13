@@ -4,7 +4,13 @@ from uuid import UUID
 import httpx
 import pytest
 
-from app.agent.planner import PlannerError, WorkflowPlanner, _read_streamed_chat_completion, fallback_plan
+from app.agent.planner import (
+    CHATFLOW_SYSTEM_PROMPT,
+    PlannerError,
+    WorkflowPlanner,
+    _read_streamed_chat_completion,
+    fallback_plan,
+)
 from app.config import Settings
 from app.tasks import TaskCancelled
 
@@ -45,6 +51,7 @@ class FakePlanner(WorkflowPlanner):
         last_error: str = "",
         tool_selections: list[dict] | None = None,
         agent_selections: list[dict] | None = None,
+        app_mode: str = "workflow",
     ) -> str:
         self.last_errors.append(last_error)
         if not self.responses:
@@ -209,6 +216,16 @@ def test_fallback_plan_uses_semantic_titles_and_split_prompts() -> None:
     assert "审核标准" not in llm.params["user_prompt"]
 
 
+def test_chatflow_prompt_is_mode_specific_and_lists_certified_nodes() -> None:
+    assert 'set app_mode to "advanced-chat"' in CHATFLOW_SYSTEM_PROMPT
+    assert "Use exactly one start node and at least one end node." not in CHATFLOW_SYSTEM_PROMPT
+    assert "then end" not in CHATFLOW_SYSTEM_PROMPT
+    assert "question-classifier" in CHATFLOW_SYSTEM_PROMPT
+    assert "knowledge-retrieval" in CHATFLOW_SYSTEM_PROMPT
+    assert "tool, agent" in CHATFLOW_SYSTEM_PROMPT
+    assert "response path must finish at an answer node" in CHATFLOW_SYSTEM_PROMPT
+
+
 def test_planner_success_normalizes_shorthand() -> None:
     planner = FakePlanner([json.dumps(_shorthand_plan())])
 
@@ -279,6 +296,85 @@ def test_planner_accepts_selected_tool_node() -> None:
     assert tool.title == "调用搜索"
     assert tool.params["provider_id"] == "provider-1"
     assert tool.params["tool_parameters"]["query"] == {"type": "mixed", "value": "{{#start.query#}}"}
+
+
+def test_chatflow_planner_converts_multiple_branch_ends() -> None:
+    planner = FakePlanner([json.dumps(_chatflow_multi_end_plan())])
+
+    result = planner.generate(
+        "创建投诉和咨询分流 Chatflow",
+        app_name="客服分流",
+        app_mode="advanced-chat",
+        dsl_version="9.9.9",
+    )
+
+    assert result.plan.app_mode == "advanced-chat"
+    assert {node.id for node in result.plan.nodes if node.type == "answer"} == {
+        "complaint_end",
+        "consult_end",
+    }
+    assert not [node for node in result.plan.nodes if node.type == "end"]
+    assert result.attempts == 1
+
+
+def test_chatflow_planner_retries_tool_not_selected_in_request() -> None:
+    bad = _chatflow_tool_plan("invented-provider", "invented-tool")
+    good = _chatflow_tool_plan("provider-2", "lookup")
+    planner = FakePlanner([json.dumps(bad), json.dumps(good)])
+    selections = [
+        {
+            "provider_id": "provider-1",
+            "provider_type": "builtin",
+            "provider_name": "search-one",
+            "tool_name": "search",
+            "parameters": [{"name": "query", "form": "llm", "type": "string", "required": True}],
+            "output_schema": {"properties": {"answer": {"type": "string"}}},
+        },
+        {
+            "provider_id": "provider-2",
+            "provider_type": "builtin",
+            "provider_name": "search-two",
+            "tool_name": "lookup",
+            "parameters": [{"name": "query", "form": "llm", "type": "string", "required": True}],
+            "output_schema": {"properties": {"answer": {"type": "string"}}},
+        },
+    ]
+
+    result = planner.generate(
+        "调用已选择的查询工具",
+        app_name="工具客服",
+        app_mode="advanced-chat",
+        dsl_version="9.9.9",
+        tool_selections=selections,
+    )
+
+    tool = next(node for node in result.plan.nodes if node.type == "tool")
+    assert result.attempts == 2
+    assert "PLAN_TOOL_NOT_SELECTED" in planner.last_errors[1]
+    assert tool.params["provider_id"] == "provider-2"
+    assert tool.params["tool_name"] == "lookup"
+    assert tool.params["tool_parameters"]["query"]["value"] == "{{#sys.query#}}"
+
+
+def test_chatflow_planner_retries_invented_dataset_id() -> None:
+    bad = _chatflow_knowledge_plan(dataset_ids=["invented-dataset"])
+    good = _chatflow_knowledge_plan(dataset_ids=[])
+    planner = FakePlanner(
+        [json.dumps(bad), json.dumps(good)],
+        settings=_settings(dataset_ids="dataset-real"),
+    )
+
+    result = planner.generate(
+        "根据选中的知识库回答",
+        app_name="知识库客服",
+        app_mode="advanced-chat",
+        dsl_version="9.9.9",
+    )
+
+    knowledge = next(node for node in result.plan.nodes if node.type == "knowledge-retrieval")
+    assert result.attempts == 2
+    assert "PLAN_KNOWLEDGE_DATASET_NOT_SELECTED" in planner.last_errors[1]
+    assert knowledge.params["dataset_ids"] == ["dataset-real"]
 
 
 def test_planner_accepts_knowledge_retrieval_node_with_default_dataset_ids() -> None:
@@ -654,4 +750,123 @@ def _loop_plan() -> dict:
             {"id": "end", "type": "end", "title": "返回检查结果", "params": {"outputs": [{"variable": "answer", "value_selector": ["start", "query"]}]}},
         ],
         "edges": [{"source": "start", "target": "retry"}, {"source": "retry", "target": "end"}],
+    }
+
+
+def _chatflow_multi_end_plan() -> dict:
+    return {
+        "nodes": [
+            {"id": "start", "type": "start", "title": "接收客户问题", "params": {"variables": []}},
+            {
+                "id": "classifier",
+                "type": "question-classifier",
+                "title": "判断客户诉求",
+                "params": {
+                    "query_variable_selector": ["start", "query"],
+                    "classes": [
+                        {"id": "complaint", "name": "投诉"},
+                        {"id": "consult", "name": "咨询"},
+                    ],
+                    "instruction": "判断客户诉求类型。",
+                },
+            },
+            {
+                "id": "complaint_llm",
+                "type": "llm",
+                "title": "生成投诉回复",
+                "params": {"user_prompt": "回复投诉：{{#start.query#}}"},
+            },
+            {
+                "id": "consult_llm",
+                "type": "llm",
+                "title": "生成咨询回复",
+                "params": {"user_prompt": "回复咨询：{{#start.query#}}"},
+            },
+            {
+                "id": "complaint_end",
+                "type": "end",
+                "title": "回复投诉客户",
+                "params": {"outputs": [{"variable": "answer", "value_selector": ["complaint_llm", "text"]}]},
+            },
+            {
+                "id": "consult_end",
+                "type": "end",
+                "title": "回复咨询客户",
+                "params": {"outputs": [{"variable": "answer", "value_selector": ["consult_llm", "text"]}]},
+            },
+        ],
+        "edges": [
+            {"source": "start", "target": "classifier"},
+            {"source": "classifier", "target": "complaint_llm", "source_handle": "complaint"},
+            {"source": "classifier", "target": "consult_llm", "source_handle": "consult"},
+            {"source": "complaint_llm", "target": "complaint_end"},
+            {"source": "consult_llm", "target": "consult_end"},
+        ],
+    }
+
+
+def _chatflow_tool_plan(provider_id: str, tool_name: str) -> dict:
+    return {
+        "nodes": [
+            {"id": "start", "type": "start", "title": "接收查询问题", "params": {"variables": []}},
+            {
+                "id": "tool",
+                "type": "tool",
+                "title": "调用查询工具",
+                "params": {
+                    "provider_id": provider_id,
+                    "provider_type": "builtin",
+                    "tool_name": tool_name,
+                    "tool_parameters": {
+                        "query": {"type": "mixed", "value": "{{#start.query#}}"}
+                    },
+                },
+            },
+            {
+                "id": "answer",
+                "type": "answer",
+                "title": "返回工具结果",
+                "params": {"answer": "{{#tool.answer#}}"},
+            },
+        ],
+        "edges": [
+            {"source": "start", "target": "tool"},
+            {"source": "tool", "target": "answer"},
+        ],
+    }
+
+
+def _chatflow_knowledge_plan(*, dataset_ids: list[str]) -> dict:
+    return {
+        "nodes": [
+            {"id": "start", "type": "start", "title": "接收知识问题", "params": {"variables": []}},
+            {
+                "id": "knowledge",
+                "type": "knowledge-retrieval",
+                "title": "检索选中知识库",
+                "params": {
+                    "query_variable_selector": ["start", "query"],
+                    "dataset_ids": dataset_ids,
+                },
+            },
+            {
+                "id": "llm",
+                "type": "llm",
+                "title": "生成知识回答",
+                "params": {
+                    "user_prompt": "问题：{{#start.query#}}\n资料：{{#knowledge.result#}}"
+                },
+            },
+            {
+                "id": "answer",
+                "type": "answer",
+                "title": "回复知识答案",
+                "params": {"answer": "{{#llm.text#}}"},
+            },
+        ],
+        "edges": [
+            {"source": "start", "target": "knowledge"},
+            {"source": "knowledge", "target": "llm"},
+            {"source": "llm", "target": "answer"},
+        ],
     }

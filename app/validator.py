@@ -312,6 +312,7 @@ def validate_dsl(yaml_content: str, *, expected_dsl_version: str | None = None) 
                     )
                 )
         if isinstance(edges, list):
+            edge_pairs: list[tuple[str, str]] = []
             for edge in edges:
                 if not isinstance(edge, dict):
                     continue
@@ -320,6 +321,47 @@ def validate_dsl(yaml_content: str, *, expected_dsl_version: str | None = None) 
                         ValidationIssue(
                             code="DSL_EDGE_INVALID",
                             message=f"Edge references missing node: {edge.get('id')}",
+                        )
+                    )
+                    continue
+                edge_pairs.append((str(edge.get("source")), str(edge.get("target"))))
+            if app_mode == "advanced-chat":
+                answer_ids = {
+                    str(node_id)
+                    for node_id, node_type in node_types.items()
+                    if node_type == "answer"
+                }
+                answer_sources = {source for source, _target in edge_pairs if source in answer_ids}
+                for answer_id in sorted(answer_sources):
+                    issues.append(
+                        ValidationIssue(
+                            code="DSL_ANSWER_HAS_OUTGOING_EDGE",
+                            message="advanced-chat answer nodes cannot have outgoing edges.",
+                            node_id=answer_id,
+                            path=f"workflow.graph.nodes.{answer_id}",
+                        )
+                    )
+                unresolved = _nodes_without_answer_path(
+                    {str(node_id) for node_id in node_ids if node_id is not None},
+                    answer_ids,
+                    edge_pairs,
+                )
+                for node_id in _response_path_issue_nodes(unresolved, edge_pairs):
+                    issues.append(
+                        ValidationIssue(
+                            code="DSL_CHATFLOW_PATH_WITHOUT_ANSWER",
+                            message=f"advanced-chat response path cannot reach an answer node: {node_id}",
+                            node_id=node_id,
+                            path=f"workflow.graph.nodes.{node_id}",
+                        )
+                    )
+                for node_id in sorted(_cyclic_nodes(edge_pairs))[:1]:
+                    issues.append(
+                        ValidationIssue(
+                            code="DSL_CHATFLOW_CYCLE_INVALID",
+                            message=f"advanced-chat top-level graph contains a cycle: {node_id}",
+                            node_id=node_id,
+                            path=f"workflow.graph.nodes.{node_id}",
                         )
                     )
     return issues
@@ -334,9 +376,11 @@ def _validate_graph_semantics(plan: WorkflowPlan) -> list[ValidationIssue]:
     node_by_id = {node.id: node for node in plan.nodes}
     incoming: dict[str, list[str]] = {node.id: [] for node in plan.nodes}
     outgoing: dict[str, list[str]] = {node.id: [] for node in plan.nodes}
+    edge_pairs: list[tuple[str, str]] = []
     for edge in plan.edges:
         outgoing.setdefault(edge.source, []).append(edge.source_handle)
         incoming.setdefault(edge.target, []).append(edge.source)
+        edge_pairs.append((edge.source, edge.target))
 
     start_nodes = [node for node in plan.nodes if node.type == "start"]
     trigger_nodes = [
@@ -375,6 +419,16 @@ def _validate_graph_semantics(plan: WorkflowPlan) -> list[ValidationIssue]:
                     suggestion="删除 end 节点之后的连线，或改用非 end 节点承接后续步骤。",
                 )
             )
+        if node.type == "answer" and outgoing.get(node.id):
+            issues.append(
+                ValidationIssue(
+                    code="PLAN_ANSWER_HAS_OUTGOING_EDGE",
+                    message="answer node cannot have outgoing edges.",
+                    node_id=node.id,
+                    path=f"nodes.{node.id}",
+                    suggestion="删除 answer 节点之后的连线；Chatflow 回复路径必须在 answer 结束。",
+                )
+            )
         if plan.app_mode == "advanced-chat" and node.type in {
             "end",
             "trigger-webhook",
@@ -391,6 +445,34 @@ def _validate_graph_semantics(plan: WorkflowPlan) -> list[ValidationIssue]:
                     node_id=node.id,
                     path=f"nodes.{node.id}.type",
                     suggestion="使用 start 作为入口，并使用 answer 输出对话回复。",
+                )
+            )
+
+    if plan.app_mode == "advanced-chat":
+        answer_ids = {node.id for node in plan.nodes if node.type == "answer"}
+        unresolved = _nodes_without_answer_path(
+            {node.id for node in plan.nodes},
+            answer_ids,
+            edge_pairs,
+        )
+        for node_id in _response_path_issue_nodes(unresolved, edge_pairs):
+            issues.append(
+                ValidationIssue(
+                    code="PLAN_CHATFLOW_PATH_WITHOUT_ANSWER",
+                    message=f"Chatflow response path cannot reach an answer node: {node_id}",
+                    node_id=node_id,
+                    path=f"nodes.{node_id}",
+                    suggestion="将该路径连接到 answer 节点，或删除无响应的分支。",
+                )
+            )
+        for node_id in sorted(_cyclic_nodes(edge_pairs))[:1]:
+            issues.append(
+                ValidationIssue(
+                    code="PLAN_CHATFLOW_CYCLE_INVALID",
+                    message=f"Chatflow top-level graph contains a cycle: {node_id}",
+                    node_id=node_id,
+                    path=f"nodes.{node_id}",
+                    suggestion="删除普通节点环；需要重复执行时使用 Dify loop 容器。",
                 )
             )
 
@@ -532,6 +614,72 @@ def _validate_graph_semantics(plan: WorkflowPlan) -> list[ValidationIssue]:
                     )
                 )
     return issues
+
+
+def _nodes_without_answer_path(
+    node_ids: set[str],
+    answer_ids: set[str],
+    edge_pairs: list[tuple[str, str]],
+) -> set[str]:
+    reverse: dict[str, list[str]] = {}
+    for source, target in edge_pairs:
+        reverse.setdefault(target, []).append(source)
+
+    can_reach_answer = set(answer_ids)
+    stack = list(answer_ids)
+    while stack:
+        node_id = stack.pop()
+        for source in reverse.get(node_id, []):
+            if source not in can_reach_answer:
+                can_reach_answer.add(source)
+                stack.append(source)
+    return node_ids - can_reach_answer
+
+
+def _response_path_issue_nodes(
+    unresolved: set[str],
+    edge_pairs: list[tuple[str, str]],
+) -> list[str]:
+    if not unresolved:
+        return []
+    outgoing_targets: dict[str, list[str]] = {}
+    for source, target in edge_pairs:
+        outgoing_targets.setdefault(source, []).append(target)
+    dead_ends = sorted(
+        node_id
+        for node_id in unresolved
+        if not outgoing_targets.get(node_id)
+    )
+    return dead_ends or [sorted(unresolved)[0]]
+
+
+def _cyclic_nodes(edge_pairs: list[tuple[str, str]]) -> set[str]:
+    graph: dict[str, list[str]] = {}
+    for source, target in edge_pairs:
+        graph.setdefault(source, []).append(target)
+
+    state: dict[str, int] = {}
+    stack: list[str] = []
+    stack_index: dict[str, int] = {}
+    cyclic: set[str] = set()
+
+    def visit(node_id: str) -> None:
+        state[node_id] = 1
+        stack_index[node_id] = len(stack)
+        stack.append(node_id)
+        for target in graph.get(node_id, []):
+            if state.get(target, 0) == 0:
+                visit(target)
+            elif state.get(target) == 1:
+                cyclic.update(stack[stack_index[target]:])
+        stack.pop()
+        stack_index.pop(node_id, None)
+        state[node_id] = 2
+
+    for node_id in {item for edge in edge_pairs for item in edge}:
+        if state.get(node_id, 0) == 0:
+            visit(node_id)
+    return cyclic
 
 
 def _validate_node_params(plan: WorkflowPlan) -> list[ValidationIssue]:

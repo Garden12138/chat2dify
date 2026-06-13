@@ -4,7 +4,14 @@ Generate Dify Workflows and Chatflows via Natural Language Conversation.
 
 ## v1.1.0
 
-Chatflow now supports the same reviewed modification and explicit publishing
+Chatflow creation now has certified support for common Dify node combinations:
+semantic and conditional routing, parameter extraction, knowledge retrieval,
+uploaded-document processing, HTTP/template/code processing, selected Tools,
+and selected Agent Strategies. Chatflow plans normalize system inputs to
+`sys.query` and `sys.files`, preserve 10-message LLM memory, and require every
+response path to finish at `answer`.
+
+Chatflow also supports the same reviewed modification and explicit publishing
 flow as Workflow. Existing `advanced-chat` drafts can be loaded, revised through
 Modify Preview, applied with draft hash protection, run across multiple
 conversation turns, and published without introducing Workflow triggers.
@@ -47,7 +54,10 @@ the form `/app/{app_id}/workflow`.
 Chatflow creation uses the same draft/create APIs with
 `"app_mode":"advanced-chat"`. The generated graph uses
 `start -> ... -> answer`, reads the current user message from
-`{{#sys.query#}}`, and enables a 10-message LLM memory window.
+`{{#sys.query#}}`, reads uploaded files from `{{#sys.files#}}`, and enables a
+10-message LLM memory window. Dataset, Tool, and Agent identities must come from
+the request's `dataset_ids`, `tool_selections`, and `agent_selections`; planner
+output cannot introduce unselected resources.
 
 Draft/create responses include `raw_plan`, normalized `plan`, rule-based
 `explanation`, `planner` metadata, `dsl`, and structured validation issues.
@@ -560,7 +570,21 @@ trigger-webhook, trigger-plugin, trigger-schedule, answer
 
 `answer` is only valid in `advanced-chat` mode. Workflow mode continues to use
 `end`; Chatflow requires at least one `answer`, rejects `end` and workflow
-triggers, and reads the current message from `sys.query`.
+triggers, reads the current message from `sys.query`, and requires every
+reachable response path to finish at an `answer` with no outgoing edge.
+
+New Chatflow creation is certified for:
+
+```text
+start, llm, answer, code, if-else, http-request, template-transform,
+question-classifier, parameter-extractor, variable-aggregator,
+document-extractor, list-operator, knowledge-retrieval, tool, agent
+```
+
+`assigner`, `human-input`, `iteration`, and `loop` remain readable and editable
+when already present in a Dify draft, but the creation planner does not add them
+to new Chatflows in v1.1.0. Chatflow conversation-variable creation remains out
+of scope.
 
 `question-classifier` is used for semantic routing such as complaint /
 consultation / appointment branches. `parameter-extractor` is used to extract
@@ -599,40 +623,40 @@ the selected event's output schema. Legacy `_raw_data` Plugin Trigger nodes
 remain passthrough-compatible. `datasource`, `datasource-empty`, and
 `knowledge-index` remain passthrough-only external dependency nodes.
 
-Example file workflow request:
+Example file Chatflow request:
 
 ```text
-创建维修单附件总结工作流。用户上传维修单文件，先提取文件文本，再总结车辆问题、维修建议和需要补充的信息，最后返回 answer。
+创建维修单附件总结 Chatflow。读取用户本轮上传的维修单文件，提取文本后总结车辆问题、维修建议和需要补充的信息，最后通过 Answer 回复。
+```
+
+Example routing Chatflow request:
+
+```text
+创建售后分流 Chatflow。先判断用户属于投诉、咨询还是预约，再提取订单号和门店；每个分类分支生成对应回复，并确保每条分支都通过 Answer 返回。
+```
+
+Example knowledge Chatflow request:
+
+```text
+创建修车售后知识库 Chatflow。根据用户本轮问题检索我选择的门店售后政策知识库，再结合检索资料生成客服回复并通过 Answer 返回。
+```
+
+Example selected Tool and Agent Chatflow request:
+
+```text
+创建智能售后 Chatflow。先调用我选择的搜索工具查询故障资料，再使用我选择的 Agent Strategy 做多步分析，最后由模型整理成面向客户的回复并通过 Answer 返回。
 ```
 
 Example list workflow request:
 
 ```text
-创建售后记录筛选工作流。输入 items 是包含 records 数组的 JSON 对象，筛选投诉类记录并取第一条，然后生成客服回复，最后返回 answer。
-```
-
-Example knowledge workflow request:
-
-```text
-创建修车售后知识库问答工作流。输入 query 是客户售后问题，先从门店售后政策知识库检索相关资料，再用模型结合资料生成客服回复，最后返回 answer。
+创建售后记录筛选工作流。输入 items 是包含 records 数组的 JSON 对象，筛选投诉类记录并取第一条，然后生成客服回复，最后返回结果。
 ```
 
 Example human review workflow request:
 
 ```text
 创建售后人工审核工作流。输入 query 是客户售后诉求，先生成客服回复草稿，再交给经理人工审核；经理可以选择通过或驳回，通过时返回草稿，驳回时返回人工审核意见。
-```
-
-Example batch iteration workflow request:
-
-```text
-创建批量售后记录处理工作流。输入 items 是包含 records 数组的 JSON 对象，遍历每条售后记录，逐条生成处理建议，最后返回建议列表 answer。
-```
-
-Example retry loop workflow request:
-
-```text
-创建最多 3 次维修状态检查工作流。输入 query 是客户提供的维修单号和问题，循环检查处理状态，满足可回复条件或达到 3 次后生成最终回复，最后返回 answer。
 ```
 
 Example selected tool workflow request:

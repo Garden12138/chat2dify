@@ -506,29 +506,27 @@ def _normalize_chatflow_terminal_nodes(
         for node in nodes
         if isinstance(node, dict) and str(node.get("type") or "") == "end"
     ]
-    if len(end_nodes) != 1:
-        return
-    end_node = end_nodes[0]
-    params = end_node.get("params") if isinstance(end_node.get("params"), dict) else {}
-    outputs = params.get("outputs") if isinstance(params.get("outputs"), list) else []
-    selector = None
-    for output in outputs:
-        if not isinstance(output, dict):
-            continue
-        candidate = output.get("value_selector")
-        if isinstance(candidate, list) and len(candidate) >= 2:
-            selector = candidate
-            break
-    answer = (
-        "{{#" + ".".join(str(item) for item in selector) + "#}}"
-        if selector
-        else "{{#llm.text#}}"
-    )
-    end_node["type"] = "answer"
-    end_node["params"] = {"answer": answer}
-    changes.append(
-        f"converted workflow end node {end_node.get('id', '<unknown>')} to chatflow answer"
-    )
+    for end_node in end_nodes:
+        params = end_node.get("params") if isinstance(end_node.get("params"), dict) else {}
+        outputs = params.get("outputs") if isinstance(params.get("outputs"), list) else []
+        selector = None
+        for output in outputs:
+            if not isinstance(output, dict):
+                continue
+            candidate = output.get("value_selector")
+            if isinstance(candidate, list) and len(candidate) >= 2:
+                selector = candidate
+                break
+        answer = (
+            "{{#" + ".".join(str(item) for item in selector) + "#}}"
+            if selector
+            else "{{#llm.text#}}"
+        )
+        end_node["type"] = "answer"
+        end_node["params"] = {"answer": answer}
+        changes.append(
+            f"converted workflow end node {end_node.get('id', '<unknown>')} to chatflow answer"
+        )
 
 
 def _rewrite_chatflow_input_references(
@@ -1932,26 +1930,23 @@ def _normalize_tool_params(params: dict[str, Any], tool_selections: list[dict[st
     result = dict(params)
     selected = _find_selected_tool(result, tool_selections)
     if selected:
-        result.setdefault("provider_id", selected.get("provider_id"))
-        result.setdefault("provider_type", selected.get("provider_type"))
-        result.setdefault("provider_name", selected.get("provider_name") or selected.get("provider_id"))
-        result.setdefault("tool_name", selected.get("tool_name"))
-        result.setdefault("tool_label", selected.get("tool_label") or selected.get("tool_name"))
-        if selected.get("description") and not result.get("tool_description"):
-            result["tool_description"] = selected.get("description")
-        if selected.get("plugin_id") and not result.get("plugin_id"):
-            result["plugin_id"] = selected.get("plugin_id")
-        if selected.get("plugin_unique_identifier") and not result.get("plugin_unique_identifier"):
-            result["plugin_unique_identifier"] = selected.get("plugin_unique_identifier")
-        if selected.get("is_team_authorization") is not None and result.get("is_team_authorization") is None:
-            result["is_team_authorization"] = selected.get("is_team_authorization")
-        if selected.get("output_schema") and not result.get("output_schema"):
-            result["output_schema"] = deepcopy(selected.get("output_schema"))
+        result["provider_id"] = selected.get("provider_id")
+        result["provider_type"] = selected.get("provider_type")
+        result["provider_name"] = selected.get("provider_name") or selected.get("provider_id")
+        result["tool_name"] = selected.get("tool_name")
+        result["tool_label"] = selected.get("tool_label") or selected.get("tool_name")
+        result["tool_description"] = selected.get("description") or ""
+        result["plugin_id"] = selected.get("plugin_id")
+        result["plugin_unique_identifier"] = selected.get("plugin_unique_identifier")
+        result["is_team_authorization"] = selected.get("is_team_authorization")
+        result["output_schema"] = deepcopy(selected.get("output_schema") or {})
 
     schemas = _normalize_tool_param_schemas(
-        result.get("paramSchemas") or result.get("parameters") or (selected or {}).get("parameters") or []
+        (selected or {}).get("parameters")
+        if selected
+        else result.get("paramSchemas") or result.get("parameters") or []
     )
-    if schemas:
+    if schemas or selected:
         result["paramSchemas"] = schemas
     result.pop("parameters", None)
 
@@ -1978,6 +1973,18 @@ def _normalize_tool_params(params: dict[str, Any], tool_selections: list[dict[st
         ),
         schemas,
     )
+    if selected:
+        schema_names = {
+            str(schema.get("variable") or schema.get("name"))
+            for schema in schemas
+            if schema.get("variable") or schema.get("name")
+        }
+        result["tool_parameters"] = {
+            key: value for key, value in result["tool_parameters"].items() if key in schema_names
+        }
+        result["tool_configurations"] = {
+            key: value for key, value in result["tool_configurations"].items() if key in schema_names
+        }
     result.pop("tool_inputs", None)
     result.pop("tool_settings", None)
     result.pop("config", None)
@@ -2018,20 +2025,18 @@ def _normalize_agent_params(params: dict[str, Any], agent_selections: list[dict[
     result = dict(params)
     selected = _find_selected_agent(result, agent_selections)
     if selected:
-        result.setdefault("agent_strategy_provider_name", selected.get("agent_strategy_provider_name"))
-        result.setdefault("agent_strategy_name", selected.get("agent_strategy_name"))
-        result.setdefault("agent_strategy_label", selected.get("agent_strategy_label") or selected.get("agent_strategy_name"))
-        if selected.get("plugin_unique_identifier") and not result.get("plugin_unique_identifier"):
-            result["plugin_unique_identifier"] = selected.get("plugin_unique_identifier")
-        if selected.get("meta") and not result.get("meta"):
-            result["meta"] = deepcopy(selected.get("meta"))
-        if selected.get("output_schema") and not result.get("output_schema"):
-            result["output_schema"] = deepcopy(selected.get("output_schema"))
-        if selected.get("features") and not result.get("features"):
-            result["features"] = deepcopy(selected.get("features"))
+        result["agent_strategy_provider_name"] = selected.get("agent_strategy_provider_name")
+        result["agent_strategy_name"] = selected.get("agent_strategy_name")
+        result["agent_strategy_label"] = selected.get("agent_strategy_label") or selected.get("agent_strategy_name")
+        result["plugin_unique_identifier"] = selected.get("plugin_unique_identifier")
+        result["meta"] = deepcopy(selected.get("meta") or {})
+        result["output_schema"] = deepcopy(selected.get("output_schema") or {})
+        result["features"] = deepcopy(selected.get("features") or [])
 
-    parameters = _normalize_agent_param_schemas(result.get("parameters") or (selected or {}).get("parameters") or [])
-    if parameters:
+    parameters = _normalize_agent_param_schemas(
+        (selected or {}).get("parameters") if selected else result.get("parameters") or []
+    )
+    if parameters or selected:
         result["parameters"] = parameters
 
     result["agent_strategy_provider_name"] = str(result.get("agent_strategy_provider_name") or "").strip()
@@ -2046,6 +2051,15 @@ def _normalize_agent_params(params: dict[str, Any], agent_selections: list[dict[
         _merge_tool_inputs(result.get("agent_parameters") or result.get("parameters_value") or {}, explicit_parameters),
         parameters,
     )
+    if selected:
+        parameter_names = {
+            str(parameter.get("variable") or parameter.get("name"))
+            for parameter in parameters
+            if parameter.get("variable") or parameter.get("name")
+        }
+        result["agent_parameters"] = {
+            key: value for key, value in result["agent_parameters"].items() if key in parameter_names
+        }
     result.pop("parameters_value", None)
     return result
 

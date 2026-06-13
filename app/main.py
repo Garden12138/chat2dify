@@ -1132,11 +1132,33 @@ def _ensure_agent_strategy_selection_for_request(message: str, agent_selections)
 
 def _message_requests_agent_strategy(message: str) -> bool:
     text = (message or "").lower().replace("user agent", "")
-    if any(keyword in text for keyword in ("智能体", "agent strategy", "agent策略", "agent 节点", "agent节点")):
-        return True
-    if any(keyword in text for keyword in ("自主规划", "多步执行")):
-        return True
-    return bool(re.search(r"\bagent\b", text))
+    patterns = (
+        r"智能体",
+        r"agent strategy",
+        r"agent策略",
+        r"agent 节点",
+        r"agent节点",
+        r"自主规划",
+        r"多步执行",
+        r"\bagent\b",
+    )
+    return any(
+        not _agent_term_is_negated(text, match.start())
+        for pattern in patterns
+        for match in re.finditer(pattern, text)
+    )
+
+
+def _agent_term_is_negated(text: str, start: int) -> bool:
+    prefix = text[max(0, start - 36):start]
+    return bool(
+        re.search(
+            r"(?:不需要|无需|无须|不要|不使用|不是|禁止|避免|别|"
+            r"do not|don't|without|no need to)"
+            r"[^。！？!?；;，,\n]{0,28}$",
+            prefix,
+        )
+    )
 
 
 def _ensure_agent_selections_configured(agent_selections) -> None:

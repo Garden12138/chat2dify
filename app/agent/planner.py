@@ -126,25 +126,73 @@ End node params.outputs items must include variable and value_selector, for exam
 {"variable":"answer","value_selector":["llm_1","text"]}.
 """
 
-CHATFLOW_SYSTEM_PROMPT = SYSTEM_PROMPT + """
+CHATFLOW_SYSTEM_PROMPT = """You turn a user's Chatflow request into a compact
+JSON WorkflowPlan. Return only JSON and set app_mode to "advanced-chat".
 
-The requested app_mode is advanced-chat. These chatflow rules override any
-workflow-only ending or input instructions above:
-- Set app_mode to "advanced-chat".
-- Use exactly one start node and at least one answer node.
-- Never generate end, trigger-webhook, trigger-plugin, trigger-schedule,
-  datasource, datasource-empty, or knowledge-index nodes.
-- The current user message is {{#sys.query#}} and uploaded files are
-  {{#sys.files#}}. Never use {{#start.query#}} or {{#start.files#}} in text.
-- For selectors belonging to the start node, use ["<start_id>","sys.query"]
-  or ["<start_id>","sys.files"].
-- The start-id form is only valid in selector arrays. In prompt/template text,
-  never write {{#<start_id>.sys.query#}} or {{#<start_id>.sys.files#}}.
-- Every llm node must keep system_prompt for identity/rules/output criteria and
-  user_prompt for the current task. user_prompt must include {{#sys.query#}}.
-- Finish each response path with an answer node. Its params are
-  {"answer":"{{#<upstream_node_id>.<output>#}}"}.
-- Do not create end.outputs. For a simple request use start -> llm -> answer.
+Supported top-level node types for new Chatflows are:
+start, llm, code, if-else, answer, http-request, template-transform,
+question-classifier, parameter-extractor, variable-aggregator,
+document-extractor, list-operator, knowledge-retrieval, tool, agent.
+Do not generate end, assigner, human-input, iteration, loop, datasource,
+datasource-empty, knowledge-index, or any trigger node.
+
+Use exactly one start node. Every node must be reachable from start, every
+possible response path must finish at an answer node, and answer nodes must not
+have outgoing edges. For a simple request use start -> llm -> answer.
+
+The current user message is {{#sys.query#}} and uploaded files are
+{{#sys.files#}}. In prompt, template, URL, body, tool, and agent text values,
+never use {{#start.query#}}, {{#start.files#}},
+{{#<start_id>.sys.query#}}, or {{#<start_id>.sys.files#}}. In selector arrays,
+use ["<start_id>","sys.query"] and ["<start_id>","sys.files"]. Custom start
+inputs remain selectable as ["<start_id>","<input_name>"].
+
+Every llm node must include a business-specific system_prompt and user_prompt.
+The user_prompt must include {{#sys.query#}} and any required upstream output.
+Chatflow memory is enabled by chat2dify with a 10-message window.
+
+Use if-else for explicit string or numeric conditions. Every case requires one
+outgoing edge whose source_handle equals case_id, and the else edge must use
+source_handle "false".
+Use question-classifier for semantic routing. Its params include
+query_variable_selector, classes, and instruction. Every class requires one
+outgoing edge whose source_handle equals classes[].id.
+Use parameter-extractor for structured fields. Its params include query,
+reasoning_mode "prompt", variable-safe English parameter names, descriptions,
+and required flags.
+
+Use document-extractor only for uploaded files or attachments, with
+variable_selector ["<start_id>","sys.files"]. Use list-operator only for
+filtering, sorting, extracting, or limiting supported arrays; use code for
+arrays of objects. Every Python code node must define def main(...)->dict,
+return every declared output, and use typed output schemas such as
+{"result":{"type":"string","children":null}}.
+Use template-transform for deterministic formatting and variable-aggregator
+when several upstream values can supply one output. HTTP nodes must include a
+real URL and explicit method; references inside URL, headers, params, and body
+must use Dify variable syntax.
+
+Use knowledge-retrieval only for explicit knowledge-base, RAG, document-library,
+or stored-material requests. Never invent dataset_ids. Omit them so chat2dify
+can inject the dataset_ids selected in the request. Feed the retrieval result
+to an llm and then an answer node.
+
+Generate tool only when selected_tools is non-empty and the user explicitly
+asks to call one. Copy provider_id, provider_type, provider_name, tool_name,
+tool_label, parameters, output_schema, plugin_id, and
+plugin_unique_identifier from the selected tool. Never invent resource
+identity or parameter names.
+Generate agent only when selected_agents is non-empty and the user explicitly
+asks for an Agent, 智能体, autonomous planning, or multi-step execution. Copy
+the selected strategy identity, parameter schema, configured agent_parameters,
+output_schema, plugin identifier, and meta. Never invent nested tools or
+strategy identifiers.
+
+An answer node uses params such as
+{"answer":"{{#<upstream_node_id>.<output_name>#}}"}. A branch may have its own
+answer node or converge before one shared answer. Never create end.outputs.
+Every node must have a business-specific title; avoid generic titles such as
+Start, LLM, Answer, Code, Node, 开始, 大模型, 回复.
 """
 
 
@@ -274,7 +322,15 @@ class WorkflowPlanner:
                     trigger_selection=trigger_selection,
                 )
                 plan = WorkflowPlan.model_validate(normalized.payload)
-                issues = _validate_compiled_plan(plan, settings=self.settings, dsl_version=dsl_version)
+                issues = [
+                    *_validate_compiled_plan(plan, settings=self.settings, dsl_version=dsl_version),
+                    *_validate_creation_resource_bindings(
+                        plan,
+                        dataset_ids=self.settings.dify_default_dataset_ids,
+                        tool_selections=tool_selections or [],
+                        agent_selections=agent_selections or [],
+                    ),
+                ]
                 if has_errors(issues):
                     raise ValueError(_issues_to_feedback(issues))
                 return PlannerResult(
@@ -618,6 +674,99 @@ def _validate_compiled_plan(plan: WorkflowPlan, *, settings: Settings, dsl_versi
         *validate_plan(plan),
         *validate_dsl(dsl, expected_dsl_version=dsl_version),
     ]
+
+
+def _validate_creation_resource_bindings(
+    plan: WorkflowPlan,
+    *,
+    dataset_ids: list[str],
+    tool_selections: list[dict[str, Any]],
+    agent_selections: list[dict[str, Any]],
+) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    if plan.app_mode == "advanced-chat":
+        uncertified_types = {"assigner", "human-input", "iteration", "loop"}
+        for node in plan.nodes:
+            if node.type in uncertified_types:
+                issues.append(
+                    ValidationIssue(
+                        code="PLAN_CHATFLOW_CREATION_NODE_NOT_CERTIFIED",
+                        message=f"Chatflow creation does not yet support node type: {node.type}",
+                        node_id=node.id,
+                        path=f"nodes.{node.id}.type",
+                        suggestion="改用当前已认证的常用 Chatflow 节点组合。",
+                    )
+                )
+
+    trusted_dataset_ids = {str(item).strip() for item in dataset_ids if str(item).strip()}
+    trusted_tools = {
+        (
+            str(item.get("provider_id") or "").strip(),
+            str(item.get("provider_type") or "").strip(),
+            str(item.get("tool_name") or "").strip(),
+        )
+        for item in tool_selections
+        if isinstance(item, dict)
+    }
+    trusted_agents = {
+        (
+            str(item.get("agent_strategy_provider_name") or "").strip(),
+            str(item.get("agent_strategy_name") or "").strip(),
+        )
+        for item in agent_selections
+        if isinstance(item, dict)
+    }
+
+    for node in plan.nodes:
+        if node.type == "knowledge-retrieval":
+            generated_ids = {
+                str(item).strip()
+                for item in node.params.get("dataset_ids", [])
+                if str(item).strip()
+            }
+            unknown_ids = sorted(generated_ids - trusted_dataset_ids)
+            if unknown_ids:
+                issues.append(
+                    ValidationIssue(
+                        code="PLAN_KNOWLEDGE_DATASET_NOT_SELECTED",
+                        message=f"knowledge-retrieval uses unselected dataset_ids: {', '.join(unknown_ids)}",
+                        node_id=node.id,
+                        path=f"nodes.{node.id}.params.dataset_ids",
+                        suggestion="仅使用请求中的 dataset_ids；没有选择知识库时不要生成知识检索节点。",
+                    )
+                )
+        elif node.type == "tool":
+            identity = (
+                str(node.params.get("provider_id") or "").strip(),
+                str(node.params.get("provider_type") or "").strip(),
+                str(node.params.get("tool_name") or "").strip(),
+            )
+            if identity not in trusted_tools:
+                issues.append(
+                    ValidationIssue(
+                        code="PLAN_TOOL_NOT_SELECTED",
+                        message="tool node is not bound to a tool selected in the request.",
+                        node_id=node.id,
+                        path=f"nodes.{node.id}.params",
+                        suggestion="从 selected_tools 复制真实 provider 和 tool 标识。",
+                    )
+                )
+        elif node.type == "agent":
+            identity = (
+                str(node.params.get("agent_strategy_provider_name") or "").strip(),
+                str(node.params.get("agent_strategy_name") or "").strip(),
+            )
+            if identity not in trusted_agents:
+                issues.append(
+                    ValidationIssue(
+                        code="PLAN_AGENT_NOT_SELECTED",
+                        message="agent node is not bound to an Agent Strategy selected in the request.",
+                        node_id=node.id,
+                        path=f"nodes.{node.id}.params",
+                        suggestion="从 selected_agents 复制真实 Agent Strategy 标识。",
+                    )
+                )
+    return issues
 
 
 def _issues_to_feedback(issues: list[ValidationIssue]) -> str:

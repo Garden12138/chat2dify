@@ -29,7 +29,7 @@ from app.dify.client import (
     DifyWorkflowTrigger,
 )
 from app.dify.version import DifyVersionInfo
-from app.main import app
+from app.main import _message_requests_agent_strategy, app
 from app.models import WorkflowPlan
 
 
@@ -286,6 +286,77 @@ def test_draft_creates_advanced_chat_plan(monkeypatch) -> None:
     assert {node["type"] for node in data["plan"]["nodes"]} == {"start", "llm", "answer"}
     assert data["validation"]["ok"] is True
     assert yaml.safe_load(data["dsl"])["app"]["mode"] == "advanced-chat"
+
+
+def test_chatflow_draft_passes_existing_resource_selections_to_planner(monkeypatch) -> None:
+    seen = {}
+
+    class ResourceAwarePlanner:
+        def __init__(self, settings):
+            seen["dataset_ids"] = settings.dify_default_dataset_ids
+
+        def generate(
+            self,
+            message,
+            *,
+            app_name=None,
+            dsl_version,
+            app_mode="workflow",
+            tool_selections=None,
+            agent_selections=None,
+            trigger_selection=None,
+            **_kwargs,
+        ):
+            seen["app_mode"] = app_mode
+            seen["tool_selections"] = tool_selections
+            seen["agent_selections"] = agent_selections
+            seen["trigger_selection"] = trigger_selection
+            plan = fallback_plan(message, app_name=app_name, app_mode=app_mode)
+            return PlannerResult(
+                plan=plan,
+                raw_plan=plan.model_dump(),
+                mode="fallback",
+                attempts=0,
+                used_fallback=True,
+                repaired=False,
+            )
+
+    monkeypatch.setattr("app.main.load_settings", _test_settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+    monkeypatch.setattr("app.main.WorkflowPlanner", ResourceAwarePlanner)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/draft",
+            json={
+                "app_mode": "advanced-chat",
+                "message": "创建复杂售后客服",
+                "dataset_ids": ["dataset-1"],
+                "tool_selections": [
+                    {
+                        "provider_id": "provider-1",
+                        "provider_type": "builtin",
+                        "tool_name": "search",
+                    }
+                ],
+                "agent_selections": [
+                    {
+                        "agent_strategy_provider_name": "langgenius/agent/react",
+                        "agent_strategy_name": "react",
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    assert seen["app_mode"] == "advanced-chat"
+    assert seen["dataset_ids"] == ["dataset-1"]
+    assert seen["tool_selections"][0]["tool_name"] == "search"
+    assert seen["agent_selections"][0]["agent_strategy_name"] == "react"
+    assert seen["trigger_selection"] is None
 
 
 def test_list_dify_datasets_api_returns_slim_dataset_list(monkeypatch) -> None:
@@ -880,6 +951,14 @@ def test_draft_workflow_requires_agent_strategy_selection_for_agent_requests(mon
     detail = response.json()["detail"]
     assert detail["code"] == "AGENT_STRATEGY_SELECTION_REQUIRED"
     assert "Agent Strategy" in detail["message"]
+
+
+def test_agent_strategy_request_detection_ignores_negated_mentions() -> None:
+    assert _message_requests_agent_strategy("使用 Agent 智能体分析售后问题") is True
+    assert _message_requests_agent_strategy("需要自主规划和多步执行") is True
+    assert _message_requests_agent_strategy("不要使用 Tool、Agent、人工审核或循环") is False
+    assert _message_requests_agent_strategy("不需要智能体，只使用普通大模型") is False
+    assert _message_requests_agent_strategy("Do not use an agent; use an LLM only.") is False
 
 
 def test_draft_workflow_validates_agent_selection_required_parameters_before_planner(monkeypatch) -> None:
