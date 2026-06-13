@@ -1,6 +1,7 @@
 import yaml
 import pytest
 
+from app.agent.normalizer import normalize_plan_payload
 from app.compiler.dify import DifyDslCompiler
 from app.dify.graph import UnsupportedExistingNodeType, compile_plan_to_dify_graph, decompile_dify_graph
 from app.models import PlanNode, WorkflowPlan
@@ -317,6 +318,112 @@ def test_decompile_dify_graph_covers_iteration_and_loop_containers() -> None:
     assert nodes["retry"].type == "loop"
     assert [child["id"] for child in nodes["retry"].params["children"]] == ["retry_start", "retry_template"]
     assert nodes["retry"].params["loop_count"] == 3
+
+
+def test_chatflow_advanced_containers_round_trip_with_internal_memory() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "name": "高级 Chatflow",
+            "app_mode": "advanced-chat",
+            "nodes": [
+                {
+                    "id": "start",
+                    "type": "start",
+                    "title": "接收批量检查请求",
+                    "params": {"variables": [{"name": "items", "type": "json"}]},
+                },
+                {
+                    "id": "batch",
+                    "type": "iteration",
+                    "title": "批量分析记录",
+                    "params": {
+                        "iterator_selector": ["start", "items", "records"],
+                        "output_selector": ["item_llm", "text"],
+                        "children": [
+                            {"id": "batch_start", "type": "iteration-start", "params": {}},
+                            {
+                                "id": "item_llm",
+                                "type": "llm",
+                                "title": "逐条分析记录",
+                                "params": {
+                                    "system_prompt": "你是记录分析专员。",
+                                    "user_prompt": "分析当前记录：{{#batch.item#}}",
+                                },
+                            },
+                        ],
+                        "edges": [{"source": "batch_start", "target": "item_llm"}],
+                    },
+                },
+                {
+                    "id": "retry",
+                    "type": "loop",
+                    "title": "循环检查结果",
+                    "params": {
+                        "loop_count": 3,
+                        "break_conditions": [
+                            {
+                                "id": "done",
+                                "variable_selector": ["check_llm", "text"],
+                                "comparison_operator": "contains",
+                                "value": "完成",
+                                "varType": "string",
+                            }
+                        ],
+                        "children": [
+                            {"id": "retry_start", "type": "loop-start", "params": {}},
+                            {
+                                "id": "check_llm",
+                                "type": "llm",
+                                "title": "检查处理状态",
+                                "params": {
+                                    "system_prompt": "你是处理状态检查专员。",
+                                    "user_prompt": "检查批量结果：{{#batch.output#}}",
+                                },
+                            },
+                        ],
+                        "edges": [{"source": "retry_start", "target": "check_llm"}],
+                    },
+                },
+                {
+                    "id": "answer",
+                    "type": "answer",
+                    "title": "回复检查结果",
+                    "params": {"answer": "{{#batch.output#}}"},
+                },
+            ],
+            "edges": [
+                {"source": "start", "target": "batch"},
+                {"source": "batch", "target": "retry"},
+                {"source": "retry", "target": "answer"},
+            ],
+        },
+        app_mode="advanced-chat",
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    graph = yaml.safe_load(_compiler().compile(plan))["workflow"]["graph"]
+
+    decompiled = decompile_dify_graph(
+        graph,
+        name="Loaded Chatflow",
+        app_mode="advanced-chat",
+    )
+    nodes = {node.id: node for node in decompiled.nodes}
+    batch_llm = next(
+        child for child in nodes["batch"].params["children"] if child["id"] == "item_llm"
+    )
+    retry_llm = next(
+        child for child in nodes["retry"].params["children"] if child["id"] == "check_llm"
+    )
+    retry_assigner = next(
+        child for child in nodes["retry"].params["children"] if child["type"] == "assigner"
+    )
+
+    assert validate_plan(plan) == []
+    assert validate_plan(decompiled) == []
+    assert "{{#sys.query#}}" in batch_llm["params"]["memory"]["query_prompt_template"]
+    assert "{{#sys.query#}}" in retry_llm["params"]["memory"]["query_prompt_template"]
+    assert retry_assigner["params"]["items"][0]["value"] == ["check_llm", "text"]
+    assert nodes["answer"].params["answer"] == "{{#batch.output#}}"
 
 
 def test_compile_plan_to_dify_graph_preserves_existing_layout_and_places_new_nodes() -> None:

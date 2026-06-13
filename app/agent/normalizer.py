@@ -405,6 +405,7 @@ def normalize_plan_payload(
                     f"normalized {rewrite_count} chatflow input reference(s) for "
                     f"{node.get('id', '<unknown>')}"
                 )
+        _ensure_chatflow_llm_query_references(nodes, changes)
 
     node_by_id = {str(node.get("id")): node for node in nodes if isinstance(node, dict)}
     schedule_node_ids = {
@@ -587,6 +588,41 @@ def _rewrite_chatflow_input_references(
         return result, count
 
     return value, 0
+
+
+def _ensure_chatflow_llm_query_references(
+    nodes: list[Any],
+    changes: list[str],
+) -> None:
+    def visit(node: dict[str, Any]) -> None:
+        params = node.get("params") if isinstance(node.get("params"), dict) else {}
+        if node.get("type") == "llm":
+            user_prompt = str(params.get("user_prompt") or "")
+            if "{{#sys.query#}}" not in user_prompt:
+                user_prompt = (
+                    f"{user_prompt}\n\n当前轮用户消息：{{{{#sys.query#}}}}"
+                    if user_prompt.strip()
+                    else "当前轮用户消息：{{#sys.query#}}"
+                )
+                params["user_prompt"] = user_prompt
+                memory = params.get("memory") if isinstance(params.get("memory"), dict) else {}
+                memory["query_prompt_template"] = user_prompt
+                memory["window"] = {"enabled": True, "size": 10}
+                params["memory"] = memory
+                node["params"] = params
+                changes.append(
+                    f"added current chatflow query to llm prompt for "
+                    f"{node.get('id', '<unknown>')}"
+                )
+
+        children = params.get("children") if isinstance(params.get("children"), list) else []
+        for child in children:
+            if isinstance(child, dict):
+                visit(child)
+
+    for node in nodes:
+        if isinstance(node, dict):
+            visit(node)
 
 
 def _rewrite_schedule_time_references(
@@ -1754,6 +1790,7 @@ def _rewrite_loop_break_conditions_for_dify_checklist(result: dict[str, Any], *,
         if isinstance(item, dict) and item.get("label")
     }
     child_output_selectors: dict[tuple[str, ...], str] = {}
+    fallback_assignments: list[tuple[list[str], str]] = []
     for condition in result.get("break_conditions") or []:
         if not isinstance(condition, dict):
             continue
@@ -1784,15 +1821,58 @@ def _rewrite_loop_break_conditions_for_dify_checklist(result: dict[str, Any], *,
             child_output_selectors[selector_key] = label
         condition["variable_selector"] = [node_id, label]
 
-    if not child_output_selectors:
+    fallback_child = next(
+        (
+            child
+            for child in reversed(children)
+            if isinstance(child, dict)
+            and child.get("type")
+            not in {"iteration-start", "loop-start", "loop-end", "assigner"}
+        ),
+        None,
+    )
+    if fallback_child:
+        fallback_selector = [
+            str(fallback_child.get("id")),
+            _default_node_output_name(fallback_child),
+        ]
+        for condition in result.get("break_conditions") or []:
+            if not isinstance(condition, dict):
+                continue
+            selector = condition.get("variable_selector")
+            if (
+                not _looks_like_selector(selector)
+                or str(selector[0]) != node_id
+                or len(selector) < 2
+            ):
+                continue
+            label = str(selector[1])
+            if _loop_assigner_target_exists(
+                children,
+                node_id=node_id,
+                variable_label=label,
+            ):
+                continue
+            if not any(
+                isinstance(item, dict) and str(item.get("label")) == label
+                for item in loop_variables
+            ):
+                continue
+            fallback_assignments.append((fallback_selector, label))
+
+    assignments = [
+        (list(selector_key), label)
+        for selector_key, label in child_output_selectors.items()
+    ]
+    assignments.extend(fallback_assignments)
+    if not assignments:
         return
 
     result["loop_variables"] = loop_variables
     result["children"] = children
     result["edges"] = result.get("edges") if isinstance(result.get("edges"), list) else []
     existing_child_ids = set(child_by_id)
-    for selector_key, label in child_output_selectors.items():
-        selector = list(selector_key)
+    for selector, label in assignments:
         source_child_id = selector[0]
         if _loop_assigner_exists(children, node_id=node_id, variable_label=label, value_selector=selector):
             continue
@@ -1868,6 +1948,25 @@ def _loop_assigner_exists(
             if not isinstance(item, dict):
                 continue
             if item.get("variable_selector") == [node_id, variable_label] and item.get("value") == value_selector:
+                return True
+    return False
+
+
+def _loop_assigner_target_exists(
+    children: list[dict[str, Any]],
+    *,
+    node_id: str,
+    variable_label: str,
+) -> bool:
+    for child in children:
+        if not isinstance(child, dict) or child.get("type") != "assigner":
+            continue
+        params = child.get("params") if isinstance(child.get("params"), dict) else {}
+        for item in params.get("items") if isinstance(params.get("items"), list) else []:
+            if (
+                isinstance(item, dict)
+                and item.get("variable_selector") == [node_id, variable_label]
+            ):
                 return True
     return False
 

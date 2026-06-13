@@ -2461,6 +2461,98 @@ def test_loop_break_condition_uses_loop_variable_for_dify_checklist() -> None:
     assert any(edge["source"] == "check_status" and edge["target"] == assigner["id"] for edge in internal_edges)
 
 
+def test_loop_break_condition_existing_variable_gets_automatic_assigner() -> None:
+    normalized = normalize_plan_payload(
+        {
+            "name": "维修状态重试检查",
+            "app_mode": "advanced-chat",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": []}},
+                {
+                    "id": "retry",
+                    "type": "loop",
+                    "params": {
+                        "loop_count": 3,
+                        "break_conditions": [
+                            {
+                                "variable_selector": ["retry", "status_text"],
+                                "comparison_operator": "contains",
+                                "value": "已完成",
+                                "varType": "string",
+                            }
+                        ],
+                        "loop_variables": [
+                            {
+                                "id": "status_text",
+                                "label": "status_text",
+                                "var_type": "string",
+                                "value_type": "constant",
+                                "value": "",
+                            }
+                        ],
+                        "children": [
+                            {"id": "retry_start", "type": "loop-start", "params": {}},
+                            {
+                                "id": "check_status",
+                                "type": "llm",
+                                "params": {
+                                    "system_prompt": "你是维修状态检查专员。",
+                                    "user_prompt": "请检查本轮状态：{{#sys.query#}}",
+                                },
+                            },
+                        ],
+                        "edges": [{"source": "retry_start", "target": "check_status"}],
+                    },
+                },
+                {
+                    "id": "answer",
+                    "type": "answer",
+                    "params": {"answer": "{{#retry.status_text#}}"},
+                },
+            ],
+            "edges": [
+                {"source": "start", "target": "retry"},
+                {"source": "retry", "target": "answer"},
+            ],
+        },
+        app_mode="advanced-chat",
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    retry = next(node for node in plan.nodes if node.id == "retry")
+    assigners = [
+        child for child in retry.params["children"] if child["type"] == "assigner"
+    ]
+
+    assert len(assigners) == 1
+    assert assigners[0]["params"]["items"] == [
+        {
+            "variable_selector": ["retry", "status_text"],
+            "input_type": "variable",
+            "operation": "over-write",
+            "value": ["check_status", "text"],
+        }
+    ]
+    assert retry.params["edges"] == [
+        {
+            "source": "retry_start",
+            "target": "check_status",
+            "source_handle": "source",
+            "target_handle": "target",
+        },
+        {
+            "source": "check_status",
+            "target": assigners[0]["id"],
+            "source_handle": "source",
+            "target_handle": "target",
+        },
+    ]
+    assert validate_plan(plan) == []
+    assert validate_dsl(
+        _compiler().compile(plan),
+        expected_dsl_version="9.9.9",
+    ) == []
+
+
 def test_validator_rejects_loop_break_condition_internal_child_selector() -> None:
     plan = WorkflowPlan.model_validate(
         {

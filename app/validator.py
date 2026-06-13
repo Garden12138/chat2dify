@@ -271,6 +271,11 @@ def validate_dsl(yaml_content: str, *, expected_dsl_version: str | None = None) 
     if isinstance(nodes, list):
         node_ids = {node.get("id") for node in nodes if isinstance(node, dict)}
         node_types = {node.get("id"): node.get("data", {}).get("type") for node in nodes if isinstance(node, dict)}
+        top_level_node_ids = {
+            str(node.get("id"))
+            for node in nodes
+            if isinstance(node, dict) and node.get("id") is not None and not node.get("parentId")
+        }
         types = set(node_types.values())
         entry_types = {"start", "datasource", "trigger-webhook", "trigger-plugin", "trigger-schedule"}
         if app_mode == "advanced-chat":
@@ -329,9 +334,16 @@ def validate_dsl(yaml_content: str, *, expected_dsl_version: str | None = None) 
                 answer_ids = {
                     str(node_id)
                     for node_id, node_type in node_types.items()
-                    if node_type == "answer"
+                    if node_type == "answer" and str(node_id) in top_level_node_ids
                 }
-                answer_sources = {source for source, _target in edge_pairs if source in answer_ids}
+                top_level_edge_pairs = [
+                    (source, target)
+                    for source, target in edge_pairs
+                    if source in top_level_node_ids and target in top_level_node_ids
+                ]
+                answer_sources = {
+                    source for source, _target in top_level_edge_pairs if source in answer_ids
+                }
                 for answer_id in sorted(answer_sources):
                     issues.append(
                         ValidationIssue(
@@ -342,11 +354,14 @@ def validate_dsl(yaml_content: str, *, expected_dsl_version: str | None = None) 
                         )
                     )
                 unresolved = _nodes_without_answer_path(
-                    {str(node_id) for node_id in node_ids if node_id is not None},
+                    top_level_node_ids,
                     answer_ids,
-                    edge_pairs,
+                    top_level_edge_pairs,
                 )
-                for node_id in _response_path_issue_nodes(unresolved, edge_pairs):
+                for node_id in _response_path_issue_nodes(
+                    unresolved,
+                    top_level_edge_pairs,
+                ):
                     issues.append(
                         ValidationIssue(
                             code="DSL_CHATFLOW_PATH_WITHOUT_ANSWER",
@@ -355,7 +370,7 @@ def validate_dsl(yaml_content: str, *, expected_dsl_version: str | None = None) 
                             path=f"workflow.graph.nodes.{node_id}",
                         )
                     )
-                for node_id in sorted(_cyclic_nodes(edge_pairs))[:1]:
+                for node_id in sorted(_cyclic_nodes(top_level_edge_pairs))[:1]:
                     issues.append(
                         ValidationIssue(
                             code="DSL_CHATFLOW_CYCLE_INVALID",

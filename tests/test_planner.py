@@ -8,10 +8,12 @@ from app.agent.planner import (
     CHATFLOW_SYSTEM_PROMPT,
     PlannerError,
     WorkflowPlanner,
+    _validate_creation_resource_bindings,
     _read_streamed_chat_completion,
     fallback_plan,
 )
 from app.config import Settings
+from app.models import WorkflowPlan
 from app.tasks import TaskCancelled
 
 
@@ -223,6 +225,8 @@ def test_chatflow_prompt_is_mode_specific_and_lists_certified_nodes() -> None:
     assert "question-classifier" in CHATFLOW_SYSTEM_PROMPT
     assert "knowledge-retrieval" in CHATFLOW_SYSTEM_PROMPT
     assert "tool, agent" in CHATFLOW_SYSTEM_PROMPT
+    assert "human-input is top-level only" in CHATFLOW_SYSTEM_PROMPT
+    assert "one acyclic processing chain" in CHATFLOW_SYSTEM_PROMPT
     assert "response path must finish at an answer node" in CHATFLOW_SYSTEM_PROMPT
 
 
@@ -375,6 +379,223 @@ def test_chatflow_planner_retries_invented_dataset_id() -> None:
     assert result.attempts == 2
     assert "PLAN_KNOWLEDGE_DATASET_NOT_SELECTED" in planner.last_errors[1]
     assert knowledge.params["dataset_ids"] == ["dataset-real"]
+
+
+def test_chatflow_planner_accepts_top_level_human_input() -> None:
+    planner = FakePlanner([json.dumps(_human_input_plan())])
+
+    result = planner.generate(
+        "生成回复后交给经理人工审核，再根据通过或驳回回复客户",
+        app_name="售后人工审核",
+        app_mode="advanced-chat",
+        dsl_version="9.9.9",
+    )
+
+    review = next(node for node in result.plan.nodes if node.id == "review")
+    llm = next(node for node in result.plan.nodes if node.id == "llm")
+
+    assert result.attempts == 1
+    assert review.type == "human-input"
+    assert {edge.source_handle for edge in result.plan.edges if edge.source == "review"} == {
+        "approve",
+        "reject",
+    }
+    assert {node.id for node in result.plan.nodes if node.type == "answer"} == {
+        "approved",
+        "rejected",
+    }
+    assert "{{#sys.query#}}" in llm.params["user_prompt"]
+    assert llm.params["memory"]["window"] == {"enabled": True, "size": 10}
+
+
+def test_chatflow_planner_accepts_iteration_with_chat_memory() -> None:
+    planner = FakePlanner([json.dumps(_iteration_plan())])
+
+    result = planner.generate(
+        "批量处理记录列表，逐条结合本轮要求生成建议",
+        app_name="批量售后处理",
+        app_mode="advanced-chat",
+        dsl_version="9.9.9",
+    )
+
+    batch = next(node for node in result.plan.nodes if node.id == "batch")
+    item_llm = next(
+        child for child in batch.params["children"] if child["id"] == "item_llm"
+    )
+
+    assert result.attempts == 1
+    assert batch.type == "iteration"
+    assert batch.params["output_selector"] == ["item_llm", "text"]
+    assert "{{#batch.item#}}" in item_llm["params"]["user_prompt"]
+    assert "{{#sys.query#}}" in item_llm["params"]["user_prompt"]
+    assert item_llm["params"]["memory"]["window"] == {"enabled": True, "size": 10}
+    assert next(node for node in result.plan.nodes if node.id == "end").type == "answer"
+
+
+def test_chatflow_planner_accepts_loop_and_inserts_internal_assigner() -> None:
+    plan = _loop_plan()
+    retry = next(node for node in plan["nodes"] if node["id"] == "retry")
+    retry["params"]["break_conditions"] = [
+        {
+            "id": "completed",
+            "variable_selector": ["retry_llm", "text"],
+            "comparison_operator": "contains",
+            "value": "已完成",
+            "varType": "string",
+        }
+    ]
+    planner = FakePlanner([json.dumps(plan)])
+
+    result = planner.generate(
+        "最多循环三次检查状态，检测到已完成后停止",
+        app_name="维修状态检查",
+        app_mode="advanced-chat",
+        dsl_version="9.9.9",
+    )
+
+    retry_node = next(node for node in result.plan.nodes if node.id == "retry")
+    children = retry_node.params["children"]
+    retry_llm = next(child for child in children if child["id"] == "retry_llm")
+    assigner = next(child for child in children if child["type"] == "assigner")
+    condition_selector = retry_node.params["break_conditions"][0]["variable_selector"]
+
+    assert result.attempts == 1
+    assert condition_selector[0] == "retry"
+    assert assigner["params"]["items"][0]["variable_selector"] == condition_selector
+    assert assigner["params"]["items"][0]["value"] == ["retry_llm", "text"]
+    assert "{{#sys.query#}}" in retry_llm["params"]["user_prompt"]
+    assert retry_llm["params"]["memory"]["window"] == {"enabled": True, "size": 10}
+
+
+def test_chatflow_planner_retries_forbidden_container_node() -> None:
+    bad = _iteration_plan()
+    batch = next(node for node in bad["nodes"] if node["id"] == "batch")
+    batch["params"]["children"][1] = {
+        "id": "review",
+        "type": "human-input",
+        "title": "逐条人工审核记录",
+        "params": _human_input_plan()["nodes"][2]["params"],
+    }
+    batch["params"]["output_selector"] = ["review", "__action_id"]
+    good = _iteration_plan()
+    planner = FakePlanner([json.dumps(bad), json.dumps(good)])
+
+    result = planner.generate(
+        "批量处理记录并生成建议",
+        app_name="批量售后处理",
+        app_mode="advanced-chat",
+        dsl_version="9.9.9",
+    )
+
+    assert result.attempts == 2
+    assert "PLAN_CHATFLOW_CONTAINER_NODE_NOT_SUPPORTED" in planner.last_errors[1]
+    batch_node = next(node for node in result.plan.nodes if node.id == "batch")
+    assert not [
+        child for child in batch_node.params["children"] if child["type"] == "human-input"
+    ]
+
+
+def test_chatflow_planner_retries_container_cycle() -> None:
+    bad = _iteration_plan()
+    batch = next(node for node in bad["nodes"] if node["id"] == "batch")
+    batch["params"]["edges"].append({"source": "item_llm", "target": "batch_start"})
+    good = _iteration_plan()
+    planner = FakePlanner([json.dumps(bad), json.dumps(good)])
+
+    result = planner.generate(
+        "批量处理记录并生成建议",
+        app_name="批量售后处理",
+        app_mode="advanced-chat",
+        dsl_version="9.9.9",
+    )
+
+    assert result.attempts == 2
+    assert "PLAN_CHATFLOW_CONTAINER_CYCLE_INVALID" in planner.last_errors[1]
+
+
+def test_chatflow_creation_recursively_rejects_unselected_container_resources() -> None:
+    plan = WorkflowPlan.model_validate(
+        {
+            "name": "嵌套资源检查",
+            "app_mode": "advanced-chat",
+            "nodes": [
+                {"id": "start", "type": "start", "params": {"variables": []}},
+                {
+                    "id": "batch",
+                    "type": "iteration",
+                    "params": {
+                        "start_node_id": "batch_start",
+                        "iterator_selector": ["start", "items"],
+                        "output_selector": ["agent", "text"],
+                        "children": [
+                            {"id": "batch_start", "type": "iteration-start", "params": {}},
+                            {
+                                "id": "knowledge",
+                                "type": "knowledge-retrieval",
+                                "params": {"dataset_ids": ["invented-dataset"]},
+                            },
+                            {
+                                "id": "tool",
+                                "type": "tool",
+                                "params": {
+                                    "provider_id": "invented-provider",
+                                    "provider_type": "builtin",
+                                    "tool_name": "invented-tool",
+                                },
+                            },
+                            {
+                                "id": "agent",
+                                "type": "agent",
+                                "params": {
+                                    "agent_strategy_provider_name": "invented-agent-provider",
+                                    "agent_strategy_name": "invented-agent",
+                                },
+                            },
+                        ],
+                        "edges": [
+                            {"source": "batch_start", "target": "knowledge"},
+                            {"source": "knowledge", "target": "tool"},
+                            {"source": "tool", "target": "agent"},
+                        ],
+                    },
+                },
+                {
+                    "id": "answer",
+                    "type": "answer",
+                    "params": {"answer": "{{#batch.output#}}"},
+                },
+            ],
+            "edges": [
+                {"source": "start", "target": "batch"},
+                {"source": "batch", "target": "answer"},
+            ],
+        }
+    )
+
+    issues = _validate_creation_resource_bindings(
+        plan,
+        dataset_ids=["dataset-real"],
+        tool_selections=[
+            {
+                "provider_id": "provider-real",
+                "provider_type": "builtin",
+                "tool_name": "tool-real",
+            }
+        ],
+        agent_selections=[
+            {
+                "agent_strategy_provider_name": "agent-provider-real",
+                "agent_strategy_name": "agent-real",
+            }
+        ],
+    )
+
+    assert {
+        "PLAN_KNOWLEDGE_DATASET_NOT_SELECTED",
+        "PLAN_TOOL_NOT_SELECTED",
+        "PLAN_AGENT_NOT_SELECTED",
+    } <= {issue.code for issue in issues}
+    assert all(".params.children." in str(issue.path) for issue in issues)
 
 
 def test_planner_accepts_knowledge_retrieval_node_with_default_dataset_ids() -> None:

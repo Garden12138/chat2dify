@@ -288,6 +288,97 @@ def test_draft_creates_advanced_chat_plan(monkeypatch) -> None:
     assert yaml.safe_load(data["dsl"])["app"]["mode"] == "advanced-chat"
 
 
+def test_draft_returns_valid_advanced_chat_iteration(monkeypatch) -> None:
+    class AdvancedNodePlanner:
+        def __init__(self, _settings):
+            pass
+
+        def generate(self, _message, *, app_name=None, dsl_version, app_mode="workflow", **_kwargs):
+            normalized = normalize_plan_payload(
+                {
+                    "name": app_name or "批量售后处理",
+                    "app_mode": app_mode,
+                    "nodes": [
+                        {
+                            "id": "start",
+                            "type": "start",
+                            "title": "接收批量处理要求",
+                            "params": {"variables": [{"name": "items", "type": "json"}]},
+                        },
+                        {
+                            "id": "batch",
+                            "type": "iteration",
+                            "title": "批量分析售后记录",
+                            "params": {
+                                "iterator_selector": ["start", "items", "records"],
+                                "output_selector": ["item_llm", "text"],
+                                "children": [
+                                    {"id": "batch_start", "type": "iteration-start", "params": {}},
+                                    {
+                                        "id": "item_llm",
+                                        "type": "llm",
+                                        "title": "逐条生成售后建议",
+                                        "params": {
+                                            "system_prompt": "你是售后记录分析专员。",
+                                            "user_prompt": "分析当前记录：{{#batch.item#}}",
+                                        },
+                                    },
+                                ],
+                                "edges": [{"source": "batch_start", "target": "item_llm"}],
+                            },
+                        },
+                        {
+                            "id": "answer",
+                            "type": "answer",
+                            "title": "回复批量分析结果",
+                            "params": {"answer": "{{#batch.output#}}"},
+                        },
+                    ],
+                    "edges": [
+                        {"source": "start", "target": "batch"},
+                        {"source": "batch", "target": "answer"},
+                    ],
+                },
+                app_mode=app_mode,
+            )
+            plan = WorkflowPlan.model_validate(normalized.payload)
+            return PlannerResult(
+                plan=plan,
+                raw_plan=plan.model_dump(),
+                mode="llm",
+                attempts=1,
+                used_fallback=False,
+                repaired=normalized.changed,
+            )
+
+    monkeypatch.setattr("app.main.load_settings", _test_settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+    monkeypatch.setattr("app.main.WorkflowPlanner", AdvancedNodePlanner)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/draft",
+            json={
+                "app_mode": "advanced-chat",
+                "message": "批量分析售后记录",
+                "app_name": "批量售后处理",
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    graph_nodes = yaml.safe_load(data["dsl"])["workflow"]["graph"]["nodes"]
+    item_llm = next(node for node in graph_nodes if node["id"] == "item_llm")
+
+    assert data["validation"]["ok"] is True
+    assert data["plan"]["app_mode"] == "advanced-chat"
+    assert item_llm["parentId"] == "batch"
+    assert "{{#sys.query#}}" in item_llm["data"]["memory"]["query_prompt_template"]
+
+
 def test_chatflow_draft_passes_existing_resource_selections_to_planner(monkeypatch) -> None:
     seen = {}
 
@@ -2711,6 +2802,7 @@ def test_background_create_task_returns_202_and_can_be_polled(monkeypatch, tmp_p
 
     def fake_create(request, *, task_context=None):
         assert task_context is not None
+        assert request.app_mode == "advanced-chat"
         task_context.update("planning", 50, "Halfway")
         return {
             "status": "completed",
@@ -2724,7 +2816,11 @@ def test_background_create_task_returns_202_and_can_be_polled(monkeypatch, tmp_p
     with TestClient(app) as client:
         response = client.post(
             "/api/tasks/workflows/create",
-            json={"message": "create a workflow", "app_name": "Background"},
+            json={
+                "app_mode": "advanced-chat",
+                "message": "create an advanced Chatflow",
+                "app_name": "Background",
+            },
         )
         assert response.status_code == 202
         task_id = response.json()["task_id"]

@@ -132,9 +132,10 @@ JSON WorkflowPlan. Return only JSON and set app_mode to "advanced-chat".
 Supported top-level node types for new Chatflows are:
 start, llm, code, if-else, answer, http-request, template-transform,
 question-classifier, parameter-extractor, variable-aggregator,
-document-extractor, list-operator, knowledge-retrieval, tool, agent.
-Do not generate end, assigner, human-input, iteration, loop, datasource,
-datasource-empty, knowledge-index, or any trigger node.
+document-extractor, list-operator, knowledge-retrieval, human-input,
+iteration, loop, tool, agent.
+Do not generate end, top-level assigner, datasource, datasource-empty,
+knowledge-index, or any trigger node.
 
 Use exactly one start node. Every node must be reachable from start, every
 possible response path must finish at an answer node, and answer nodes must not
@@ -150,6 +151,34 @@ inputs remain selectable as ["<start_id>","<input_name>"].
 Every llm node must include a business-specific system_prompt and user_prompt.
 The user_prompt must include {{#sys.query#}} and any required upstream output.
 Chatflow memory is enabled by chat2dify with a 10-message window.
+
+Use human-input only when the user explicitly asks for human review, manual
+approval, manager approval, human confirmation, or human-supplied follow-up
+information. human-input is top-level only. Include one enabled webapp delivery
+method, valid UUID delivery IDs, form_content, optional inputs, at least one
+user action, and a positive hour/day timeout. Every user action must have one
+outgoing edge whose source_handle equals the action id, and every action branch
+must eventually finish at an answer node. Human actions are completed in Dify.
+
+Use iteration only when the request explicitly asks to process every item in a
+list or generate one result per item. The top-level iteration params must
+include iterator_selector, iterator_input_type, output_selector, output_type,
+is_parallel, parallel_nums, error_handle_mode, flatten_output, children, and
+edges. children must form one acyclic processing chain beginning with exactly
+one iteration-start. Do not put answer, human-input, if-else,
+question-classifier, iteration, or loop inside the container. Internal LLM
+prompts must include both {{#sys.query#}} and the current item reference
+{{#<iteration_node_id>.item#}}.
+
+Use loop only when the request explicitly asks to retry, repeat until a
+condition is met, check repeatedly, or run at most N times. The top-level loop
+params must include loop_count, logical_operator, break_conditions,
+loop_variables, error_handle_mode, children, and edges. children must form one
+acyclic processing chain beginning with exactly one loop-start. Do not put
+answer, human-input, if-else, question-classifier, iteration, or another loop
+inside the container. Break conditions must read loop variables. When a break
+condition depends on an internal child output, include or allow chat2dify to
+insert an internal assigner that copies the output to a loop variable.
 
 Use if-else for explicit string or numeric conditions. Every case requires one
 outgoing edge whose source_handle equals case_id, and the else edge must use
@@ -685,18 +714,19 @@ def _validate_creation_resource_bindings(
 ) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     if plan.app_mode == "advanced-chat":
-        uncertified_types = {"assigner", "human-input", "iteration", "loop"}
         for node in plan.nodes:
-            if node.type in uncertified_types:
+            if node.type == "assigner":
                 issues.append(
                     ValidationIssue(
-                        code="PLAN_CHATFLOW_CREATION_NODE_NOT_CERTIFIED",
-                        message=f"Chatflow creation does not yet support node type: {node.type}",
+                        code="PLAN_CHATFLOW_TOP_LEVEL_ASSIGNER_NOT_SUPPORTED",
+                        message="Chatflow creation does not support top-level assigner nodes.",
                         node_id=node.id,
                         path=f"nodes.{node.id}.type",
-                        suggestion="改用当前已认证的常用 Chatflow 节点组合。",
+                        suggestion="assigner 仅允许由 loop 规范化器生成，用于更新 loop_variables。",
                     )
                 )
+            if node.type in {"iteration", "loop"}:
+                issues.extend(_validate_chatflow_creation_container(node))
 
     trusted_dataset_ids = {str(item).strip() for item in dataset_ids if str(item).strip()}
     trusted_tools = {
@@ -717,11 +747,11 @@ def _validate_creation_resource_bindings(
         if isinstance(item, dict)
     }
 
-    for node in plan.nodes:
-        if node.type == "knowledge-retrieval":
+    for node_id, node_type, params, path in _creation_nodes(plan):
+        if node_type == "knowledge-retrieval":
             generated_ids = {
                 str(item).strip()
-                for item in node.params.get("dataset_ids", [])
+                for item in params.get("dataset_ids", [])
                 if str(item).strip()
             }
             unknown_ids = sorted(generated_ids - trusted_dataset_ids)
@@ -730,43 +760,200 @@ def _validate_creation_resource_bindings(
                     ValidationIssue(
                         code="PLAN_KNOWLEDGE_DATASET_NOT_SELECTED",
                         message=f"knowledge-retrieval uses unselected dataset_ids: {', '.join(unknown_ids)}",
-                        node_id=node.id,
-                        path=f"nodes.{node.id}.params.dataset_ids",
+                        node_id=node_id,
+                        path=f"{path}.params.dataset_ids",
                         suggestion="仅使用请求中的 dataset_ids；没有选择知识库时不要生成知识检索节点。",
                     )
                 )
-        elif node.type == "tool":
+        elif node_type == "tool":
             identity = (
-                str(node.params.get("provider_id") or "").strip(),
-                str(node.params.get("provider_type") or "").strip(),
-                str(node.params.get("tool_name") or "").strip(),
+                str(params.get("provider_id") or "").strip(),
+                str(params.get("provider_type") or "").strip(),
+                str(params.get("tool_name") or "").strip(),
             )
             if identity not in trusted_tools:
                 issues.append(
                     ValidationIssue(
                         code="PLAN_TOOL_NOT_SELECTED",
                         message="tool node is not bound to a tool selected in the request.",
-                        node_id=node.id,
-                        path=f"nodes.{node.id}.params",
+                        node_id=node_id,
+                        path=f"{path}.params",
                         suggestion="从 selected_tools 复制真实 provider 和 tool 标识。",
                     )
                 )
-        elif node.type == "agent":
+        elif node_type == "agent":
             identity = (
-                str(node.params.get("agent_strategy_provider_name") or "").strip(),
-                str(node.params.get("agent_strategy_name") or "").strip(),
+                str(params.get("agent_strategy_provider_name") or "").strip(),
+                str(params.get("agent_strategy_name") or "").strip(),
             )
             if identity not in trusted_agents:
                 issues.append(
                     ValidationIssue(
                         code="PLAN_AGENT_NOT_SELECTED",
                         message="agent node is not bound to an Agent Strategy selected in the request.",
-                        node_id=node.id,
-                        path=f"nodes.{node.id}.params",
+                        node_id=node_id,
+                        path=f"{path}.params",
                         suggestion="从 selected_agents 复制真实 Agent Strategy 标识。",
                     )
                 )
     return issues
+
+
+def _creation_nodes(
+    plan: WorkflowPlan,
+) -> list[tuple[str, str, dict[str, Any], str]]:
+    result: list[tuple[str, str, dict[str, Any], str]] = []
+
+    def visit(node_id: str, node_type: str, params: dict[str, Any], path: str) -> None:
+        result.append((node_id, node_type, params, path))
+        children = params.get("children") if isinstance(params.get("children"), list) else []
+        for index, child in enumerate(children):
+            if not isinstance(child, dict):
+                continue
+            child_id = str(child.get("id") or f"{node_id}_child_{index + 1}")
+            child_type = str(child.get("type") or "")
+            child_params = child.get("params") if isinstance(child.get("params"), dict) else {}
+            visit(
+                child_id,
+                child_type,
+                child_params,
+                f"{path}.params.children.{index}",
+            )
+
+    for node in plan.nodes:
+        visit(node.id, node.type, node.params, f"nodes.{node.id}")
+    return result
+
+
+def _validate_chatflow_creation_container(node: Any) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    children = node.params.get("children") if isinstance(node.params.get("children"), list) else []
+    child_by_id = {
+        str(child.get("id")): child
+        for child in children
+        if isinstance(child, dict) and child.get("id")
+    }
+    forbidden_types = {
+        "answer",
+        "human-input",
+        "if-else",
+        "question-classifier",
+        "iteration",
+        "loop",
+    }
+    for index, child in enumerate(children):
+        if not isinstance(child, dict):
+            continue
+        child_id = str(child.get("id") or f"{node.id}_child_{index + 1}")
+        child_type = str(child.get("type") or "")
+        if child_type in forbidden_types or (
+            child_type == "assigner" and node.type != "loop"
+        ):
+            issues.append(
+                ValidationIssue(
+                    code="PLAN_CHATFLOW_CONTAINER_NODE_NOT_SUPPORTED",
+                    message=(
+                        f"Chatflow {node.type} creation does not support "
+                        f"internal node type: {child_type}"
+                    ),
+                    node_id=child_id,
+                    path=f"nodes.{node.id}.params.children.{index}.type",
+                    suggestion="容器内部使用无分支处理链；人工输入和 answer 放在顶层。",
+                )
+            )
+
+    edges = node.params.get("edges") if isinstance(node.params.get("edges"), list) else []
+    adjacency: dict[str, list[str]] = {child_id: [] for child_id in child_by_id}
+    incoming: dict[str, list[str]] = {child_id: [] for child_id in child_by_id}
+    valid_edges = 0
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        source = str(edge.get("source") or "")
+        target = str(edge.get("target") or "")
+        if source not in child_by_id or target not in child_by_id:
+            continue
+        adjacency[source].append(target)
+        incoming[target].append(source)
+        valid_edges += 1
+
+    cyclic = _cyclic_creation_nodes(adjacency)
+    if cyclic:
+        issues.append(
+            ValidationIssue(
+                code="PLAN_CHATFLOW_CONTAINER_CYCLE_INVALID",
+                message=f"Chatflow {node.type} internal graph contains a cycle: {cyclic[0]}",
+                node_id=node.id,
+                path=f"nodes.{node.id}.params.edges",
+                suggestion="容器内部必须是从内部 start 开始的无环处理链。",
+            )
+        )
+
+    branched = sorted(
+        child_id
+        for child_id in child_by_id
+        if len(adjacency.get(child_id, [])) > 1 or len(incoming.get(child_id, [])) > 1
+    )
+    start_node_id = str(node.params.get("start_node_id") or "")
+    reachable = _reachable_creation_nodes(start_node_id, adjacency)
+    is_chain = (
+        bool(child_by_id)
+        and start_node_id in child_by_id
+        and len(reachable) == len(child_by_id)
+        and valid_edges == len(child_by_id) - 1
+        and not branched
+        and not cyclic
+    )
+    if not is_chain:
+        issues.append(
+            ValidationIssue(
+                code="PLAN_CHATFLOW_CONTAINER_CHAIN_REQUIRED",
+                message=f"Chatflow {node.type} internal graph must be one connected processing chain.",
+                node_id=node.id,
+                path=f"nodes.{node.id}.params.edges",
+                suggestion="让内部 start 依次连接每个处理节点，不要分叉、汇合或形成环。",
+            )
+        )
+    return issues
+
+
+def _reachable_creation_nodes(
+    start_node_id: str,
+    adjacency: dict[str, list[str]],
+) -> set[str]:
+    if start_node_id not in adjacency:
+        return set()
+    reachable: set[str] = set()
+    stack = [start_node_id]
+    while stack:
+        node_id = stack.pop()
+        if node_id in reachable:
+            continue
+        reachable.add(node_id)
+        stack.extend(adjacency.get(node_id, []))
+    return reachable
+
+
+def _cyclic_creation_nodes(adjacency: dict[str, list[str]]) -> list[str]:
+    visiting: set[str] = set()
+    visited: set[str] = set()
+    cyclic: set[str] = set()
+
+    def visit(node_id: str) -> None:
+        if node_id in visiting:
+            cyclic.add(node_id)
+            return
+        if node_id in visited:
+            return
+        visiting.add(node_id)
+        for target in adjacency.get(node_id, []):
+            visit(target)
+        visiting.remove(node_id)
+        visited.add(node_id)
+
+    for node_id in adjacency:
+        visit(node_id)
+    return sorted(cyclic)
 
 
 def _issues_to_feedback(issues: list[ValidationIssue]) -> str:
