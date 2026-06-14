@@ -133,13 +133,36 @@ Supported top-level node types for new Chatflows are:
 start, llm, code, if-else, answer, http-request, template-transform,
 question-classifier, parameter-extractor, variable-aggregator,
 document-extractor, list-operator, knowledge-retrieval, human-input,
-iteration, loop, tool, agent.
-Do not generate end, top-level assigner, datasource, datasource-empty,
+iteration, loop, assigner, tool, agent.
+Do not generate end, datasource, datasource-empty,
 knowledge-index, or any trigger node.
 
 Use exactly one start node. Every node must be reachable from start, every
 possible response path must finish at an answer node, and answer nodes must not
 have outgoing edges. For a simple request use start -> llm -> answer.
+
+Use the top-level conversation_variables array only when the user explicitly
+asks to remember state across turns, such as user preferences, a cross-turn
+counter, or step-by-step information collection. Each item must contain:
+{"id":"","name":"preferred_name","value_type":"string","value":"","description":"用户姓名","selector":["conversation","preferred_name"]}.
+Supported value_type values are string, number, boolean, object,
+array[string], array[number], array[boolean], and array[object]. Never create
+file or secret conversation variables. Names must be unique. Leave id empty so
+chat2dify can generate a deterministic UUID, and always use
+["conversation","<name>"] as selector.
+
+Generate a top-level assigner only for an explicitly declared conversation
+variable. Its variable_selector must be ["conversation","<declared_name>"].
+Never assign to sys, start, environment variables, or undeclared names.
+For string, boolean, and object variables use over-write, clear, or set.
+For number variables those operations plus +=, -=, *=, and /= are allowed.
+For array variables use over-write, clear, append, extend, remove-first, or
+remove-last. Constant values and variable selectors must match the target type.
+For preference memory, extract or directly assign the requested preference,
+then reference {{#conversation.<name>#}} in later prompts or answers. For a
+cross-turn counter, declare a number defaulting to 0 and use += with constant
+1. For step-by-step collection, store each confirmed field separately and
+branch on which declared variables are still empty.
 
 The current user message is {{#sys.query#}} and uploaded files are
 {{#sys.files#}}. In prompt, template, URL, body, tool, and agent text values,
@@ -715,16 +738,6 @@ def _validate_creation_resource_bindings(
     issues: list[ValidationIssue] = []
     if plan.app_mode == "advanced-chat":
         for node in plan.nodes:
-            if node.type == "assigner":
-                issues.append(
-                    ValidationIssue(
-                        code="PLAN_CHATFLOW_TOP_LEVEL_ASSIGNER_NOT_SUPPORTED",
-                        message="Chatflow creation does not support top-level assigner nodes.",
-                        node_id=node.id,
-                        path=f"nodes.{node.id}.type",
-                        suggestion="assigner 仅允许由 loop 规范化器生成，用于更新 loop_variables。",
-                    )
-                )
             if node.type in {"iteration", "loop"}:
                 issues.extend(_validate_chatflow_creation_container(node))
 

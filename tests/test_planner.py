@@ -126,7 +126,7 @@ def test_planner_uses_nvidia_deepseek_v4_flash_payload(monkeypatch) -> None:
     assert captured["payload"]["chat_template_kwargs"] == {"thinking": False}
     assert captured["payload"]["max_tokens"] == 8192
     assert captured["payload"]["stream"] is True
-    assert captured["timeout"].read == 300
+    assert captured["timeout"].read == 600
     assert captured["timeout"].connect == 15
     assert captured["headers"]["Connection"] == "close"
     assert len(captured["payload"]["messages"]) == 2
@@ -679,6 +679,74 @@ def test_planner_self_repairs_after_validation_failure() -> None:
     assert result.attempts == 2
     assert result.repaired is True
     assert "PLAN_VARIABLE_UNKNOWN" in planner.last_errors[1]
+
+
+def test_chatflow_planner_retries_invalid_conversation_assigner_target() -> None:
+    bad = {
+        "name": "记忆姓名",
+        "app_mode": "advanced-chat",
+        "conversation_variables": [
+            {
+                "name": "preferred_name",
+                "value_type": "string",
+                "value": "",
+            }
+        ],
+        "nodes": [
+            {
+                "id": "start",
+                "type": "start",
+                "title": "接收用户姓名",
+                "params": {"variables": []},
+            },
+            {
+                "id": "remember",
+                "type": "assigner",
+                "title": "保存用户姓名",
+                "params": {
+                    "items": [
+                        {
+                            "variable_selector": ["sys", "query"],
+                            "input_type": "variable",
+                            "operation": "over-write",
+                            "value": ["sys", "query"],
+                        }
+                    ]
+                },
+            },
+            {
+                "id": "answer",
+                "type": "answer",
+                "title": "确认保存姓名",
+                "params": {"answer": "已记住 {{#conversation.preferred_name#}}"},
+            },
+        ],
+        "edges": [
+            {"source": "start", "target": "remember"},
+            {"source": "remember", "target": "answer"},
+        ],
+    }
+    good = json.loads(json.dumps(bad))
+    good["nodes"][1]["params"]["items"][0]["variable_selector"] = [
+        "conversation",
+        "preferred_name",
+    ]
+    planner = FakePlanner([json.dumps(bad), json.dumps(good)])
+
+    result = planner.generate(
+        "记住用户姓名",
+        app_name="记忆姓名",
+        app_mode="advanced-chat",
+        dsl_version="9.9.9",
+    )
+
+    assert result.attempts == 2
+    assert result.provider == "openai"
+    assert result.plan.conversation_variables[0].selector == [
+        "conversation",
+        "preferred_name",
+    ]
+    assert "PLAN_CHATFLOW_ASSIGNER_TARGET_INVALID" in planner.last_errors[1]
 
 
 def test_planner_fails_after_three_bad_attempts() -> None:

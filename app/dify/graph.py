@@ -88,6 +88,7 @@ def decompile_dify_graph(
     *,
     name: str = "Existing Workflow",
     app_mode: str = "workflow",
+    conversation_variables: list[dict[str, Any]] | None = None,
 ) -> WorkflowPlan:
     nodes = graph.get("nodes")
     edges = graph.get("edges")
@@ -152,6 +153,7 @@ def decompile_dify_graph(
             "name": name,
             "description": "Workflow draft loaded from Dify.",
             "app_mode": app_mode,
+            "conversation_variables": deepcopy(conversation_variables or []),
             "nodes": plan_nodes,
             "edges": plan_edges,
         },

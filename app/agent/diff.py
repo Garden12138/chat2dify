@@ -63,6 +63,67 @@ def diff_plans(before: WorkflowPlan, after: WorkflowPlan) -> list[dict[str, Any]
                 "message": f"删除连线 {edge[0]}[{edge[1]}] -> {edge[2]}。",
             }
         )
+    changes.extend(_conversation_variable_changes(before, after))
+    return changes
+
+
+def _conversation_variable_changes(
+    before: WorkflowPlan,
+    after: WorkflowPlan,
+) -> list[dict[str, Any]]:
+    changes: list[dict[str, Any]] = []
+    before_variables = {
+        variable.id: variable
+        for variable in before.conversation_variables
+    }
+    after_variables = {
+        variable.id: variable
+        for variable in after.conversation_variables
+    }
+    for variable_id in sorted(after_variables.keys() - before_variables.keys()):
+        variable = after_variables[variable_id]
+        changes.append(
+            {
+                "type": "conversation_variable_added",
+                "target": variable_id,
+                "name": variable.name,
+                "value_type": variable.value_type,
+                "after": variable.model_dump(),
+                "message": f"新增会话变量 {variable.name}（{variable.value_type}）。",
+            }
+        )
+    for variable_id in sorted(before_variables.keys() - after_variables.keys()):
+        variable = before_variables[variable_id]
+        changes.append(
+            {
+                "type": "conversation_variable_removed",
+                "target": variable_id,
+                "name": variable.name,
+                "value_type": variable.value_type,
+                "before": variable.model_dump(),
+                "message": f"删除会话变量 {variable.name}（{variable.value_type}）。",
+            }
+        )
+    for variable_id in sorted(before_variables.keys() & after_variables.keys()):
+        before_variable = before_variables[variable_id]
+        after_variable = after_variables[variable_id]
+        for field in ("name", "value_type", "value", "description"):
+            before_value = getattr(before_variable, field)
+            after_value = getattr(after_variable, field)
+            if before_value == after_value:
+                continue
+            changes.append(
+                {
+                    "type": "conversation_variable_updated",
+                    "target": variable_id,
+                    "name": after_variable.name,
+                    "value_type": after_variable.value_type,
+                    "field": field,
+                    "before": before_value,
+                    "after": after_value,
+                    "message": f"更新会话变量 {after_variable.name} 的 {field}。",
+                }
+            )
     return changes
 
 

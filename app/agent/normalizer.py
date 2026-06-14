@@ -13,6 +13,16 @@ from app.list_operator import normalize_list_comparison_operator, normalize_list
 SOURCE_HANDLE = "source"
 FALSE_HANDLE = "false"
 HUMAN_INPUT_DEFAULT_WEBAPP_DELIVERY_ID = "00000000-0000-4000-8000-000000000001"
+CONVERSATION_VARIABLE_TYPES = {
+    "string",
+    "number",
+    "boolean",
+    "object",
+    "array[string]",
+    "array[number]",
+    "array[boolean]",
+    "array[object]",
+}
 DIFY_REF_PATTERN = re.compile(r"\{\{\s*#([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)#\s*\}\}")
 SCHEDULE_TIME_OUTPUT_ALIASES = {
     "date",
@@ -277,6 +287,18 @@ def normalize_plan_payload(
         data["app_mode"] = target_app_mode
         changes.append(f"set app mode to {target_app_mode}")
 
+    raw_conversation_variables = data.get("conversation_variables")
+    if raw_conversation_variables is None:
+        raw_conversation_variables = data.get("conversationVariables", [])
+    normalized_conversation_variables = _normalize_conversation_variables(
+        raw_conversation_variables,
+        workflow_name=str(data["name"]),
+    )
+    data["conversation_variables"] = normalized_conversation_variables
+    if raw_conversation_variables and raw_conversation_variables != normalized_conversation_variables:
+        changes.append("normalized conversation variables")
+    data.pop("conversationVariables", None)
+
     nodes = data.get("nodes")
     edges = data.get("edges")
     if not isinstance(nodes, list):
@@ -488,6 +510,66 @@ def normalize_plan_payload(
     _repair_code_edge_variable_bindings(nodes, edges, changes)
 
     return NormalizationResult(payload=data, changed=bool(changes), changes=changes)
+
+
+def _normalize_conversation_variables(
+    value: Any,
+    *,
+    workflow_name: str,
+) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("plan.conversation_variables must be a list")
+
+    result: list[dict[str, Any]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise ValueError(f"conversation_variables.{index} must be an object")
+        name = str(item.get("name") or "").strip()
+        if not name:
+            raise ValueError(f"conversation_variables.{index}.name is required")
+        value_type = str(item.get("value_type") or item.get("type") or "string").strip().lower()
+        if value_type in {"integer", "float"}:
+            value_type = "number"
+        if value_type not in CONVERSATION_VARIABLE_TYPES:
+            raise ValueError(
+                f"conversation variable {name} uses unsupported type: {value_type}"
+            )
+        default = item["value"] if "value" in item else _conversation_variable_default(value_type)
+        variable_id = str(item.get("id") or "").strip()
+        try:
+            UUID(variable_id)
+        except ValueError:
+            variable_id = str(
+                uuid5(
+                    NAMESPACE_URL,
+                    f"chat2dify:conversation-variable:{workflow_name}:{name}",
+                )
+            )
+        result.append(
+            {
+                "id": variable_id,
+                "name": name,
+                "value_type": value_type,
+                "value": deepcopy(default),
+                "description": str(item.get("description") or ""),
+                "selector": ["conversation", name],
+            }
+        )
+    return result
+
+
+def _conversation_variable_default(value_type: str) -> Any:
+    if value_type == "string":
+        return ""
+    if value_type == "number":
+        return 0
+    if value_type == "boolean":
+        return False
+    if value_type == "object":
+        return {}
+    return []
 
 
 def normalize_template_refs(text: str) -> str:
@@ -1263,6 +1345,16 @@ def _normalize_assigner_params(params: dict[str, Any]) -> dict[str, Any]:
         if input_type not in {"variable", "constant"}:
             input_type = "constant"
         operation = str(item.get("operation") or item.get("write_mode") or item.get("mode") or "over-write")
+        operation = {
+            "overwrite": "over-write",
+            "replace": "over-write",
+            "increment": "+=",
+            "decrement": "-=",
+            "multiply": "*=",
+            "divide": "/=",
+            "remove_first": "remove-first",
+            "remove_last": "remove-last",
+        }.get(operation, operation)
         value = item.get("value")
         if input_type == "variable":
             value = _normalize_selector(value)

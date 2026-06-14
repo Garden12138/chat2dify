@@ -87,9 +87,9 @@ class Settings:
             dify_default_model_provider=source.get("DIFY_DEFAULT_MODEL_PROVIDER", "langgenius/openai/openai"),
             dify_default_model_name=source.get("DIFY_DEFAULT_MODEL_NAME", "gpt-4o-mini"),
             dify_default_dataset_ids=_csv_list(source.get("DIFY_DEFAULT_DATASET_IDS", "")),
-            planner_default_provider=source.get("PLANNER_DEFAULT_PROVIDER", "openai").strip().lower(),
+            planner_default_provider=source.get("PLANNER_DEFAULT_PROVIDER", "nvidia").strip().lower(),
             planner_timeout_seconds=_positive_float(
-                source.get("PLANNER_TIMEOUT_SECONDS", "300"),
+                source.get("PLANNER_TIMEOUT_SECONDS", "600"),
                 name="PLANNER_TIMEOUT_SECONDS",
             ),
             planner_request_retries=_non_negative_int(

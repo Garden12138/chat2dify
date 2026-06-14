@@ -5,6 +5,7 @@ import pytest
 from app.agent.editor import WorkflowEditPlanner
 from app.agent.planner import PlannerError, fallback_plan
 from app.config import Settings
+from app.models import WorkflowPlan
 
 
 def _settings(openai_api_key: str | None = "token") -> Settings:
@@ -12,6 +13,7 @@ def _settings(openai_api_key: str | None = "token") -> Settings:
         "DIFY_SOURCE_DIR": "../dify",
         "DIFY_DEFAULT_MODEL_PROVIDER": "openai",
         "DIFY_DEFAULT_MODEL_NAME": "gpt-4o-mini",
+        "PLANNER_DEFAULT_PROVIDER": "openai",
     }
     if openai_api_key:
         env["OPENAI_API_KEY"] = openai_api_key
@@ -124,6 +126,40 @@ def test_chatflow_edit_planner_locks_mode_and_repairs_chatflow_contract() -> Non
     assert llm.params["memory"]["query_prompt_template"] == "客户问题：{{#sys.query#}}"
     assert llm.params["memory"]["window"] == {"enabled": True, "size": 10}
     assert result.repaired is True
+
+
+def test_chatflow_edit_planner_preserves_variables_when_field_is_omitted() -> None:
+    current = fallback_plan(
+        "记住用户姓名",
+        app_name="记忆姓名",
+        app_mode="advanced-chat",
+    )
+    payload = current.model_dump()
+    payload["conversation_variables"] = [
+        {
+            "id": "6da92d80-46c6-48ad-8de9-5a8adfa45356",
+            "name": "preferred_name",
+            "value_type": "string",
+            "value": "",
+            "description": "用户姓名",
+            "selector": ["conversation", "preferred_name"],
+        }
+    ]
+    current = WorkflowPlan.model_validate(payload)
+    revised = current.model_dump(exclude={"conversation_variables"})
+    revised["nodes"][1]["params"]["system_prompt"] = "更温暖地回复用户。"
+    planner = FakeEditPlanner([json.dumps(revised)])
+
+    result = planner.generate(
+        "修改回复语气",
+        current_plan=current,
+        dsl_version="9.9.9",
+    )
+
+    assert result.plan.conversation_variables == current.conversation_variables
+    assert result.raw_plan["conversation_variables"][0]["id"] == (
+        "6da92d80-46c6-48ad-8de9-5a8adfa45356"
+    )
 
 
 def test_edit_planner_fails_after_three_bad_attempts() -> None:

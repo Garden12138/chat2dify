@@ -12,6 +12,11 @@ review. Chatflow plans normalize system inputs to `sys.query` and `sys.files`,
 preserve 10-message LLM memory including container child LLMs, and require
 every response path to finish at `answer`.
 
+Chatflow Plan IR now includes typed `conversation_variables` and certified
+top-level `assigner` nodes for remembering preferences, incrementing counters,
+and collecting information across turns. Existing Dify variable UUIDs are
+preserved; newly declared variables receive deterministic UUIDs.
+
 Chatflow also supports the same reviewed modification and explicit publishing
 flow as Workflow. Existing `advanced-chat` drafts can be loaded, revised through
 Modify Preview, applied with draft hash protection, run across multiple
@@ -133,22 +138,11 @@ Plan IR. This is separate from `DIFY_DEFAULT_MODEL_PROVIDER` /
 workflow. API keys stay on the server and are never returned to or stored by
 the browser.
 
-OpenAI-compatible planner configuration:
-
-```env
-PLANNER_DEFAULT_PROVIDER=openai
-PLANNER_TIMEOUT_SECONDS=300
-PLANNER_REQUEST_RETRIES=2
-OPENAI_API_KEY=
-OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_MODEL=gpt-4o-mini
-```
-
-NVIDIA NIM DeepSeek V4 Flash planner configuration:
+NVIDIA NIM DeepSeek V4 Flash is the default Planner:
 
 ```env
 PLANNER_DEFAULT_PROVIDER=nvidia
-PLANNER_TIMEOUT_SECONDS=300
+PLANNER_TIMEOUT_SECONDS=600
 PLANNER_REQUEST_RETRIES=2
 NVIDIA_API_KEY=nvapi-...
 NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
@@ -156,6 +150,15 @@ NVIDIA_MODEL=deepseek-ai/deepseek-v4-flash
 NVIDIA_THINKING=false
 NVIDIA_REASONING_EFFORT=low
 NVIDIA_MAX_TOKENS=8192
+```
+
+OpenAI-compatible planners remain available only through explicit selection:
+
+```env
+PLANNER_DEFAULT_PROVIDER=openai
+OPENAI_API_KEY=
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4o-mini
 ```
 
 If the default planner provider has no API key, the create draft endpoint uses
@@ -237,8 +240,8 @@ Modify Apply with a reviewed preview continues to use the preview plan and does
 not call the selected Planner model a second time.
 
 `PLANNER_TIMEOUT_SECONDS` controls how long chat2dify waits for a Planner
-response. NVIDIA reasoning models can take longer than 60 seconds for complex
-workflow plans, so the default is 300 seconds. `PLANNER_REQUEST_RETRIES`
+response. NVIDIA NIM can take several minutes for complex structured workflow
+plans, so the default is 600 seconds. `PLANNER_REQUEST_RETRIES`
 retries transient disconnects, timeouts, rate limits, and temporary upstream
 errors without consuming an additional Plan self-repair attempt.
 NVIDIA Planner requests use streaming and default to `NVIDIA_THINKING=false`
@@ -580,7 +583,7 @@ New Chatflow creation is certified for:
 start, llm, answer, code, if-else, http-request, template-transform,
 question-classifier, parameter-extractor, variable-aggregator,
 document-extractor, list-operator, knowledge-retrieval, human-input,
-iteration, loop, tool, agent
+iteration, loop, assigner, tool, agent
 ```
 
 New Chatflows may use `human-input` as a top-level manual review or information
@@ -591,9 +594,16 @@ no nested containers, and no internal `answer`, `human-input`, or branching
 nodes. `loop` may contain an internal `assigner` generated to copy a child
 result into a loop variable for a break condition.
 
-Top-level `assigner`, Chatflow conversation-variable creation, nested
-containers, and container-internal human review remain out of scope. Existing
-Dify drafts with more complex structures remain readable and editable.
+Chatflow conversation variables support `string`, `number`, `boolean`,
+`object`, `array[string]`, `array[number]`, `array[boolean]`, and
+`array[object]`. Top-level `assigner` nodes can update only declared
+conversation variables. Number variables support arithmetic updates, arrays
+support append/extend/removal, and scalar/object values support overwrite,
+clear, and set. Deleting, renaming, or changing a variable type is treated as
+a destructive modification and requires `allow_destructive=true`.
+
+Nested containers and container-internal human review remain out of scope.
+Existing Dify drafts with more complex structures remain readable and editable.
 
 `question-classifier` is used for semantic routing such as complaint /
 consultation / appointment branches. `parameter-extractor` is used to extract
@@ -671,6 +681,12 @@ Example human-review Chatflow request:
 创建人工审核 Chatflow。先生成售后回复草稿，再由经理在 Dify 中选择通过或驳回；两个动作分支都通过 Answer 回复用户。
 ```
 
+Example cross-turn memory Chatflow request:
+
+```text
+创建一个记住用户姓名的 Chatflow。首次获得姓名后保存到会话变量 preferred_name，后续轮次使用该姓名回复，并维护一个每轮递增的对话计数。
+```
+
 Example list workflow request:
 
 ```text
@@ -696,7 +712,7 @@ Example selected agent workflow request:
 ```
 
 Plugin installation, credential editing, automatic creation of data-source
-nodes, Chatflow conversation-variable management, Agent Roster management, and
+nodes, independent conversation-variable CRUD/UI, Agent Roster management, and
 model capability registry sync remain out of scope for now.
 
 ## Test

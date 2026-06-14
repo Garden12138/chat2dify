@@ -107,6 +107,15 @@ workflow-only instructions above:
   or ["<start_id>","sys.files"].
 - Every llm node must keep memory enabled. Its query_prompt_template must use
   {{#sys.query#}} and its memory window must remain enabled.
+- Preserve conversation_variables and their ids unless the user explicitly
+  asks to change cross-turn state. New variables must use supported non-secret,
+  non-file types and selector ["conversation","<name>"].
+- A top-level assigner may target only a declared conversation variable. Never
+  assign to sys, start, environment variables, or an undeclared name. Number
+  variables allow arithmetic operations; arrays allow append, extend, and
+  removal operations; other types allow over-write, clear, and set.
+- Deleting, renaming, or changing the type of a conversation variable is
+  destructive and should only be done when the user explicitly asks.
 - Do not add or modify workflow triggers. selected_trigger is always user-input.
 """
 
@@ -185,6 +194,15 @@ class WorkflowEditPlanner:
                     )
                 payload = json.loads(_strip_json_fences(content))
                 raw_plan = _extract_plan_payload(payload)
+                if (
+                    current_plan.app_mode == "advanced-chat"
+                    and "conversation_variables" not in raw_plan
+                    and "conversationVariables" not in raw_plan
+                ):
+                    raw_plan["conversation_variables"] = [
+                        variable.model_dump()
+                        for variable in current_plan.conversation_variables
+                    ]
                 final_raw_plan = raw_plan
                 normalized = normalize_plan_payload(
                     raw_plan,

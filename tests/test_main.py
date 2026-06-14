@@ -2470,8 +2470,32 @@ def test_chatflow_apply_reviewed_preview_preserves_draft_metadata(monkeypatch) -
         app_name="汽车售后多轮客服",
         app_mode="advanced-chat",
     )
+    current_payload = current_plan.model_dump()
+    current_payload["conversation_variables"] = [
+        {
+            "id": "94d72d3d-b957-45cd-aea7-6cf9d7ec3020",
+            "name": "topic",
+            "value_type": "string",
+            "value": "",
+            "description": "当前话题",
+            "selector": ["conversation", "topic"],
+        }
+    ]
+    current_plan = WorkflowPlan.model_validate(current_payload)
     preview_plan = current_plan.model_copy(deep=True)
     preview_plan.nodes[1].params["system_prompt"] = "你是温暖、简洁的汽车售后客服。"
+    preview_plan.conversation_variables.append(
+        preview_plan.conversation_variables[0].model_copy(
+            update={
+                "id": "ce952b9f-6458-5c21-8500-f87d8df29459",
+                "name": "turn_count",
+                "value_type": "number",
+                "value": 0,
+                "description": "对话轮数",
+                "selector": ["conversation", "turn_count"],
+            }
+        )
+    )
     graph = yaml.safe_load(
         DifyDslCompiler(
             dsl_version="9.9.9",
@@ -2508,7 +2532,10 @@ def test_chatflow_apply_reviewed_preview_preserves_draft_metadata(monkeypatch) -
                 hash="hash-1",
                 version="draft",
                 environment_variables=[{"name": "store", "value_type": "string", "value": "west"}],
-                conversation_variables=[{"name": "topic", "value_type": "string", "value": ""}],
+                conversation_variables=[
+                    variable.model_dump()
+                    for variable in current_plan.conversation_variables
+                ],
                 raw={},
             )
 
@@ -2544,6 +2571,8 @@ def test_chatflow_apply_reviewed_preview_preserves_draft_metadata(monkeypatch) -
     assert seen["features"] == {"file_upload": {"enabled": True}}
     assert seen["environment_variables"][0]["name"] == "store"
     assert seen["conversation_variables"][0]["name"] == "topic"
+    assert seen["conversation_variables"][0]["id"] == "94d72d3d-b957-45cd-aea7-6cf9d7ec3020"
+    assert seen["conversation_variables"][1]["name"] == "turn_count"
     assert any(node["data"]["type"] == "answer" for node in seen["graph"]["nodes"])
 
 
@@ -2994,6 +3023,7 @@ def _test_settings(dataset_ids: str = "", *, nvidia_api_key: str = "") -> Settin
     env = {
         "DIFY_SOURCE_DIR": "../dify",
         "OPENAI_API_KEY": "token",
+        "PLANNER_DEFAULT_PROVIDER": "openai",
         "DIFY_CONSOLE_WEB_BASE": "http://dify.local",
         "DIFY_DEFAULT_MODEL_PROVIDER": "langgenius/tongyi/tongyi",
         "DIFY_DEFAULT_MODEL_NAME": "qwen3.5-plus",

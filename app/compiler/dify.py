@@ -93,7 +93,10 @@ class DifyDslCompiler:
             },
             "dependencies": [],
             "workflow": {
-                "conversation_variables": [],
+                "conversation_variables": [
+                    variable.model_dump()
+                    for variable in plan.conversation_variables
+                ],
                 "environment_variables": [],
                 "features": _default_features(),
                 "graph": {

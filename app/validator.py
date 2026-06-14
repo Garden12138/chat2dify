@@ -179,6 +179,16 @@ PARAMETER_EXTRACTOR_TYPES = {
     "array[object]",
     "array[boolean]",
 }
+ASSIGNER_COMMON_OPERATIONS = {"over-write", "clear", "set"}
+ASSIGNER_NUMBER_OPERATIONS = {*ASSIGNER_COMMON_OPERATIONS, "+=", "-=", "*=", "/="}
+ASSIGNER_ARRAY_OPERATIONS = {
+    "over-write",
+    "clear",
+    "append",
+    "extend",
+    "remove-first",
+    "remove-last",
+}
 
 
 def validate_plan(plan: WorkflowPlan) -> list[ValidationIssue]:
@@ -212,6 +222,7 @@ def validate_plan(plan: WorkflowPlan) -> list[ValidationIssue]:
     issues.extend(_validate_node_quality(plan))
     issues.extend(_validate_chatflow_system_references(plan))
     issues.extend(_validate_plan_variable_references(plan))
+    issues.extend(_validate_chatflow_assigners(plan))
     return issues
 
 
@@ -250,6 +261,69 @@ def validate_dsl(yaml_content: str, *, expected_dsl_version: str | None = None) 
         )
 
     workflow = data.get("workflow")
+    conversation_variables = (
+        workflow.get("conversation_variables")
+        if isinstance(workflow, dict)
+        else None
+    )
+    if not isinstance(conversation_variables, list):
+        issues.append(
+            ValidationIssue(
+                code="DSL_CONVERSATION_VARIABLES_INVALID",
+                message="workflow.conversation_variables must be a list.",
+                path="workflow.conversation_variables",
+            )
+        )
+    elif app_mode != "advanced-chat" and conversation_variables:
+        issues.append(
+            ValidationIssue(
+                code="DSL_WORKFLOW_CONVERSATION_VARIABLE_INVALID",
+                message="conversation variables are only supported by advanced-chat.",
+                path="workflow.conversation_variables",
+            )
+        )
+    elif app_mode == "advanced-chat":
+        names: set[str] = set()
+        ids: set[str] = set()
+        for index, variable in enumerate(conversation_variables):
+            path = f"workflow.conversation_variables.{index}"
+            if not isinstance(variable, dict):
+                issues.append(
+                    ValidationIssue(
+                        code="DSL_CONVERSATION_VARIABLE_INVALID",
+                        message="conversation variable must be an object.",
+                        path=path,
+                    )
+                )
+                continue
+            name = str(variable.get("name") or "")
+            variable_id = str(variable.get("id") or "")
+            if not name or name in names:
+                issues.append(
+                    ValidationIssue(
+                        code="DSL_CONVERSATION_VARIABLE_NAME_INVALID",
+                        message="conversation variable names must be non-empty and unique.",
+                        path=f"{path}.name",
+                    )
+                )
+            if not variable_id or variable_id in ids:
+                issues.append(
+                    ValidationIssue(
+                        code="DSL_CONVERSATION_VARIABLE_ID_INVALID",
+                        message="conversation variable ids must be non-empty and unique.",
+                        path=f"{path}.id",
+                    )
+                )
+            if variable.get("selector") != ["conversation", name]:
+                issues.append(
+                    ValidationIssue(
+                        code="DSL_CONVERSATION_VARIABLE_SELECTOR_INVALID",
+                        message="conversation variable selector must match its name.",
+                        path=f"{path}.selector",
+                    )
+                )
+            names.add(name)
+            ids.add(variable_id)
     graph: Any = workflow.get("graph") if isinstance(workflow, dict) else None
     if not isinstance(graph, dict):
         issues.append(
@@ -1981,6 +2055,194 @@ def _validate_plan_variable_references(plan: WorkflowPlan) -> list[ValidationIss
     return issues
 
 
+def _validate_chatflow_assigners(plan: WorkflowPlan) -> list[ValidationIssue]:
+    if plan.app_mode != "advanced-chat":
+        return []
+
+    variable_types = {
+        variable.name: variable.value_type
+        for variable in plan.conversation_variables
+    }
+    output_types = _known_output_types(plan)
+    issues: list[ValidationIssue] = []
+    for node in plan.nodes:
+        if node.type != "assigner":
+            continue
+        for index, item in enumerate(node.params.get("items") or []):
+            if not isinstance(item, dict):
+                continue
+            path = f"nodes.{node.id}.params.items.{index}"
+            selector = item.get("variable_selector")
+            if (
+                not _is_selector(selector)
+                or len(selector) != 2
+                or selector[0] != "conversation"
+                or selector[1] not in variable_types
+            ):
+                issues.append(
+                    ValidationIssue(
+                        code="PLAN_CHATFLOW_ASSIGNER_TARGET_INVALID",
+                        message=(
+                            "Top-level Chatflow assigner targets must be declared "
+                            "conversation variables."
+                        ),
+                        node_id=node.id,
+                        path=f"{path}.variable_selector",
+                        suggestion='使用 ["conversation", "变量名"]，并先在 conversation_variables 中声明。',
+                    )
+                )
+                continue
+
+            target_type = variable_types[str(selector[1])]
+            operation = str(item.get("operation") or "")
+            allowed_operations = (
+                ASSIGNER_ARRAY_OPERATIONS
+                if target_type.startswith("array[")
+                else ASSIGNER_NUMBER_OPERATIONS
+                if target_type == "number"
+                else ASSIGNER_COMMON_OPERATIONS
+            )
+            if operation not in allowed_operations:
+                issues.append(
+                    ValidationIssue(
+                        code="PLAN_CHATFLOW_ASSIGNER_OPERATION_INVALID",
+                        message=f"{operation or '<missing>'} is invalid for {target_type}.",
+                        node_id=node.id,
+                        path=f"{path}.operation",
+                        suggestion=f"使用该变量类型支持的操作：{', '.join(sorted(allowed_operations))}。",
+                    )
+                )
+                continue
+
+            if operation in {"clear", "remove-first", "remove-last"}:
+                continue
+            input_type = str(item.get("input_type") or "constant")
+            value = item.get("value")
+            expected_type = _assigner_input_type(target_type, operation)
+            if input_type == "constant":
+                if not _value_matches_type(expected_type, value):
+                    issues.append(
+                        ValidationIssue(
+                            code="PLAN_CHATFLOW_ASSIGNER_VALUE_TYPE_INVALID",
+                            message=(
+                                f"Constant value for {operation} must match "
+                                f"{expected_type}."
+                            ),
+                            node_id=node.id,
+                            path=f"{path}.value",
+                        )
+                    )
+            elif input_type == "variable" and _is_selector(value):
+                source_type = output_types.get((str(value[0]), str(value[1])))
+                if source_type and not _types_compatible(expected_type, source_type):
+                    issues.append(
+                        ValidationIssue(
+                            code="PLAN_CHATFLOW_ASSIGNER_VALUE_TYPE_INVALID",
+                            message=(
+                                f"Variable value type {source_type} is incompatible "
+                                f"with {operation} on {target_type}."
+                            ),
+                            node_id=node.id,
+                            path=f"{path}.value",
+                        )
+                    )
+    return issues
+
+
+def _assigner_input_type(target_type: str, operation: str) -> str:
+    if operation == "append" and target_type.startswith("array["):
+        return target_type[6:-1]
+    return target_type
+
+
+def _value_matches_type(value_type: str, value: Any) -> bool:
+    if value_type == "string":
+        return isinstance(value, str)
+    if value_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if value_type == "boolean":
+        return isinstance(value, bool)
+    if value_type == "object":
+        return isinstance(value, dict)
+    if not isinstance(value, list):
+        return False
+    if value_type == "array[string]":
+        return all(isinstance(item, str) for item in value)
+    if value_type == "array[number]":
+        return all(isinstance(item, (int, float)) and not isinstance(item, bool) for item in value)
+    if value_type == "array[boolean]":
+        return all(isinstance(item, bool) for item in value)
+    if value_type == "array[object]":
+        return all(isinstance(item, dict) for item in value)
+    return False
+
+
+def _types_compatible(expected: str, actual: str) -> bool:
+    return expected == actual or (
+        expected == "number" and actual in {"integer", "float"}
+    )
+
+
+def _known_output_types(plan: WorkflowPlan) -> dict[tuple[str, str], str]:
+    result: dict[tuple[str, str], str] = {
+        ("sys", "query"): "string",
+        ("sys", "files"): "array[object]",
+    }
+    for variable in plan.conversation_variables:
+        result[("conversation", variable.name)] = variable.value_type
+    for node in plan.nodes:
+        if node.type == "start":
+            for variable in node.params.get("variables") or []:
+                if not isinstance(variable, dict):
+                    continue
+                name = str(variable.get("name") or variable.get("variable") or "")
+                if name:
+                    result[(node.id, name)] = _input_variable_type(
+                        str(variable.get("type") or "paragraph")
+                    )
+            if plan.app_mode == "advanced-chat":
+                result[(node.id, "sys.query")] = "string"
+                result[(node.id, "sys.files")] = "array[object]"
+        elif node.type == "llm":
+            result[(node.id, "text")] = "string"
+        elif node.type == "code":
+            outputs = node.params.get("outputs")
+            for name, config in outputs.items() if isinstance(outputs, dict) else []:
+                if isinstance(config, dict) and config.get("type"):
+                    result[(node.id, str(name))] = str(config["type"])
+        elif node.type == "parameter-extractor":
+            for parameter in node.params.get("parameters") or []:
+                if isinstance(parameter, dict) and parameter.get("name"):
+                    result[(node.id, str(parameter["name"]))] = str(
+                        parameter.get("type") or "string"
+                    )
+        elif node.type == "template-transform":
+            result[(node.id, "output")] = "string"
+        elif node.type == "document-extractor":
+            result[(node.id, "text")] = "string"
+        elif node.type == "variable-aggregator":
+            result[(node.id, "output")] = str(
+                node.params.get("output_type") or "string"
+            )
+        elif node.type == "iteration":
+            result[(node.id, "output")] = str(
+                node.params.get("output_type") or "array[string]"
+            )
+    return result
+
+
+def _input_variable_type(value: str) -> str:
+    return {
+        "text": "string",
+        "paragraph": "string",
+        "number": "number",
+        "boolean": "boolean",
+        "json": "object",
+        "file": "object",
+        "file-list": "array[object]",
+    }.get(value, "string")
+
+
 def _validate_chatflow_system_references(plan: WorkflowPlan) -> list[ValidationIssue]:
     if plan.app_mode != "advanced-chat":
         return []
@@ -2013,7 +2275,13 @@ def _validate_chatflow_system_references(plan: WorkflowPlan) -> list[ValidationI
 
 
 def _known_outputs(plan: WorkflowPlan) -> dict[str, set[str]]:
-    outputs: dict[str, set[str]] = {"sys": set(SYSTEM_OUTPUTS)}
+    outputs: dict[str, set[str]] = {
+        "sys": set(SYSTEM_OUTPUTS),
+        "conversation": {
+            variable.name
+            for variable in plan.conversation_variables
+        },
+    }
     for node in plan.nodes:
         match node.type:
             case "start":

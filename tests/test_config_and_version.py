@@ -107,6 +107,24 @@ def test_nvidia_planner_configuration_and_catalog(tmp_path: Path) -> None:
     assert "nvapi-test" not in str(catalog)
 
 
+def test_nvidia_deepseek_is_the_default_planner(tmp_path: Path) -> None:
+    settings = Settings.from_env(
+        {
+            "DIFY_SOURCE_DIR": "../dify",
+            "NVIDIA_API_KEY": "nvapi-test",
+        },
+        project_root=tmp_path,
+        validate_dify=False,
+    )
+
+    runtime = settings.planner_runtime()
+
+    assert runtime.provider == "nvidia"
+    assert runtime.label == "NVIDIA NIM"
+    assert runtime.model == "deepseek-ai/deepseek-v4-flash"
+    assert runtime.timeout_seconds == 600
+
+
 def test_planner_timeout_must_be_positive(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="PLANNER_TIMEOUT_SECONDS must be greater than zero"):
         Settings.from_env(

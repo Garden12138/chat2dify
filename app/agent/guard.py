@@ -141,6 +141,75 @@ def guard_plan_change(before: WorkflowPlan, after: WorkflowPlan, changes: list[d
             )
         )
 
+    variable_removed = [
+        change
+        for change in changes
+        if change.get("type") == "conversation_variable_removed"
+    ]
+    variable_destructive_updates = [
+        change
+        for change in changes
+        if change.get("type") == "conversation_variable_updated"
+        and change.get("field") in {"name", "value_type"}
+    ]
+    if variable_removed or variable_destructive_updates:
+        issues.append(
+            ChangeGuardIssue(
+                code="PLAN_CHANGE_CONVERSATION_VARIABLE_DESTRUCTIVE",
+                message="修改删除、重命名或改变了会话变量类型，可能破坏已有跨轮状态。",
+                severity="error",
+                suggestion="确认需要迁移或丢弃已有状态后，使用 allow_destructive=true。",
+                details={
+                    "removed": [
+                        change.get("name")
+                        for change in variable_removed
+                    ],
+                    "updated": [
+                        {
+                            "name": change.get("name"),
+                            "field": change.get("field"),
+                            "before": change.get("before"),
+                            "after": change.get("after"),
+                        }
+                        for change in variable_destructive_updates
+                    ],
+                },
+            )
+        )
+
+    variable_added = [
+        change
+        for change in changes
+        if change.get("type") == "conversation_variable_added"
+    ]
+    variable_safe_updates = [
+        change
+        for change in changes
+        if change.get("type") == "conversation_variable_updated"
+        and change.get("field") not in {"name", "value_type"}
+    ]
+    if variable_added or variable_safe_updates:
+        issues.append(
+            ChangeGuardIssue(
+                code="PLAN_CHANGE_CONVERSATION_VARIABLES_UPDATED",
+                message="修改新增或更新了 Chatflow 会话变量。",
+                severity="warning",
+                details={
+                    "added": [
+                        change.get("name")
+                        for change in variable_added
+                    ],
+                    "updated": [
+                        {
+                            "name": change.get("name"),
+                            "field": change.get("field"),
+                        }
+                        for change in variable_safe_updates
+                    ],
+                },
+            )
+        )
+
     high_risk = any(issue.severity == "error" for issue in issues)
     medium_risk = any(issue.severity == "warning" for issue in issues)
     risk: RiskLevel = "high" if high_risk else "medium" if medium_risk else "low"

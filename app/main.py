@@ -328,6 +328,7 @@ def _publish_workflow(
                 draft.graph,
                 name=_draft_plan_name(app_detail, app_id),
                 app_mode=app_mode,
+                conversation_variables=draft.conversation_variables,
             )
             compiler = DifyDslCompiler(
                 dsl_version=version_info.app_dsl_version,
@@ -451,6 +452,7 @@ def get_workflow_draft(app_id: str) -> dict:
             draft.graph,
             name=_draft_plan_name(app_detail, app_id),
             app_mode=_app_mode(app_detail, draft.graph),
+            conversation_variables=draft.conversation_variables,
         )
         issues = validate_plan(plan)
         return {
@@ -667,6 +669,7 @@ def _modify_workflow(
                 draft.graph,
                 name=_draft_plan_name(app_detail, request.app_id),
                 app_mode=app_mode,
+                conversation_variables=draft.conversation_variables,
             )
             if task_context is not None:
                 task_context.update("decompiling", 25, "Converted the current Dify graph into Plan IR.")
@@ -761,7 +764,10 @@ def _modify_workflow(
                 features=draft.features,
                 hash=draft.hash,
                 environment_variables=draft.environment_variables,
-                conversation_variables=draft.conversation_variables,
+                conversation_variables=[
+                    variable.model_dump()
+                    for variable in plan.conversation_variables
+                ],
             )
             response["new_hash"] = sync.hash
             response["sync"] = asdict(sync)
