@@ -12,6 +12,11 @@ review. Chatflow plans normalize system inputs to `sys.query` and `sys.files`,
 preserve 10-message LLM memory including container child LLMs, and require
 every response path to finish at `answer`.
 
+Chatflow `iteration` and `loop` containers also support certified internal
+`if-else` and `question-classifier` routing. Internal graphs must be connected
+DAGs whose complete branch set explicitly converges to one terminal processing
+node; iteration output is bound to that convergence node.
+
 Chatflow Plan IR now includes typed `conversation_variables` and certified
 top-level `assigner` nodes for remembering preferences, incrementing counters,
 and collecting information across turns. Existing Dify variable UUIDs are
@@ -589,10 +594,13 @@ iteration, loop, assigner, tool, agent
 New Chatflows may use `human-input` as a top-level manual review or information
 collection step. Each action branch must reach an `answer`; draft runs pause at
 that node and the human action is completed in Dify. `iteration` and `loop`
-creation use a stable internal processing chain: one internal start, no cycles,
-no nested containers, and no internal `answer`, `human-input`, or branching
-nodes. `loop` may contain an internal `assigner` generated to copy a child
-result into a loop variable for a break condition.
+creation supports a stable internal DAG with one internal start, no cycles, and
+optional `if-else` or `question-classifier` routing. Every declared case,
+`false`, or classifier class must have exactly one matching outgoing edge, and
+all paths must explicitly converge to one terminal processing node.
+`iteration.output_selector` references that convergence node. `loop` may use an
+internal `assigner` after convergence to copy the result into a loop variable
+used by a break condition.
 
 Chatflow conversation variables support `string`, `number`, `boolean`,
 `object`, `array[string]`, `array[number]`, `array[boolean]`, and
@@ -602,8 +610,9 @@ support append/extend/removal, and scalar/object values support overwrite,
 clear, and set. Deleting, renaming, or changing a variable type is treated as
 a destructive modification and requires `allow_destructive=true`.
 
-Nested containers and container-internal human review remain out of scope.
-Existing Dify drafts with more complex structures remain readable and editable.
+Nested containers and container-internal `answer`, `human-input`, datasource,
+or knowledge-index nodes remain out of scope. Existing Dify drafts with more
+complex structures remain readable and editable.
 
 `question-classifier` is used for semantic routing such as complaint /
 consultation / appointment branches. `parameter-extractor` is used to extract
@@ -669,10 +678,22 @@ Example iteration Chatflow request:
 创建批量售后分析 Chatflow。输入 items JSON 中的 records 列表，逐条结合用户本轮要求生成处理建议，汇总后通过 Answer 回复。
 ```
 
+Example classified iteration Chatflow request:
+
+```text
+创建批量售后分类 Chatflow。逐条判断 records 中的记录属于紧急投诉还是普通咨询，分别生成处理建议，再将两个分支显式汇合为每条记录的输出，最后通过 Answer 回复汇总结果。
+```
+
 Example loop Chatflow request:
 
 ```text
 创建维修状态检查 Chatflow。最多循环 3 次检查处理结果，内部结果包含“已完成”时停止，最后通过 Answer 回复本轮检查结果。
+```
+
+Example conditional loop Chatflow request:
+
+```text
+创建条件重试 Chatflow。每轮判断当前状态是否需要升级处理，两个条件分支分别执行检查后汇合，并用 Assigner 将汇合结果写入 loop variable；最多循环 3 次，满足完成条件后通过 Answer 回复。
 ```
 
 Example human-review Chatflow request:

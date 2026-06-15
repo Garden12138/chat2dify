@@ -183,13 +183,17 @@ class DifyDslCompiler:
             case node_type if node_type in EXTERNAL_DEPENDENCY_NODE_TYPES:
                 data.update(_external_dependency_data(node))
 
+        height = _node_height(node.type, data)
+        width = _node_width(node.type, data)
+        if node.type in {"iteration", "loop"}:
+            width, height = _container_dimensions(node)
         return {
             "id": node.id,
             "type": _graph_node_type(node.type),
             "position": position,
             "positionAbsolute": position.copy(),
-            "height": _node_height(node.type, data),
-            "width": _node_width(node.type, data),
+            "height": height,
+            "width": width,
             "selected": False,
             "targetPosition": "left",
             "sourcePosition": "right",
@@ -240,6 +244,7 @@ class DifyDslCompiler:
         app_mode: str,
     ) -> list[dict[str, Any]]:
         children = node.params.get("children") if isinstance(node.params.get("children"), list) else []
+        child_positions = _container_child_positions(node)
         graph_nodes: list[dict[str, Any]] = []
         for index, child in enumerate(children):
             if not isinstance(child, dict):
@@ -251,7 +256,10 @@ class DifyDslCompiler:
                 output_types=output_types,
                 app_mode=app_mode,
             )
-            position = _child_position(child, index)
+            position = child_positions.get(
+                str(child.get("id") or ""),
+                _child_position(child, index),
+            )
             graph_node["position"] = position
             graph_node["positionAbsolute"] = position.copy()
             graph_node["parentId"] = node.id
@@ -716,6 +724,110 @@ def _child_position(child: dict[str, Any], index: int) -> dict[str, int]:
         except (TypeError, ValueError):
             pass
     return {"x": CONTAINER_CHILD_START_X + index * NODE_WIDTH_X_OFFSET, "y": CONTAINER_CHILD_START_Y}
+
+
+def _container_child_positions(node: PlanNode) -> dict[str, dict[str, int]]:
+    children = node.params.get("children") if isinstance(node.params.get("children"), list) else []
+    child_by_id = {
+        str(child.get("id")): child
+        for child in children
+        if isinstance(child, dict) and child.get("id")
+    }
+    explicit = {
+        child_id: position
+        for child_id, child in child_by_id.items()
+        if (position := _explicit_child_position(child)) is not None
+    }
+    if len(explicit) == len(child_by_id):
+        return explicit
+
+    adjacency: dict[str, list[str]] = {child_id: [] for child_id in child_by_id}
+    indegree: dict[str, int] = {child_id: 0 for child_id in child_by_id}
+    edges = node.params.get("edges") if isinstance(node.params.get("edges"), list) else []
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        source = str(edge.get("source") or "")
+        target = str(edge.get("target") or "")
+        if source not in child_by_id or target not in child_by_id:
+            continue
+        adjacency[source].append(target)
+        indegree[target] += 1
+
+    order_index = {
+        str(child.get("id")): index
+        for index, child in enumerate(children)
+        if isinstance(child, dict) and child.get("id")
+    }
+    queue = sorted(
+        (child_id for child_id, count in indegree.items() if count == 0),
+        key=lambda child_id: order_index.get(child_id, 0),
+    )
+    depths = {child_id: 0 for child_id in child_by_id}
+    visited: list[str] = []
+    while queue:
+        source = queue.pop(0)
+        visited.append(source)
+        for target in adjacency.get(source, []):
+            depths[target] = max(depths[target], depths[source] + 1)
+            indegree[target] -= 1
+            if indegree[target] == 0:
+                queue.append(target)
+                queue.sort(key=lambda child_id: order_index.get(child_id, 0))
+
+    if len(visited) != len(child_by_id):
+        return {
+            child_id: explicit.get(child_id, _child_position(child, index))
+            for index, (child_id, child) in enumerate(child_by_id.items())
+        }
+
+    nodes_by_depth: dict[int, list[str]] = {}
+    for child_id in child_by_id:
+        nodes_by_depth.setdefault(depths[child_id], []).append(child_id)
+    result: dict[str, dict[str, int]] = {}
+    for depth, child_ids in nodes_by_depth.items():
+        child_ids.sort(key=lambda child_id: order_index.get(child_id, 0))
+        for lane, child_id in enumerate(child_ids):
+            result[child_id] = explicit.get(
+                child_id,
+                {
+                    "x": CONTAINER_CHILD_START_X + depth * NODE_WIDTH_X_OFFSET,
+                    "y": CONTAINER_CHILD_START_Y + lane * 180,
+                },
+            )
+    return result
+
+
+def _explicit_child_position(child: dict[str, Any]) -> dict[str, int] | None:
+    raw_position = child.get("position")
+    if not isinstance(raw_position, dict):
+        params = child.get("params") if isinstance(child.get("params"), dict) else {}
+        raw_position = params.get("_position")
+    if not isinstance(raw_position, dict):
+        return None
+    try:
+        return {
+            "x": int(raw_position.get("x", 0)),
+            "y": int(raw_position.get("y", 0)),
+        }
+    except (TypeError, ValueError):
+        return None
+
+
+def _container_dimensions(node: PlanNode) -> tuple[int, int]:
+    children = node.params.get("children") if isinstance(node.params.get("children"), list) else []
+    positions = _container_child_positions(node)
+    max_right = 0
+    max_bottom = 0
+    for child in children:
+        if not isinstance(child, dict) or not child.get("id"):
+            continue
+        position = positions.get(str(child.get("id")), {"x": 0, "y": 0})
+        child_type = str(child.get("type") or "")
+        child_params = child.get("params") if isinstance(child.get("params"), dict) else {}
+        max_right = max(max_right, position["x"] + _node_width(child_type, child_params))
+        max_bottom = max(max_bottom, position["y"] + _node_height(child_type, child_params))
+    return max(620, max_right + 48), max(220, max_bottom + 60)
 
 
 def _container_children_refs(children: list[Any]) -> list[dict[str, str]]:

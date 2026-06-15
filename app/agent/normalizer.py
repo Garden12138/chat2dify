@@ -1512,13 +1512,17 @@ def _normalize_iteration_params(
         children,
         start_node_id=result["start_node_id"],
     )
+    _normalize_container_branch_edge_handles(result["edges"], children)
 
     raw_output_selector = result.get("output_selector") or result.get("output") or result.get("result_selector")
     output_selector = _normalize_optional_selector(raw_output_selector)
     if not output_selector:
-        last_child = _last_processing_child(children)
-        if last_child:
-            output_selector = [str(last_child.get("id")), _default_node_output_name(last_child)]
+        terminal_child = _single_container_terminal_child(children, result["edges"])
+        if terminal_child:
+            output_selector = [
+                str(terminal_child.get("id")),
+                _default_node_output_name(terminal_child),
+            ]
     result["output_selector"] = output_selector
     result["output_type"] = _array_var_type(str(result.get("output_type") or "array[string]"))
 
@@ -1581,6 +1585,7 @@ def _normalize_loop_params(
         children,
         start_node_id=result["start_node_id"],
     )
+    _normalize_container_branch_edge_handles(result["edges"], children)
     _rewrite_loop_break_conditions_for_dify_checklist(result, node_id=node_id)
 
     result.pop("max_iterations", None)
@@ -1680,6 +1685,7 @@ def _normalize_container_child(
     params = child.get("params")
     if not isinstance(params, dict):
         params = {}
+    child_position = deepcopy(params.get("_position")) if isinstance(params.get("_position"), dict) else None
     match child_type:
         case "llm":
             child["params"] = _normalize_llm_params(
@@ -1726,6 +1732,8 @@ def _normalize_container_child(
             child["params"] = dict(params)
         case _:
             child["params"] = dict(params)
+    if child_position is not None and isinstance(child.get("params"), dict):
+        child["params"]["_position"] = child_position
     return child
 
 
@@ -1810,11 +1818,59 @@ def _normalize_container_edges(value: Any, children: list[dict[str, Any]], *, st
     return chain
 
 
-def _last_processing_child(children: list[dict[str, Any]]) -> dict[str, Any] | None:
-    for child in reversed(children):
-        if child.get("type") not in {"iteration-start", "loop-start", "loop-end"}:
-            return child
-    return None
+def _normalize_container_branch_edge_handles(
+    edges: list[dict[str, Any]],
+    children: list[dict[str, Any]],
+) -> None:
+    node_by_id = {
+        str(child.get("id")): child
+        for child in children
+        if isinstance(child, dict) and child.get("id")
+    }
+    if_else_positions = _branch_edge_positions(edges, node_by_id, "if-else")
+    classifier_positions = _branch_edge_positions(
+        edges,
+        node_by_id,
+        "question-classifier",
+    )
+    for edge in edges:
+        source = node_by_id.get(str(edge.get("source")))
+        if not source:
+            continue
+        if source.get("type") == "if-else":
+            edge["source_handle"] = _infer_if_else_source_handle(
+                source,
+                edge,
+                node_by_id,
+                if_else_positions,
+            )
+        elif source.get("type") == "question-classifier":
+            edge["source_handle"] = _infer_question_classifier_source_handle(
+                source,
+                edge,
+                node_by_id,
+                classifier_positions,
+            )
+
+
+def _single_container_terminal_child(
+    children: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    outgoing_ids = {
+        str(edge.get("source"))
+        for edge in edges
+        if isinstance(edge, dict) and edge.get("source")
+    }
+    terminals = [
+        child
+        for child in children
+        if isinstance(child, dict)
+        and child.get("id")
+        and str(child.get("id")) not in outgoing_ids
+        and child.get("type") not in {"iteration-start", "loop-start"}
+    ]
+    return terminals[0] if len(terminals) == 1 else None
 
 
 def _default_node_output_name(node: dict[str, Any]) -> str:

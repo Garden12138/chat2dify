@@ -226,7 +226,8 @@ def test_chatflow_prompt_is_mode_specific_and_lists_certified_nodes() -> None:
     assert "knowledge-retrieval" in CHATFLOW_SYSTEM_PROMPT
     assert "tool, agent" in CHATFLOW_SYSTEM_PROMPT
     assert "human-input is top-level only" in CHATFLOW_SYSTEM_PROMPT
-    assert "one acyclic processing chain" in CHATFLOW_SYSTEM_PROMPT
+    assert "one connected acyclic graph" in CHATFLOW_SYSTEM_PROMPT
+    assert "all branches must explicitly" in CHATFLOW_SYSTEM_PROMPT
     assert "response path must finish at an answer node" in CHATFLOW_SYSTEM_PROMPT
 
 
@@ -511,6 +512,62 @@ def test_chatflow_planner_retries_container_cycle() -> None:
 
     assert result.attempts == 2
     assert "PLAN_CHATFLOW_CONTAINER_CYCLE_INVALID" in planner.last_errors[1]
+
+
+def test_chatflow_planner_accepts_iteration_classifier_with_explicit_convergence() -> None:
+    planner = FakePlanner([json.dumps(_chatflow_iteration_branch_plan())])
+
+    result = planner.generate(
+        "逐条分类售后记录，分别处理紧急和普通记录后汇合输出",
+        app_name="批量售后分类",
+        app_mode="advanced-chat",
+        dsl_version="9.9.9",
+    )
+
+    batch = next(node for node in result.plan.nodes if node.id == "batch")
+    classifier_edges = [
+        edge for edge in batch.params["edges"] if edge["source"] == "item_classifier"
+    ]
+    branch_llms = [
+        child for child in batch.params["children"] if child["type"] == "llm"
+    ]
+
+    assert result.attempts == 1
+    assert batch.params["output_selector"] == ["merge", "output"]
+    assert {edge["source_handle"] for edge in classifier_edges} == {
+        "priority",
+        "normal",
+    }
+    assert all("{{#sys.query#}}" in child["params"]["user_prompt"] for child in branch_llms)
+    assert all(
+        child["params"]["memory"]["window"] == {"enabled": True, "size": 10}
+        for child in branch_llms
+    )
+
+
+def test_chatflow_planner_retries_container_branch_without_convergence() -> None:
+    bad = _chatflow_iteration_branch_plan()
+    batch = next(node for node in bad["nodes"] if node["id"] == "batch")
+    batch["params"]["edges"] = [
+        edge
+        for edge in batch["params"]["edges"]
+        if not (
+            edge["source"] == "normal_llm"
+            and edge["target"] == "merge"
+        )
+    ]
+    good = _chatflow_iteration_branch_plan()
+    planner = FakePlanner([json.dumps(bad), json.dumps(good)])
+
+    result = planner.generate(
+        "逐条分类售后记录并在所有分支处理后汇合输出",
+        app_name="批量售后分类",
+        app_mode="advanced-chat",
+        dsl_version="9.9.9",
+    )
+
+    assert result.attempts == 2
+    assert "PLAN_CHATFLOW_CONTAINER_CONVERGENCE_REQUIRED" in planner.last_errors[1]
 
 
 def test_chatflow_creation_recursively_rejects_unselected_container_resources() -> None:
@@ -1040,6 +1097,84 @@ def _loop_plan() -> dict:
         ],
         "edges": [{"source": "start", "target": "retry"}, {"source": "retry", "target": "end"}],
     }
+
+
+def _chatflow_iteration_branch_plan() -> dict:
+    plan = _iteration_plan()
+    batch = next(node for node in plan["nodes"] if node["id"] == "batch")
+    batch["params"].update(
+        {
+            "output_selector": ["merge", "output"],
+            "output_type": "array[string]",
+            "children": [
+                {
+                    "id": "batch_start",
+                    "type": "iteration-start",
+                    "title": "开始遍历",
+                    "params": {},
+                },
+                {
+                    "id": "item_classifier",
+                    "type": "question-classifier",
+                    "title": "判断记录优先级",
+                    "params": {
+                        "query_variable_selector": ["batch", "item"],
+                        "classes": [
+                            {"id": "priority", "name": "紧急"},
+                            {"id": "normal", "name": "普通"},
+                        ],
+                        "instruction": "判断当前售后记录是否需要紧急处理。",
+                    },
+                },
+                {
+                    "id": "priority_llm",
+                    "type": "llm",
+                    "title": "处理紧急记录",
+                    "params": {
+                        "system_prompt": "你是紧急售后记录处理专员。",
+                        "user_prompt": "优先处理：{{#batch.item#}}\n{{#start.query#}}",
+                    },
+                },
+                {
+                    "id": "normal_llm",
+                    "type": "llm",
+                    "title": "处理普通记录",
+                    "params": {
+                        "system_prompt": "你是普通售后记录处理专员。",
+                        "user_prompt": "常规处理：{{#batch.item#}}\n{{#start.query#}}",
+                    },
+                },
+                {
+                    "id": "merge",
+                    "type": "variable-aggregator",
+                    "title": "汇合分类结果",
+                    "params": {
+                        "variables": [
+                            ["priority_llm", "text"],
+                            ["normal_llm", "text"],
+                        ],
+                        "output_type": "string",
+                    },
+                },
+            ],
+            "edges": [
+                {"source": "batch_start", "target": "item_classifier"},
+                {
+                    "source": "item_classifier",
+                    "target": "priority_llm",
+                    "source_handle": "priority",
+                },
+                {
+                    "source": "item_classifier",
+                    "target": "normal_llm",
+                    "source_handle": "normal",
+                },
+                {"source": "priority_llm", "target": "merge"},
+                {"source": "normal_llm", "target": "merge"},
+            ],
+        }
+    )
+    return plan
 
 
 def _chatflow_multi_end_plan() -> dict:

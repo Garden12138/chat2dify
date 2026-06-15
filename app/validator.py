@@ -1116,9 +1116,19 @@ def _validate_node_params(plan: WorkflowPlan) -> list[ValidationIssue]:
                         )
                     )
             case "iteration":
-                issues.extend(_validate_iteration_node(node))
+                issues.extend(
+                    _validate_iteration_node(
+                        node,
+                        require_convergence=plan.app_mode == "advanced-chat",
+                    )
+                )
             case "loop":
-                issues.extend(_validate_loop_node(node))
+                issues.extend(
+                    _validate_loop_node(
+                        node,
+                        require_convergence=plan.app_mode == "advanced-chat",
+                    )
+                )
             case "iteration-start" | "loop-start" | "loop-end":
                 issues.append(
                     _node_issue(
@@ -1791,7 +1801,11 @@ def _tool_var_input_has_value(value: Any) -> bool:
     return True
 
 
-def _validate_iteration_node(node: PlanNode) -> list[ValidationIssue]:
+def _validate_iteration_node(
+    node: PlanNode,
+    *,
+    require_convergence: bool = False,
+) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     params = node.params
     if not _is_selector(params.get("iterator_selector")):
@@ -1811,12 +1825,17 @@ def _validate_iteration_node(node: PlanNode) -> list[ValidationIssue]:
             node,
             start_type="iteration-start",
             output_selector=params.get("output_selector"),
+            require_convergence=require_convergence,
         )
     )
     return issues
 
 
-def _validate_loop_node(node: PlanNode) -> list[ValidationIssue]:
+def _validate_loop_node(
+    node: PlanNode,
+    *,
+    require_convergence: bool = False,
+) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     params = node.params
     children = params.get("children") if isinstance(params.get("children"), list) else []
@@ -1863,7 +1882,14 @@ def _validate_loop_node(node: PlanNode) -> list[ValidationIssue]:
         seen_labels.add(label)
         if variable.get("value_type") == "variable" and not _is_selector(variable.get("value")):
             issues.append(_node_issue("PLAN_LOOP_VARIABLE_VALUE_INVALID", "loop variable value requires selector when value_type is variable.", node.id, f"params.loop_variables.{idx}.value"))
-    issues.extend(_validate_container_graph(node, start_type="loop-start", output_selector=None))
+    issues.extend(
+        _validate_container_graph(
+            node,
+            start_type="loop-start",
+            output_selector=None,
+            require_convergence=require_convergence,
+        )
+    )
     return issues
 
 
@@ -1872,6 +1898,7 @@ def _validate_container_graph(
     *,
     start_type: str,
     output_selector: Any,
+    require_convergence: bool = False,
 ) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     children = node.params.get("children")
@@ -1884,7 +1911,28 @@ def _validate_container_graph(
                 "params.children",
             )
         ]
-    child_by_id = {str(child.get("id")): child for child in children if isinstance(child, dict) and child.get("id")}
+    child_ids = [
+        str(child.get("id"))
+        for child in children
+        if isinstance(child, dict) and child.get("id")
+    ]
+    duplicate_child_ids = sorted(
+        {child_id for child_id in child_ids if child_ids.count(child_id) > 1}
+    )
+    for child_id in duplicate_child_ids:
+        issues.append(
+            _node_issue(
+                "PLAN_CONTAINER_CHILD_ID_DUPLICATE",
+                f"container child id is duplicated: {child_id}",
+                node.id,
+                "params.children",
+            )
+        )
+    child_by_id = {
+        str(child.get("id")): child
+        for child in children
+        if isinstance(child, dict) and child.get("id")
+    }
     start_node_id = str(node.params.get("start_node_id") or "")
     start_child = child_by_id.get(start_node_id)
     if not start_node_id or not isinstance(start_child, dict) or start_child.get("type") != start_type:
@@ -1927,9 +1975,22 @@ def _validate_container_graph(
                     suggestion="循环内部使用非插件处理节点；start/end 由容器自身表达。",
                 )
             )
+        if child_type in {"if-else", "question-classifier"}:
+            issues.extend(
+                _validate_container_branch_params(
+                    node,
+                    child,
+                    child_index=idx,
+                )
+            )
 
     edges = node.params.get("edges") if isinstance(node.params.get("edges"), list) else []
     adjacency: dict[str, list[str]] = {child_id: [] for child_id in child_by_id}
+    incoming: dict[str, list[str]] = {child_id: [] for child_id in child_by_id}
+    source_edges: dict[str, list[dict[str, Any]]] = {
+        child_id: [] for child_id in child_by_id
+    }
+    edge_pairs: list[tuple[str, str]] = []
     for idx, edge in enumerate(edges):
         if not isinstance(edge, dict):
             issues.append(_node_issue("PLAN_CONTAINER_EDGE_INVALID", "container edge must be an object.", node.id, f"params.edges.{idx}"))
@@ -1940,10 +2001,63 @@ def _validate_container_graph(
             issues.append(_node_issue("PLAN_CONTAINER_EDGE_NODE_UNKNOWN", "container edge references unknown child node.", node.id, f"params.edges.{idx}"))
             continue
         adjacency.setdefault(source, []).append(target)
+        incoming.setdefault(target, []).append(source)
+        source_edges.setdefault(source, []).append(edge)
+        edge_pairs.append((source, target))
 
+    if start_node_id in child_by_id and incoming.get(start_node_id):
+        issues.append(
+            _node_issue(
+                "PLAN_CONTAINER_START_HAS_INCOMING_EDGE",
+                "container internal start cannot have incoming edges.",
+                node.id,
+                "params.edges",
+            )
+        )
+
+    cyclic = sorted(_cyclic_nodes(edge_pairs))
+    if cyclic:
+        issues.append(
+            _node_issue(
+                "PLAN_CONTAINER_CYCLE_INVALID",
+                f"container internal graph contains a cycle: {cyclic[0]}",
+                node.id,
+                "params.edges",
+                suggestion="删除内部回边；重复执行应由 loop 容器本身表达。",
+            )
+        )
+
+    for child_id, child in child_by_id.items():
+        child_type = str(child.get("type") or "")
+        outgoing_edges = source_edges.get(child_id, [])
+        if child_type in {"if-else", "question-classifier"}:
+            issues.extend(
+                _validate_container_branch_edges(
+                    node,
+                    child,
+                    outgoing_edges,
+                )
+            )
+        elif len(outgoing_edges) > 1:
+            issues.append(
+                ValidationIssue(
+                    code="PLAN_CONTAINER_BRANCH_SOURCE_INVALID",
+                    message=(
+                        "only if-else and question-classifier may have multiple "
+                        f"outgoing edges inside a container: {child_id}"
+                    ),
+                    node_id=child_id,
+                    path=f"nodes.{node.id}.params.edges",
+                    suggestion="将普通处理节点连接到一个后继节点，或使用认证的分支节点。",
+                )
+            )
+
+    reachable: set[str] = set()
     if start_node_id in child_by_id:
         reachable = _reachable_from(start_node_id, adjacency)
-        for child in processing_children:
+        for child in children:
+            if not isinstance(child, dict):
+                continue
             child_id = str(child.get("id"))
             if child_id not in reachable:
                 issues.append(
@@ -1954,6 +2068,27 @@ def _validate_container_graph(
                         "params.edges",
                     )
                 )
+
+    terminal_ids = sorted(
+        child_id
+        for child_id in reachable
+        if not adjacency.get(child_id)
+        and str(child_by_id.get(child_id, {}).get("type") or "")
+        not in {"iteration-start", "loop-start"}
+    )
+    if require_convergence and len(terminal_ids) != 1:
+        issues.append(
+            _node_issue(
+                "PLAN_CONTAINER_CONVERGENCE_REQUIRED",
+                (
+                    "Chatflow container graph must converge to exactly one "
+                    f"terminal processing node; found {len(terminal_ids)}."
+                ),
+                node.id,
+                "params.edges",
+                suggestion="将每条条件或分类路径显式连接到同一个汇合节点。",
+            )
+        )
 
     if _is_selector(output_selector):
         output_node_id = str(output_selector[0])
@@ -1972,7 +2107,239 @@ def _validate_container_graph(
                         "params.output_selector",
                     )
                 )
+        if (
+            require_convergence
+            and len(terminal_ids) == 1
+            and output_node_id != terminal_ids[0]
+        ):
+            issues.append(
+                _node_issue(
+                    "PLAN_ITERATION_OUTPUT_NOT_CONVERGENCE",
+                    (
+                        "Chatflow iteration output_selector must reference the "
+                        f"terminal convergence node: {terminal_ids[0]}"
+                    ),
+                    node.id,
+                    "params.output_selector",
+                    suggestion="将 iteration 输出绑定到所有内部路径汇合后的唯一终点。",
+                )
+            )
+        if child and output_name:
+            child_params = (
+                child.get("params")
+                if isinstance(child.get("params"), dict)
+                else {}
+            )
+            actual_type = _container_child_output_type(
+                str(child.get("type") or ""),
+                child_params,
+                output_name,
+            )
+            expected_type = str(node.params.get("output_type") or "")
+            if expected_type.startswith("array[") and expected_type.endswith("]"):
+                expected_type = expected_type[6:-1]
+            if (
+                actual_type
+                and expected_type
+                and not _types_compatible(expected_type, actual_type)
+            ):
+                issues.append(
+                    _node_issue(
+                        "PLAN_ITERATION_OUTPUT_TYPE_MISMATCH",
+                        (
+                            "iteration output_type does not match convergence "
+                            f"output: expected {expected_type}, got {actual_type}"
+                        ),
+                        node.id,
+                        "params.output_type",
+                    )
+                )
     return issues
+
+
+def _validate_container_branch_params(
+    container: PlanNode,
+    child: dict[str, Any],
+    *,
+    child_index: int,
+) -> list[ValidationIssue]:
+    child_id = str(child.get("id") or "")
+    child_type = str(child.get("type") or "")
+    params = child.get("params") if isinstance(child.get("params"), dict) else {}
+    path = f"nodes.{container.id}.params.children.{child_index}.params"
+    issues: list[ValidationIssue] = []
+    if child_type == "if-else":
+        cases = params.get("cases")
+        if not isinstance(cases, list) or not cases:
+            issues.append(
+                ValidationIssue(
+                    code="PLAN_IF_ELSE_CASES_MISSING",
+                    message="if-else node requires cases.",
+                    node_id=child_id,
+                    path=f"{path}.cases",
+                )
+            )
+        for index, case in enumerate(cases or []):
+            if not isinstance(case, dict) or not case.get("case_id"):
+                issues.append(
+                    ValidationIssue(
+                        code="PLAN_IF_ELSE_CASE_INVALID",
+                        message="if-else case requires case_id.",
+                        node_id=child_id,
+                        path=f"{path}.cases.{index}",
+                    )
+                )
+            conditions = case.get("conditions") if isinstance(case, dict) else None
+            if not isinstance(conditions, list) or not conditions:
+                issues.append(
+                    ValidationIssue(
+                        code="PLAN_IF_ELSE_CONDITIONS_MISSING",
+                        message="if-else case requires conditions.",
+                        node_id=child_id,
+                        path=f"{path}.cases.{index}.conditions",
+                    )
+                )
+    elif child_type == "question-classifier":
+        if not _is_selector(params.get("query_variable_selector")):
+            issues.append(
+                ValidationIssue(
+                    code="PLAN_QUESTION_CLASSIFIER_QUERY_MISSING",
+                    message="question-classifier node requires query_variable_selector.",
+                    node_id=child_id,
+                    path=f"{path}.query_variable_selector",
+                )
+            )
+        classes = params.get("classes")
+        if not isinstance(classes, list) or not classes:
+            issues.append(
+                ValidationIssue(
+                    code="PLAN_QUESTION_CLASSIFIER_CLASSES_MISSING",
+                    message="question-classifier node requires classes.",
+                    node_id=child_id,
+                    path=f"{path}.classes",
+                )
+            )
+        class_ids = [
+            str(item.get("id"))
+            for item in classes or []
+            if isinstance(item, dict) and item.get("id")
+        ]
+        if len(class_ids) != len(set(class_ids)):
+            issues.append(
+                ValidationIssue(
+                    code="PLAN_QUESTION_CLASSIFIER_CLASS_DUPLICATE",
+                    message="question-classifier class ids must be unique.",
+                    node_id=child_id,
+                    path=f"{path}.classes",
+                )
+            )
+        for index, item in enumerate(classes or []):
+            if not isinstance(item, dict) or not item.get("id") or not item.get("name"):
+                issues.append(
+                    ValidationIssue(
+                        code="PLAN_QUESTION_CLASSIFIER_CLASS_INVALID",
+                        message="question-classifier class requires id and name.",
+                        node_id=child_id,
+                        path=f"{path}.classes.{index}",
+                    )
+                )
+    return issues
+
+
+def _validate_container_branch_edges(
+    container: PlanNode,
+    child: dict[str, Any],
+    outgoing_edges: list[dict[str, Any]],
+) -> list[ValidationIssue]:
+    child_id = str(child.get("id") or "")
+    child_type = str(child.get("type") or "")
+    params = child.get("params") if isinstance(child.get("params"), dict) else {}
+    if child_type == "if-else":
+        expected = [
+            *[
+                str(case.get("case_id"))
+                for case in params.get("cases") or []
+                if isinstance(case, dict) and case.get("case_id")
+            ],
+            "false",
+        ]
+    else:
+        expected = [
+            str(item.get("id"))
+            for item in params.get("classes") or []
+            if isinstance(item, dict) and item.get("id")
+        ]
+    handles = [str(edge.get("source_handle") or "") for edge in outgoing_edges]
+    expected_set = set(expected)
+    issues: list[ValidationIssue] = []
+    for handle in sorted({item for item in handles if handles.count(item) > 1}):
+        issues.append(
+            ValidationIssue(
+                code=(
+                    "PLAN_IF_ELSE_DUPLICATE_BRANCH"
+                    if child_type == "if-else"
+                    else "PLAN_QUESTION_CLASSIFIER_DUPLICATE_BRANCH"
+                ),
+                message=f"{child_type} branch handle is duplicated: {handle}",
+                node_id=child_id,
+                path=f"nodes.{container.id}.params.edges",
+            )
+        )
+    for handle in expected:
+        if handle not in handles:
+            issues.append(
+                ValidationIssue(
+                    code=(
+                        "PLAN_IF_ELSE_CASE_EDGE_MISSING"
+                        if child_type == "if-else" and handle != "false"
+                        else "PLAN_IF_ELSE_FALSE_EDGE_MISSING"
+                        if child_type == "if-else"
+                        else "PLAN_QUESTION_CLASSIFIER_CLASS_EDGE_MISSING"
+                    ),
+                    message=f"{child_type} has no outgoing edge for: {handle}",
+                    node_id=child_id,
+                    path=f"nodes.{container.id}.params.edges",
+                )
+            )
+    for handle in handles:
+        if handle not in expected_set:
+            issues.append(
+                ValidationIssue(
+                    code=(
+                        "PLAN_IF_ELSE_BRANCH_INVALID"
+                        if child_type == "if-else"
+                        else "PLAN_QUESTION_CLASSIFIER_BRANCH_INVALID"
+                    ),
+                    message=f"{child_type} edge uses invalid source_handle: {handle}",
+                    node_id=child_id,
+                    path=f"nodes.{container.id}.params.edges",
+                )
+            )
+    return issues
+
+
+def _container_child_output_type(
+    node_type: str,
+    params: dict[str, Any],
+    output_name: str,
+) -> str | None:
+    if node_type == "llm" and output_name == "text":
+        return "string"
+    if node_type == "template-transform" and output_name == "output":
+        return "string"
+    if node_type == "document-extractor" and output_name == "text":
+        return "string"
+    if node_type == "code":
+        outputs = params.get("outputs")
+        config = outputs.get(output_name) if isinstance(outputs, dict) else None
+        return str(config.get("type")) if isinstance(config, dict) and config.get("type") else None
+    if node_type == "parameter-extractor":
+        for parameter in params.get("parameters") or []:
+            if isinstance(parameter, dict) and str(parameter.get("name")) == output_name:
+                return str(parameter.get("type") or "string")
+    if node_type == "variable-aggregator" and output_name == "output":
+        return str(params.get("output_type") or "string")
+    return None
 
 
 def _reachable_from(start_node_id: str, adjacency: dict[str, list[str]]) -> set[str]:

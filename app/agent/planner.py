@@ -187,21 +187,29 @@ Use iteration only when the request explicitly asks to process every item in a
 list or generate one result per item. The top-level iteration params must
 include iterator_selector, iterator_input_type, output_selector, output_type,
 is_parallel, parallel_nums, error_handle_mode, flatten_output, children, and
-edges. children must form one acyclic processing chain beginning with exactly
-one iteration-start. Do not put answer, human-input, if-else,
-question-classifier, iteration, or loop inside the container. Internal LLM
-prompts must include both {{#sys.query#}} and the current item reference
-{{#<iteration_node_id>.item#}}.
+edges. children must form one connected acyclic graph beginning with exactly
+one iteration-start. Internal if-else and question-classifier nodes are allowed
+when per-item routing is explicitly required. Every declared branch needs an
+outgoing edge with the matching source_handle, and all branches must explicitly
+converge to one common processing node. output_selector must reference that
+single terminal convergence node. Do not put answer, end, human-input,
+iteration, loop, datasource, datasource-empty, or knowledge-index inside the
+container. Internal LLM prompts must include both {{#sys.query#}} and the
+current item reference {{#<iteration_node_id>.item#}}.
 
 Use loop only when the request explicitly asks to retry, repeat until a
 condition is met, check repeatedly, or run at most N times. The top-level loop
 params must include loop_count, logical_operator, break_conditions,
 loop_variables, error_handle_mode, children, and edges. children must form one
-acyclic processing chain beginning with exactly one loop-start. Do not put
-answer, human-input, if-else, question-classifier, iteration, or another loop
-inside the container. Break conditions must read loop variables. When a break
-condition depends on an internal child output, include or allow chat2dify to
-insert an internal assigner that copies the output to a loop variable.
+connected acyclic graph beginning with exactly one loop-start. Internal if-else
+and question-classifier nodes are allowed when conditional retry routing is
+explicitly required. Every declared branch needs an outgoing edge with the
+matching source_handle, and all branches must explicitly converge to one common
+processing node. Do not put answer, end, human-input, iteration, another loop,
+datasource, datasource-empty, or knowledge-index inside the container. Break
+conditions must read loop variables. When a break condition depends on an
+internal child output, include an internal assigner that copies the converged
+output to a loop variable.
 
 Use if-else for explicit string or numeric conditions. Every case requires one
 outgoing edge whose source_handle equals case_id, and the else edge must use
@@ -848,11 +856,13 @@ def _validate_chatflow_creation_container(node: Any) -> list[ValidationIssue]:
     }
     forbidden_types = {
         "answer",
+        "end",
         "human-input",
-        "if-else",
-        "question-classifier",
         "iteration",
         "loop",
+        "datasource",
+        "datasource-empty",
+        "knowledge-index",
     }
     for index, child in enumerate(children):
         if not isinstance(child, dict):
@@ -871,14 +881,13 @@ def _validate_chatflow_creation_container(node: Any) -> list[ValidationIssue]:
                     ),
                     node_id=child_id,
                     path=f"nodes.{node.id}.params.children.{index}.type",
-                    suggestion="容器内部使用无分支处理链；人工输入和 answer 放在顶层。",
+                    suggestion="容器内只使用普通处理节点及认证的条件/分类分支；人工输入和 answer 放在顶层。",
                 )
             )
 
     edges = node.params.get("edges") if isinstance(node.params.get("edges"), list) else []
     adjacency: dict[str, list[str]] = {child_id: [] for child_id in child_by_id}
-    incoming: dict[str, list[str]] = {child_id: [] for child_id in child_by_id}
-    valid_edges = 0
+    source_edges: dict[str, list[dict[str, Any]]] = {child_id: [] for child_id in child_by_id}
     for edge in edges:
         if not isinstance(edge, dict):
             continue
@@ -887,8 +896,55 @@ def _validate_chatflow_creation_container(node: Any) -> list[ValidationIssue]:
         if source not in child_by_id or target not in child_by_id:
             continue
         adjacency[source].append(target)
-        incoming[target].append(source)
-        valid_edges += 1
+        source_edges[source].append(edge)
+
+    for child_id, child in child_by_id.items():
+        child_type = str(child.get("type") or "")
+        outgoing_edges = source_edges.get(child_id, [])
+        if child_type == "if-else":
+            issues.extend(
+                _validate_creation_branch_handles(
+                    node=node,
+                    child_id=child_id,
+                    child_type=child_type,
+                    expected_handles=[
+                        *[
+                            str(case.get("case_id"))
+                            for case in (child.get("params") or {}).get("cases", [])
+                            if isinstance(case, dict) and case.get("case_id")
+                        ],
+                        "false",
+                    ],
+                    outgoing_edges=outgoing_edges,
+                )
+            )
+        elif child_type == "question-classifier":
+            issues.extend(
+                _validate_creation_branch_handles(
+                    node=node,
+                    child_id=child_id,
+                    child_type=child_type,
+                    expected_handles=[
+                        str(item.get("id"))
+                        for item in (child.get("params") or {}).get("classes", [])
+                        if isinstance(item, dict) and item.get("id")
+                    ],
+                    outgoing_edges=outgoing_edges,
+                )
+            )
+        elif len(outgoing_edges) > 1:
+            issues.append(
+                ValidationIssue(
+                    code="PLAN_CHATFLOW_CONTAINER_BRANCH_SOURCE_INVALID",
+                    message=(
+                        f"Chatflow {node.type} internal node has multiple outgoing "
+                        f"edges without being a branch node: {child_id}"
+                    ),
+                    node_id=child_id,
+                    path=f"nodes.{node.id}.params.edges",
+                    suggestion="只有 if-else 和 question-classifier 可以产生多条出边。",
+                )
+            )
 
     cyclic = _cyclic_creation_nodes(adjacency)
     if cyclic:
@@ -898,33 +954,111 @@ def _validate_chatflow_creation_container(node: Any) -> list[ValidationIssue]:
                 message=f"Chatflow {node.type} internal graph contains a cycle: {cyclic[0]}",
                 node_id=node.id,
                 path=f"nodes.{node.id}.params.edges",
-                suggestion="容器内部必须是从内部 start 开始的无环处理链。",
+                suggestion="容器内部必须是从内部 start 开始的无环图。",
             )
         )
 
-    branched = sorted(
-        child_id
-        for child_id in child_by_id
-        if len(adjacency.get(child_id, [])) > 1 or len(incoming.get(child_id, [])) > 1
-    )
     start_node_id = str(node.params.get("start_node_id") or "")
     reachable = _reachable_creation_nodes(start_node_id, adjacency)
-    is_chain = (
-        bool(child_by_id)
-        and start_node_id in child_by_id
-        and len(reachable) == len(child_by_id)
-        and valid_edges == len(child_by_id) - 1
-        and not branched
-        and not cyclic
-    )
-    if not is_chain:
+    if (
+        not child_by_id
+        or start_node_id not in child_by_id
+        or len(reachable) != len(child_by_id)
+    ):
         issues.append(
             ValidationIssue(
-                code="PLAN_CHATFLOW_CONTAINER_CHAIN_REQUIRED",
-                message=f"Chatflow {node.type} internal graph must be one connected processing chain.",
+                code="PLAN_CHATFLOW_CONTAINER_GRAPH_DISCONNECTED",
+                message=f"Chatflow {node.type} internal graph must be connected from its internal start.",
                 node_id=node.id,
                 path=f"nodes.{node.id}.params.edges",
-                suggestion="让内部 start 依次连接每个处理节点，不要分叉、汇合或形成环。",
+                suggestion="让内部 start 能到达每个处理节点，并删除悬空节点。",
+            )
+        )
+
+    terminal_ids = sorted(
+        child_id
+        for child_id in reachable
+        if not adjacency.get(child_id)
+        and str(child_by_id.get(child_id, {}).get("type") or "")
+        not in {"iteration-start", "loop-start"}
+    )
+    if len(terminal_ids) != 1:
+        issues.append(
+            ValidationIssue(
+                code="PLAN_CHATFLOW_CONTAINER_CONVERGENCE_REQUIRED",
+                message=(
+                    f"Chatflow {node.type} internal graph must converge to one "
+                    f"terminal processing node; found {len(terminal_ids)}."
+                ),
+                node_id=node.id,
+                path=f"nodes.{node.id}.params.edges",
+                suggestion="将所有条件或分类分支显式连接到同一个汇合处理节点。",
+            )
+        )
+    elif node.type == "iteration":
+        output_selector = node.params.get("output_selector")
+        output_node_id = (
+            str(output_selector[0])
+            if isinstance(output_selector, list) and output_selector
+            else ""
+        )
+        if output_node_id != terminal_ids[0]:
+            issues.append(
+                ValidationIssue(
+                    code="PLAN_CHATFLOW_ITERATION_OUTPUT_NOT_CONVERGENCE",
+                    message=(
+                        "Chatflow iteration output_selector must reference the "
+                        f"terminal convergence node: {terminal_ids[0]}"
+                    ),
+                    node_id=node.id,
+                    path=f"nodes.{node.id}.params.output_selector",
+                    suggestion="将 output_selector 指向所有内部路径汇合后的唯一终点。",
+                )
+            )
+    return issues
+
+
+def _validate_creation_branch_handles(
+    *,
+    node: Any,
+    child_id: str,
+    child_type: str,
+    expected_handles: list[str],
+    outgoing_edges: list[dict[str, Any]],
+) -> list[ValidationIssue]:
+    handles = [str(edge.get("source_handle") or "") for edge in outgoing_edges]
+    issues: list[ValidationIssue] = []
+    duplicates = sorted({handle for handle in handles if handles.count(handle) > 1})
+    missing = [handle for handle in expected_handles if handle not in handles]
+    invalid = [handle for handle in handles if handle not in set(expected_handles)]
+    if duplicates:
+        issues.append(
+            ValidationIssue(
+                code="PLAN_CHATFLOW_CONTAINER_BRANCH_DUPLICATE",
+                message=f"{child_type} has duplicated branch handles: {', '.join(duplicates)}",
+                node_id=child_id,
+                path=f"nodes.{node.id}.params.edges",
+                suggestion="每个 case、false 或 class handle 只保留一条出边。",
+            )
+        )
+    if missing:
+        issues.append(
+            ValidationIssue(
+                code="PLAN_CHATFLOW_CONTAINER_BRANCH_MISSING",
+                message=f"{child_type} has no outgoing edge for: {', '.join(missing)}",
+                node_id=child_id,
+                path=f"nodes.{node.id}.params.edges",
+                suggestion="为每个声明的条件或分类分支添加匹配 source_handle 的出边。",
+            )
+        )
+    if invalid:
+        issues.append(
+            ValidationIssue(
+                code="PLAN_CHATFLOW_CONTAINER_BRANCH_HANDLE_INVALID",
+                message=f"{child_type} uses invalid branch handles: {', '.join(invalid)}",
+                node_id=child_id,
+                path=f"nodes.{node.id}.params.edges",
+                suggestion="source_handle 必须匹配 case_id、false 或 classes[].id。",
             )
         )
     return issues

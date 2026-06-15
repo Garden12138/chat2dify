@@ -1,4 +1,5 @@
 import yaml
+import pytest
 from pydantic import ValidationError
 from uuid import UUID
 
@@ -2621,6 +2622,358 @@ def test_validator_rejects_invalid_iteration_container_graph() -> None:
 
     assert any(issue.code == "PLAN_CONTAINER_CHILD_UNREACHABLE" for issue in issues)
     assert any(issue.code == "PLAN_CONTAINER_OUTPUT_NODE_UNKNOWN" for issue in issues)
+
+
+@pytest.mark.parametrize("container_type", ["iteration", "loop"])
+@pytest.mark.parametrize("branch_type", ["if-else", "question-classifier"])
+def test_chatflow_container_branch_graph_is_normalized_compiled_and_round_trips(
+    container_type: str,
+    branch_type: str,
+) -> None:
+    normalized = normalize_plan_payload(
+        _chatflow_container_branch_payload(container_type, branch_type),
+        app_mode="advanced-chat",
+    )
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    container = next(node for node in plan.nodes if node.id == "container")
+    dsl = _compiler().compile(plan)
+    graph = yaml.safe_load(dsl)["workflow"]["graph"]
+    graph_nodes = {node["id"]: node for node in graph["nodes"]}
+    branch_edges = [
+        edge
+        for edge in container.params["edges"]
+        if edge["source"] == "branch"
+    ]
+
+    assert validate_plan(plan) == []
+    assert validate_dsl(dsl, expected_dsl_version="9.9.9") == []
+    assert {edge["source_handle"] for edge in branch_edges} == (
+        {"priority", "false"}
+        if branch_type == "if-else"
+        else {"priority", "normal"}
+    )
+    assert graph_nodes["priority_llm"]["position"]["y"] != graph_nodes["normal_llm"]["position"]["y"]
+    assert graph_nodes["container"]["height"] > 220
+    assert graph_nodes["container"]["width"] >= 620
+    for child_id in ("priority_llm", "normal_llm"):
+        child = next(
+            item for item in container.params["children"] if item["id"] == child_id
+        )
+        assert "{{#sys.query#}}" in child["params"]["user_prompt"]
+        assert child["params"]["memory"]["window"] == {"enabled": True, "size": 10}
+
+    decompiled = decompile_dify_graph(
+        graph,
+        name="Loaded branches",
+        app_mode="advanced-chat",
+    )
+    loaded = next(node for node in decompiled.nodes if node.id == "container")
+    assert validate_plan(decompiled) == []
+    assert loaded.params["edges"] == container.params["edges"]
+    assert {
+        child["id"]: child["params"].get("_position")
+        for child in loaded.params["children"]
+    } == {
+        child_id: graph_nodes[child_id]["position"]
+        for child_id in (
+            "container_start",
+            "branch",
+            "priority_llm",
+            "normal_llm",
+            "merge",
+            *([] if container_type == "iteration" else ["save_status"]),
+        )
+    }
+
+
+@pytest.mark.parametrize("branch_type", ["if-else", "question-classifier"])
+def test_chatflow_container_branch_handles_are_inferred(
+    branch_type: str,
+) -> None:
+    payload = _chatflow_container_branch_payload("iteration", branch_type)
+    container = next(node for node in payload["nodes"] if node["id"] == "container")
+    for edge in container["params"]["edges"]:
+        if edge["source"] == "branch":
+            edge.pop("source_handle", None)
+
+    normalized = normalize_plan_payload(payload, app_mode="advanced-chat")
+    plan = WorkflowPlan.model_validate(normalized.payload)
+    container_node = next(node for node in plan.nodes if node.id == "container")
+    handles = {
+        edge["source_handle"]
+        for edge in container_node.params["edges"]
+        if edge["source"] == "branch"
+    }
+
+    assert handles == (
+        {"priority", "false"}
+        if branch_type == "if-else"
+        else {"priority", "normal"}
+    )
+    assert validate_plan(plan) == []
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_code"),
+    [
+        ("missing_branch", "PLAN_IF_ELSE_FALSE_EDGE_MISSING"),
+        ("duplicate_branch", "PLAN_IF_ELSE_DUPLICATE_BRANCH"),
+        ("invalid_branch", "PLAN_IF_ELSE_BRANCH_INVALID"),
+        ("multiple_terminals", "PLAN_CONTAINER_CONVERGENCE_REQUIRED"),
+        ("cycle", "PLAN_CONTAINER_CYCLE_INVALID"),
+        ("wrong_output", "PLAN_ITERATION_OUTPUT_NOT_CONVERGENCE"),
+        ("wrong_output_type", "PLAN_ITERATION_OUTPUT_TYPE_MISMATCH"),
+    ],
+)
+def test_chatflow_container_branch_validation_rejects_invalid_graphs(
+    mutation: str,
+    expected_code: str,
+) -> None:
+    payload = _chatflow_container_branch_payload("iteration", "if-else")
+    container = next(node for node in payload["nodes"] if node["id"] == "container")
+    edges = container["params"]["edges"]
+    if mutation == "missing_branch":
+        edges[:] = [
+            edge
+            for edge in edges
+            if not (
+                edge["source"] == "branch"
+                and edge.get("source_handle") == "false"
+            )
+        ]
+    elif mutation == "duplicate_branch":
+        duplicate = next(
+            edge for edge in edges if edge.get("source_handle") == "priority"
+        ).copy()
+        duplicate["target"] = "normal_llm"
+        edges.append(duplicate)
+    elif mutation == "invalid_branch":
+        next(
+            edge for edge in edges if edge.get("source_handle") == "false"
+        )["source_handle"] = "invented"
+    elif mutation == "multiple_terminals":
+        edges[:] = [
+            edge
+            for edge in edges
+            if not (
+                edge["source"] == "normal_llm"
+                and edge["target"] == "merge"
+            )
+        ]
+    elif mutation == "cycle":
+        edges.append({"source": "merge", "target": "branch"})
+    elif mutation == "wrong_output":
+        container["params"]["output_selector"] = ["priority_llm", "text"]
+    elif mutation == "wrong_output_type":
+        container["params"]["output_type"] = "array[number]"
+
+    if mutation in {"missing_branch", "duplicate_branch", "invalid_branch"}:
+        plan = WorkflowPlan.model_validate(payload)
+    else:
+        normalized = normalize_plan_payload(payload, app_mode="advanced-chat")
+        plan = WorkflowPlan.model_validate(normalized.payload)
+    issues = validate_plan(plan)
+
+    assert any(issue.code == expected_code for issue in issues)
+
+
+def _chatflow_container_branch_payload(
+    container_type: str,
+    branch_type: str,
+) -> dict:
+    branch_params = (
+        {
+            "cases": [
+                {
+                    "case_id": "priority",
+                    "conditions": [
+                        {
+                            "variable_selector": (
+                                ["container", "item"]
+                                if container_type == "iteration"
+                                else ["start", "sys.query"]
+                            ),
+                            "comparison_operator": "contains",
+                            "value": "紧急",
+                            "varType": "string",
+                        }
+                    ],
+                }
+            ]
+        }
+        if branch_type == "if-else"
+        else {
+            "query_variable_selector": (
+                ["container", "item"]
+                if container_type == "iteration"
+                else ["start", "sys.query"]
+            ),
+            "classes": [
+                {"id": "priority", "name": "紧急"},
+                {"id": "normal", "name": "普通"},
+            ],
+            "instruction": "判断当前内容的处理优先级。",
+        }
+    )
+    branch_handles = (
+        ("priority", "false")
+        if branch_type == "if-else"
+        else ("priority", "normal")
+    )
+    children = [
+        {
+            "id": "container_start",
+            "type": "iteration-start" if container_type == "iteration" else "loop-start",
+            "params": {},
+        },
+        {
+            "id": "branch",
+            "type": branch_type,
+            "title": "判断当前记录优先级",
+            "params": branch_params,
+        },
+        {
+            "id": "priority_llm",
+            "type": "llm",
+            "title": "处理紧急记录",
+            "params": {
+                "system_prompt": "你是紧急售后记录处理专员。",
+                "user_prompt": (
+                    "优先处理当前记录：{{#container.item#}}\n{{#sys.query#}}"
+                    if container_type == "iteration"
+                    else "优先处理当前状态：{{#sys.query#}}"
+                ),
+            },
+        },
+        {
+            "id": "normal_llm",
+            "type": "llm",
+            "title": "处理普通记录",
+            "params": {
+                "system_prompt": "你是普通售后记录处理专员。",
+                "user_prompt": (
+                    "处理当前记录：{{#container.item#}}\n{{#sys.query#}}"
+                    if container_type == "iteration"
+                    else "处理当前状态：{{#sys.query#}}"
+                ),
+            },
+        },
+        {
+            "id": "merge",
+            "type": "variable-aggregator",
+            "title": "汇合分支结果",
+            "params": {
+                "variables": [
+                    ["priority_llm", "text"],
+                    ["normal_llm", "text"],
+                ],
+                "output_type": "string",
+            },
+        },
+    ]
+    edges = [
+        {"source": "container_start", "target": "branch"},
+        {
+            "source": "branch",
+            "target": "priority_llm",
+            "source_handle": branch_handles[0],
+        },
+        {
+            "source": "branch",
+            "target": "normal_llm",
+            "source_handle": branch_handles[1],
+        },
+        {"source": "priority_llm", "target": "merge"},
+        {"source": "normal_llm", "target": "merge"},
+    ]
+    if container_type == "iteration":
+        container_params = {
+            "start_node_id": "container_start",
+            "iterator_selector": ["start", "items"],
+            "iterator_input_type": "array[string]",
+            "output_selector": ["merge", "output"],
+            "output_type": "array[string]",
+            "children": children,
+            "edges": edges,
+        }
+        answer = "{{#container.output#}}"
+    else:
+        children.append(
+            {
+                "id": "save_status",
+                "type": "assigner",
+                "title": "保存循环状态",
+                "params": {
+                    "items": [
+                        {
+                            "variable_selector": ["container", "status"],
+                            "input_type": "variable",
+                            "operation": "over-write",
+                            "value": ["merge", "output"],
+                        }
+                    ]
+                },
+            }
+        )
+        edges.append({"source": "merge", "target": "save_status"})
+        container_params = {
+            "start_node_id": "container_start",
+            "loop_count": 3,
+            "logical_operator": "and",
+            "break_conditions": [
+                {
+                    "id": "done",
+                    "variable_selector": ["container", "status"],
+                    "comparison_operator": "contains",
+                    "value": "已完成",
+                    "varType": "string",
+                }
+            ],
+            "loop_variables": [
+                {
+                    "id": "status",
+                    "label": "status",
+                    "var_type": "string",
+                    "value_type": "constant",
+                    "value": "",
+                }
+            ],
+            "children": children,
+            "edges": edges,
+        }
+        answer = "{{#container.status#}}"
+    return {
+        "name": "容器内分支 Chatflow",
+        "app_mode": "advanced-chat",
+        "nodes": [
+            {
+                "id": "start",
+                "type": "start",
+                "params": {
+                    "variables": (
+                        [{"name": "items", "type": "json"}]
+                        if container_type == "iteration"
+                        else []
+                    )
+                },
+            },
+            {
+                "id": "container",
+                "type": container_type,
+                "title": "执行容器内分支",
+                "params": container_params,
+            },
+            {
+                "id": "answer",
+                "type": "answer",
+                "params": {"answer": answer},
+            },
+        ],
+        "edges": [
+            {"source": "start", "target": "container"},
+            {"source": "container", "target": "answer"},
+        ],
+    }
 
 
 def _shorthand_branch_plan() -> dict:
