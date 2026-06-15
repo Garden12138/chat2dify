@@ -362,7 +362,7 @@ class DifyDslCompiler:
             "prompt_template": prompt_template,
             "variables": [],
             "context": {"enabled": False, "variable_selector": []},
-            "vision": {"enabled": False, "configs": {"variable_selector": []}},
+            "vision": _vision(node.params.get("vision")),
             "memory": (
                 {
                     "query_prompt_template": user_prompt,

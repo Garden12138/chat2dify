@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from app.dify.runtime_models import apply_default_runtime_models
 from app.input_variables import file_upload_settings, is_file_input_type
 from app.list_operator import normalize_list_comparison_operator, normalize_list_variable_selector
 
@@ -268,6 +269,7 @@ def normalize_plan_payload(
     default_dataset_ids: list[str] | None = None,
     tool_selections: list[dict[str, Any]] | None = None,
     agent_selections: list[dict[str, Any]] | None = None,
+    model_selections: list[dict[str, Any]] | None = None,
     trigger_selection: dict[str, Any] | None = None,
 ) -> NormalizationResult:
     data = deepcopy(payload)
@@ -406,6 +408,11 @@ def normalize_plan_payload(
                 node["params"] = dict(params)
         if before != node.get("params"):
             changes.append(f"normalized {node.get('id', '<unknown>')} params")
+
+    model_normalized = apply_default_runtime_models(data, model_selections)
+    if model_normalized != data:
+        data = model_normalized
+        changes.append("filled missing runtime models from model_selections")
 
     if target_app_mode == "advanced-chat":
         start_ids = {
@@ -1028,6 +1035,7 @@ def _normalize_llm_params(
         )
     )
     result.setdefault("completion_params", {"temperature": 0.7})
+    result["vision"] = _normalize_vision(result.get("vision"))
     if app_mode == "advanced-chat":
         result["memory"] = {
             "query_prompt_template": result["user_prompt"],

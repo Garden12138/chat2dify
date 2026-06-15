@@ -130,7 +130,8 @@ cp .env.example .env
 
 The sidecar reads `.env` from the repository root and lets real environment
 variables override file values. Fill these values before using
-`/api/workflows/create`:
+`/api/workflows/draft`, `/api/workflows/create`, modify, or publish, because
+runtime-model certification reads the current Dify workspace model registry:
 
 ```env
 DIFY_EMAIL=you@example.com
@@ -140,8 +141,10 @@ DIFY_PASSWORD=your-password
 The Planner Model panel chooses the LLM used by chat2dify to generate or revise
 Plan IR. This is separate from `DIFY_DEFAULT_MODEL_PROVIDER` /
 `DIFY_DEFAULT_MODEL_NAME`, which configure LLM nodes inside the generated Dify
-workflow. API keys stay on the server and are never returned to or stored by
-the browser.
+workflow. Before create, modify, or publish, chat2dify now queries Dify's
+enabled `llm` model registry and verifies that these configured defaults are
+active and not deprecated. API keys stay on the server and are never returned
+to or stored by the browser.
 
 NVIDIA NIM DeepSeek V4 Flash is the default Planner:
 
@@ -275,6 +278,16 @@ List Dify datasets for the Web UI selector:
 curl 'http://127.0.0.1:8000/api/dify/datasets?keyword=售后&page=1&limit=50'
 ```
 
+List active and inactive Dify runtime models with server-owned metadata:
+
+```bash
+curl 'http://127.0.0.1:8000/api/dify/models?model_type=llm&keyword=qwen&feature=tool-call'
+```
+
+The response includes provider/model identity, provider and model status,
+deprecation state, context length, mode, and capabilities such as `vision`,
+`tool-call`, `multi-tool-call`, and `stream-tool-call`.
+
 List installed Dify tools for the Web UI selector:
 
 ```bash
@@ -351,6 +364,33 @@ curl -X POST http://127.0.0.1:8000/api/workflows/create \
   -H 'Content-Type: application/json' \
   -d '{"message":"Summarize the user input","app_name":"Summary MVP","dataset_ids":["OPTIONAL_DATASET_ID"]}'
 ```
+
+Create or modify with an explicit runtime-model whitelist:
+
+```json
+{
+  "message": "分别使用所选模型完成分类和回复",
+  "app_mode": "advanced-chat",
+  "model_selections": [
+    {
+      "provider": "PROVIDER_FROM_DIFY",
+      "model": "PRIMARY_MODEL_FROM_DIFY"
+    },
+    {
+      "provider": "PROVIDER_FROM_DIFY",
+      "model": "SECONDARY_MODEL_FROM_DIFY"
+    }
+  ]
+}
+```
+
+The first selection is the node default. Planner output may choose among the
+whitelisted models per LLM, Question Classifier, Parameter Extractor, and Agent
+`model-selector`. Client-supplied status or capability metadata is ignored and
+reloaded from Dify. Vision-enabled nodes require `vision`; an Agent with bound
+tools requires at least one tool-call capability. Existing drafts with an
+unavailable model still load with a warning, but new bindings and publish are
+blocked until they use a runnable model.
 
 Start the same create operation as a background task:
 
@@ -734,7 +774,8 @@ Example selected agent workflow request:
 
 Plugin installation, credential editing, automatic creation of data-source
 nodes, independent conversation-variable CRUD/UI, Agent Roster management, and
-model capability registry sync remain out of scope for now.
+embedding/rerank/speech/moderation model certification remain out of scope for
+now.
 
 ## Test
 

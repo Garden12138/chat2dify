@@ -17,6 +17,11 @@ from app.agent.planner import (
     _validate_compiled_plan,
 )
 from app.config import Settings
+from app.dify.client import DifyModelListItem, DifyModelListResult
+from app.dify.runtime_models import (
+    model_selection_payloads,
+    validate_runtime_model_bindings,
+)
 from app.models import WorkflowPlan
 from app.validator import has_errors
 
@@ -117,6 +122,11 @@ workflow-only instructions above:
 - Deleting, renaming, or changing the type of a conversation variable is
   destructive and should only be done when the user explicitly asks.
 - Do not add or modify workflow triggers. selected_trigger is always user-input.
+- Runtime models are supplied in selected_models. Newly introduced or changed
+  llm, question-classifier, parameter-extractor, and Agent model-selector
+  bindings must use an exact selected provider/model pair. Never invent model
+  identities. Vision requires the vision feature; tool-bound Agents require a
+  tool-call feature.
 """
 
 
@@ -156,6 +166,8 @@ class WorkflowEditPlanner:
         dsl_version: str,
         tool_selections: list[dict[str, Any]] | None = None,
         agent_selections: list[dict[str, Any]] | None = None,
+        model_selections: list[DifyModelListItem] | None = None,
+        model_catalog: DifyModelListResult | None = None,
         trigger_selection: dict[str, Any] | None = None,
         task_context: TaskContext | None = None,
     ) -> WorkflowEditResult:
@@ -180,6 +192,8 @@ class WorkflowEditPlanner:
                 "tool_selections": tool_selections or [],
                 "agent_selections": agent_selections or [],
             }
+            if model_selections:
+                call_kwargs["model_selections"] = model_selections
             if trigger_selection is not None:
                 call_kwargs["trigger_selection"] = trigger_selection
             if task_context is not None:
@@ -211,10 +225,23 @@ class WorkflowEditPlanner:
                     default_dataset_ids=self.settings.dify_default_dataset_ids,
                     tool_selections=tool_selections or [],
                     agent_selections=agent_selections or [],
+                    model_selections=model_selection_payloads(model_selections or []),
                     trigger_selection=trigger_selection if current_plan.app_mode == "workflow" else None,
                 )
                 plan = WorkflowPlan.model_validate(normalized.payload)
-                issues = _validate_compiled_plan(plan, settings=self.settings, dsl_version=dsl_version)
+                issues = [
+                    *_validate_compiled_plan(plan, settings=self.settings, dsl_version=dsl_version),
+                    *(
+                        validate_runtime_model_bindings(
+                            plan,
+                            model_catalog,
+                            allowed_models=model_selections or [],
+                            baseline_plan=current_plan,
+                        )
+                        if model_catalog is not None
+                        else []
+                    ),
+                ]
                 if has_errors(issues):
                     raise ValueError(_issues_to_feedback(issues))
                 return WorkflowEditResult(
@@ -241,6 +268,7 @@ class WorkflowEditPlanner:
         last_error: str = "",
         tool_selections: list[dict[str, Any]] | None = None,
         agent_selections: list[dict[str, Any]] | None = None,
+        model_selections: list[DifyModelListItem] | None = None,
         trigger_selection: dict[str, Any] | None = None,
         task_context: TaskContext | None = None,
     ) -> str:
@@ -251,6 +279,7 @@ class WorkflowEditPlanner:
             "current_plan": current_plan.model_dump(),
             "selected_tools": _planner_tool_schemas(tool_selections or []),
             "selected_agents": _planner_agent_schemas(agent_selections or []),
+            "selected_models": model_selection_payloads(model_selections or []),
             "selected_trigger": trigger_selection or {"type": "user-input"},
             "edit_policy": {
                 "output": "Return the complete revised WorkflowPlan JSON.",

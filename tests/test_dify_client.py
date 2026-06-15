@@ -269,6 +269,78 @@ def test_list_datasets_sends_query_and_returns_slim_metadata() -> None:
     }
 
 
+def test_list_models_flattens_filters_and_deduplicates_runtime_metadata() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/console/api/login":
+            return httpx.Response(
+                200,
+                json={"result": "success"},
+                headers=[("set-cookie", "csrf_token=csrf123; Path=/")],
+            )
+        if request.url.path == "/console/api/workspaces/current/models/model-types/llm":
+            return httpx.Response(
+                200,
+                json={"data": [
+                    {
+                        "provider": "langgenius/tongyi/tongyi",
+                        "label": {"en_US": "Tongyi"},
+                        "status": "active",
+                        "models": [
+                            {
+                                "model": "qwen-plus",
+                                "label": {"en_US": "Qwen Plus"},
+                                "model_type": "llm",
+                                "features": ["vision", "tool-call"],
+                                "model_properties": {
+                                    "context_size": 131072,
+                                    "mode": "chat",
+                                },
+                                "status": "active",
+                                "deprecated": False,
+                                "fetch_from": "predefined-model",
+                            },
+                            {
+                                "model": "qwen-text",
+                                "model_type": "llm",
+                                "features": [],
+                                "status": "active",
+                            },
+                        ],
+                    },
+                    {
+                        "provider": "langgenius/tongyi/tongyi",
+                        "status": "no-configure",
+                        "models": [
+                            {
+                                "model": "qwen-plus",
+                                "model_type": "llm",
+                                "features": ["vision"],
+                                "status": "no-configure",
+                            }
+                        ],
+                    },
+                ]},
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+    result = client.list_models(
+        model_type="llm",
+        keyword="plus",
+        features=["vision", "tool-call"],
+    )
+
+    assert result.count == 1
+    assert result.providers == ["langgenius/tongyi/tongyi"]
+    assert result.features == ["tool-call", "vision"]
+    model = result.data[0]
+    assert model.model == "qwen-plus"
+    assert model.available is True
+    assert model.context_length == 131072
+    assert model.mode == "chat"
+    assert model.fetch_from == "predefined-model"
+
+
 def test_get_datasets_by_ids_sends_repeated_ids_and_returns_retrieval_model() -> None:
     seen: dict[str, object] = {}
 

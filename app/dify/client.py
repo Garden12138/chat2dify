@@ -126,6 +126,147 @@ class DifyDatasetListResult:
 
 
 @dataclass(frozen=True)
+class DifyModelListItem:
+    provider: str
+    provider_label: str
+    model: str
+    model_label: str
+    model_type: str
+    status: str
+    provider_status: str
+    deprecated: bool
+    features: list[str]
+    context_length: int | None = None
+    mode: str | None = None
+    fetch_from: str | None = None
+
+    @property
+    def available(self) -> bool:
+        return (
+            self.status == "active"
+            and self.provider_status == "active"
+            and not self.deprecated
+        )
+
+
+@dataclass(frozen=True)
+class DifyModelListResult:
+    data: list[DifyModelListItem]
+    count: int
+    model_type: str
+    providers: list[str]
+    features: list[str]
+
+    @classmethod
+    def from_payload(
+        cls,
+        payload: list[dict[str, Any]],
+        *,
+        model_type: str,
+        keyword: str | None = None,
+        required_features: list[str] | None = None,
+    ) -> "DifyModelListResult":
+        by_identity: dict[tuple[str, str], DifyModelListItem] = {}
+        for provider_payload in payload:
+            if not isinstance(provider_payload, dict):
+                continue
+            provider = str(
+                provider_payload.get("provider")
+                or provider_payload.get("provider_name")
+                or provider_payload.get("name")
+                or ""
+            ).strip()
+            if not provider:
+                continue
+            provider_label = _localized_text(provider_payload.get("label")) or provider
+            provider_status = str(provider_payload.get("status") or "").strip().lower()
+            for model_payload in provider_payload.get("models") or []:
+                if not isinstance(model_payload, dict):
+                    continue
+                item_model_type = str(
+                    model_payload.get("model_type") or model_type
+                ).strip()
+                if item_model_type != model_type:
+                    continue
+                model = str(
+                    model_payload.get("model")
+                    or model_payload.get("name")
+                    or ""
+                ).strip()
+                if not model:
+                    continue
+                properties = (
+                    model_payload.get("model_properties")
+                    if isinstance(model_payload.get("model_properties"), dict)
+                    else {}
+                )
+                features = sorted(
+                    {
+                        str(feature).strip()
+                        for feature in model_payload.get("features") or []
+                        if str(feature).strip()
+                    }
+                )
+                item = DifyModelListItem(
+                    provider=provider,
+                    provider_label=provider_label,
+                    model=model,
+                    model_label=_localized_text(model_payload.get("label")) or model,
+                    model_type=item_model_type,
+                    status=str(model_payload.get("status") or "").strip().lower(),
+                    provider_status=provider_status,
+                    deprecated=bool(model_payload.get("deprecated", False)),
+                    features=features,
+                    context_length=_int_or_none(
+                        properties.get("context_size")
+                        or properties.get("context_length")
+                    ),
+                    mode=_string_or_none(
+                        properties.get("mode") or model_payload.get("mode")
+                    ),
+                    fetch_from=_string_or_none(model_payload.get("fetch_from")),
+                )
+                identity = (provider, model)
+                existing = by_identity.get(identity)
+                if existing is None or _model_item_rank(item) > _model_item_rank(existing):
+                    by_identity[identity] = item
+
+        items = list(by_identity.values())
+        if keyword:
+            needle = keyword.strip().lower()
+            items = [
+                item
+                for item in items
+                if needle
+                in " ".join(
+                    [
+                        item.provider,
+                        item.provider_label,
+                        item.model,
+                        item.model_label,
+                    ]
+                ).lower()
+            ]
+        required = {
+            str(feature).strip()
+            for feature in required_features or []
+            if str(feature).strip()
+        }
+        if required:
+            items = [
+                item for item in items if required.issubset(set(item.features))
+            ]
+        items.sort(key=lambda item: (item.provider_label.lower(), item.model_label.lower()))
+        return cls(
+            data=items,
+            count=len(items),
+            model_type=model_type,
+            providers=sorted({item.provider for item in items}),
+            features=sorted({feature for item in items for feature in item.features}),
+        )
+
+
+@dataclass(frozen=True)
 class DifyToolListItem:
     provider_id: str
     provider_type: str
@@ -597,6 +738,36 @@ class DifyClient:
         if not ids:
             return DifyDatasetListResult(data=[], has_more=False, page=1, limit=0, total=0)
         return self.list_datasets(page=1, limit=max(len(ids), 50), include_all=True, ids=ids)
+
+    def list_models(
+        self,
+        *,
+        model_type: str = "llm",
+        keyword: str | None = None,
+        features: list[str] | None = None,
+    ) -> DifyModelListResult:
+        normalized_type = str(model_type or "").strip()
+        if normalized_type != "llm":
+            raise DifyClientError("Only llm runtime models are supported.")
+        self._ensure_logged_in()
+        response = self._get_with_auth_retry(
+            f"/workspaces/current/models/model-types/{normalized_type}"
+        )
+        self._raise_for_response(response)
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise DifyClientError(f"Invalid Dify JSON response: {response.text}") from exc
+        if isinstance(payload, dict):
+            payload = payload.get("data")
+        if not isinstance(payload, list):
+            raise DifyClientError("Dify models response must be a JSON list.")
+        return DifyModelListResult.from_payload(
+            [item for item in payload if isinstance(item, dict)],
+            model_type=normalized_type,
+            keyword=keyword,
+            required_features=features,
+        )
 
     def list_tools(
         self,
@@ -1405,6 +1576,14 @@ def _localized_text(value: Any) -> str:
             if text:
                 return str(text)
     return ""
+
+
+def _model_item_rank(item: DifyModelListItem) -> tuple[int, int, int]:
+    return (
+        int(item.available),
+        int(not item.deprecated),
+        len(item.features),
+    )
 
 
 def _lines_until_deadline(lines: Any, deadline: float) -> Any:

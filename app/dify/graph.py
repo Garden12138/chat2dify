@@ -235,6 +235,10 @@ def _params_from_dify_node_data(node_type: str, data: dict[str, Any]) -> dict[st
                 "model_name": model.get("name"),
                 "model_mode": model.get("mode", "chat"),
                 "completion_params": model.get("completion_params", {"temperature": 0.7}),
+                "vision": deepcopy(
+                    data.get("vision")
+                    or {"enabled": False, "configs": {"variable_selector": []}}
+                ),
             }
             if memory is not None:
                 result["memory"] = memory

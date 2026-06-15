@@ -11,6 +11,11 @@ import httpx
 from app.agent.normalizer import normalize_plan_payload
 from app.compiler.dify import DifyDslCompiler
 from app.config import PlannerRuntime, Settings
+from app.dify.client import DifyModelListItem, DifyModelListResult
+from app.dify.runtime_models import (
+    model_selection_payloads,
+    validate_runtime_model_bindings,
+)
 from app.models import ValidationIssue, WorkflowPlan
 from app.validator import has_errors, validate_dsl, validate_plan
 
@@ -216,7 +221,11 @@ outgoing edge whose source_handle equals case_id, and the else edge must use
 source_handle "false".
 Use question-classifier for semantic routing. Its params include
 query_variable_selector, classes, and instruction. Every class requires one
-outgoing edge whose source_handle equals classes[].id.
+outgoing edge whose source_handle equals classes[].id. The classifier is a
+routing node; never reference invented outputs such as
+{{#classifier.classification#}}, {{#classifier.text#}}, or
+{{#classifier.class_name#}}. Each branch must produce any value needed after
+the branch convergence.
 Use parameter-extractor for structured fields. Its params include query,
 reasoning_mode "prompt", variable-safe English parameter names, descriptions,
 and required flags.
@@ -228,9 +237,11 @@ arrays of objects. Every Python code node must define def main(...)->dict,
 return every declared output, and use typed output schemas such as
 {"result":{"type":"string","children":null}}.
 Use template-transform for deterministic formatting and variable-aggregator
-when several upstream values can supply one output. HTTP nodes must include a
-real URL and explicit method; references inside URL, headers, params, and body
-must use Dify variable syntax.
+when several upstream values can supply one output. A template-transform
+node's output variable is named output, so downstream references use
+{{#<template_node_id>.output#}}, never .text. HTTP nodes must include a real
+URL and explicit method; references inside URL, headers, params, and body must
+use Dify variable syntax.
 
 Use knowledge-retrieval only for explicit knowledge-base, RAG, document-library,
 or stored-material requests. Never invent dataset_ids. Omit them so chat2dify
@@ -247,6 +258,14 @@ asks for an Agent, 智能体, autonomous planning, or multi-step execution. Copy
 the selected strategy identity, parameter schema, configured agent_parameters,
 output_schema, plugin identifier, and meta. Never invent nested tools or
 strategy identifiers.
+
+Runtime models are supplied in selected_models. For llm,
+question-classifier, parameter-extractor, and Agent model-selector parameters,
+use only an exact provider/model pair from selected_models. The first item is
+the default when no node-specific choice is needed. Never invent a provider or
+model. Enable vision only when that model lists the vision feature. An Agent
+with bound tools must use a model listing tool-call, multi-tool-call, or
+stream-tool-call.
 
 An answer node uses params such as
 {"answer":"{{#<upstream_node_id>.<output_name>#}}"}. A branch may have its own
@@ -302,6 +321,8 @@ class WorkflowPlanner:
         dsl_version: str,
         tool_selections: list[dict[str, Any]] | None = None,
         agent_selections: list[dict[str, Any]] | None = None,
+        model_selections: list[DifyModelListItem] | None = None,
+        model_catalog: DifyModelListResult | None = None,
         trigger_selection: dict[str, Any] | None = None,
         task_context: TaskContext | None = None,
     ) -> PlannerResult:
@@ -324,9 +345,21 @@ class WorkflowPlanner:
                 default_dataset_ids=self.settings.dify_default_dataset_ids,
                 tool_selections=tool_selections or [],
                 agent_selections=agent_selections or [],
+                model_selections=model_selection_payloads(model_selections or []),
                 trigger_selection=trigger_selection,
             )
             plan = WorkflowPlan.model_validate(normalized.payload)
+            model_issues = (
+                validate_runtime_model_bindings(
+                    plan,
+                    model_catalog,
+                    allowed_models=model_selections or [],
+                )
+                if model_catalog is not None
+                else []
+            )
+            if has_errors(model_issues):
+                raise PlannerError(_issues_to_feedback(model_issues))
             return PlannerResult(
                 plan=plan,
                 raw_plan=fallback_payload,
@@ -355,6 +388,8 @@ class WorkflowPlanner:
                 "tool_selections": tool_selections or [],
                 "agent_selections": agent_selections or [],
             }
+            if model_selections:
+                call_kwargs["model_selections"] = model_selections
             if app_mode == "advanced-chat":
                 call_kwargs["app_mode"] = app_mode
             if trigger_selection is not None:
@@ -379,6 +414,7 @@ class WorkflowPlanner:
                     default_dataset_ids=self.settings.dify_default_dataset_ids,
                     tool_selections=tool_selections or [],
                     agent_selections=agent_selections or [],
+                    model_selections=model_selection_payloads(model_selections or []),
                     trigger_selection=trigger_selection,
                 )
                 plan = WorkflowPlan.model_validate(normalized.payload)
@@ -389,6 +425,15 @@ class WorkflowPlanner:
                         dataset_ids=self.settings.dify_default_dataset_ids,
                         tool_selections=tool_selections or [],
                         agent_selections=agent_selections or [],
+                    ),
+                    *(
+                        validate_runtime_model_bindings(
+                            plan,
+                            model_catalog,
+                            allowed_models=model_selections or [],
+                        )
+                        if model_catalog is not None
+                        else []
                     ),
                 ]
                 if has_errors(issues):
@@ -419,6 +464,7 @@ class WorkflowPlanner:
         last_error: str = "",
         tool_selections: list[dict[str, Any]] | None = None,
         agent_selections: list[dict[str, Any]] | None = None,
+        model_selections: list[DifyModelListItem] | None = None,
         trigger_selection: dict[str, Any] | None = None,
         task_context: TaskContext | None = None,
         app_mode: str = "workflow",
@@ -431,6 +477,7 @@ class WorkflowPlanner:
             "app_mode": app_mode,
             "selected_tools": _planner_tool_schemas(tool_selections or []),
             "selected_agents": _planner_agent_schemas(agent_selections or []),
+            "selected_models": model_selection_payloads(model_selections or []),
             "selected_trigger": trigger_selection or {"type": "user-input"},
         }
         if last_error:

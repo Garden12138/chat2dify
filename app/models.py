@@ -263,6 +263,11 @@ class WorkflowPlannerSelection(BaseModel):
     model: str = Field(min_length=1)
 
 
+class WorkflowModelSelection(BaseModel):
+    provider: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+
+
 class WorkflowTriggerParameter(BaseModel):
     name: str = Field(min_length=1)
     type: Literal[
@@ -328,6 +333,7 @@ class WorkflowRequest(BaseModel):
     dataset_ids: list[str] | None = None
     tool_selections: list[WorkflowToolSelection] | None = None
     agent_selections: list[WorkflowAgentSelection] | None = None
+    model_selections: list[WorkflowModelSelection] | None = None
     trigger_selection: WorkflowTriggerSelection | None = None
     planner: WorkflowPlannerSelection | None = None
 
@@ -341,6 +347,7 @@ class WorkflowModifyRequest(BaseModel):
     dataset_ids: list[str] | None = None
     tool_selections: list[WorkflowToolSelection] | None = None
     agent_selections: list[WorkflowAgentSelection] | None = None
+    model_selections: list[WorkflowModelSelection] | None = None
     trigger_selection: WorkflowTriggerSelection | None = None
     planner: WorkflowPlannerSelection | None = None
 

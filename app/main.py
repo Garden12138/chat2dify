@@ -25,6 +25,15 @@ from app.dify.graph import (
     decompile_dify_graph,
 )
 from app.dify.knowledge_retrieval import apply_dataset_retrieval_settings, knowledge_dataset_ids
+from app.dify.runtime_models import (
+    RuntimeModelSelectionError,
+    apply_default_runtime_models,
+    load_runtime_model_catalog,
+    model_selection_payloads,
+    resolve_runtime_model_selections,
+    validate_agent_selection_models,
+    validate_runtime_model_bindings,
+)
 from app.dify.version import read_dify_version_info
 from app.models import (
     ChatflowRunDraftRequest,
@@ -133,6 +142,25 @@ def list_dify_datasets(
     return asdict(result)
 
 
+@app.get("/api/dify/models")
+def list_dify_models(
+    model_type: str = Query(default="llm", pattern="^llm$"),
+    keyword: str | None = Query(default=None),
+    feature: list[str] | None = Query(default=None),
+) -> dict:
+    settings = load_settings()
+    try:
+        with DifyClient(settings) as client:
+            result = client.list_models(
+                model_type=model_type,
+                keyword=keyword.strip() if keyword else None,
+                features=feature,
+            )
+    except DifyClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return asdict(result)
+
+
 @app.get("/api/dify/tools")
 def list_dify_tools(
     keyword: str | None = Query(default=None),
@@ -206,8 +234,23 @@ def _draft_workflow(request: WorkflowRequest, *, task_context: TaskContext | Non
             },
         )
     try:
+        model_catalog, runtime_models = _runtime_model_context(
+            settings,
+            request.model_selections,
+        )
+        effective_settings = _settings_with_primary_runtime_model(
+            effective_settings,
+            runtime_models,
+        )
+        _ensure_agent_runtime_models(
+            request.agent_selections,
+            model_catalog,
+            runtime_models,
+        )
         trigger_selection = _hydrate_trigger_selection(settings, request.trigger_selection)
         planner_kwargs = _planner_selection_kwargs(request, trigger_selection=trigger_selection)
+        planner_kwargs["model_selections"] = runtime_models
+        planner_kwargs["model_catalog"] = model_catalog
         if request.app_mode == "advanced-chat":
             planner_kwargs["app_mode"] = request.app_mode
         if task_context is not None:
@@ -218,13 +261,21 @@ def _draft_workflow(request: WorkflowRequest, *, task_context: TaskContext | Non
             dsl_version=version_info.app_dsl_version,
             **planner_kwargs,
         )
+    except RuntimeModelSelectionError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail) from exc
     except DifyClientError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except PlannerError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     if task_context is not None:
         task_context.update("compiling", 70, "Compiling the validated plan into Dify DSL.")
-    plan = _plan_with_dataset_retrieval_settings(planner_result.plan, effective_settings)
+    plan = WorkflowPlan.model_validate(
+        apply_default_runtime_models(
+            planner_result.plan.model_dump(),
+            model_selection_payloads(runtime_models),
+        )
+    )
+    plan = _plan_with_dataset_retrieval_settings(plan, effective_settings)
     compiler = DifyDslCompiler(
         dsl_version=version_info.app_dsl_version,
         default_model_provider=effective_settings.dify_default_model_provider,
@@ -232,7 +283,15 @@ def _draft_workflow(request: WorkflowRequest, *, task_context: TaskContext | Non
         default_dataset_ids=effective_settings.dify_default_dataset_ids,
     )
     dsl = compiler.compile(plan)
-    issues = [*validate_plan(plan), *validate_dsl(dsl, expected_dsl_version=version_info.app_dsl_version)]
+    issues = [
+        *validate_plan(plan),
+        *validate_dsl(dsl, expected_dsl_version=version_info.app_dsl_version),
+        *validate_runtime_model_bindings(
+            plan,
+            model_catalog,
+            allowed_models=runtime_models,
+        ),
+    ]
     return {
         "raw_plan": planner_result.raw_plan,
         "plan": plan.model_dump(),
@@ -330,6 +389,7 @@ def _publish_workflow(
                 app_mode=app_mode,
                 conversation_variables=draft.conversation_variables,
             )
+            model_catalog = load_runtime_model_catalog(client, settings)
             compiler = DifyDslCompiler(
                 dsl_version=version_info.app_dsl_version,
                 default_model_provider=settings.dify_default_model_provider,
@@ -340,6 +400,7 @@ def _publish_workflow(
             issues = [
                 *validate_plan(plan),
                 *validate_dsl(dsl, expected_dsl_version=version_info.app_dsl_version),
+                *validate_runtime_model_bindings(plan, model_catalog),
             ]
             if has_errors(issues):
                 raise HTTPException(
@@ -447,6 +508,7 @@ def get_workflow_draft(app_id: str) -> dict:
         with DifyClient(settings) as client:
             app_detail = _load_app_detail(client, app_id)
             draft = client.get_draft_workflow(app_id)
+            model_catalog = load_runtime_model_catalog(client, settings)
 
         plan = decompile_dify_graph(
             draft.graph,
@@ -454,7 +516,14 @@ def get_workflow_draft(app_id: str) -> dict:
             app_mode=_app_mode(app_detail, draft.graph),
             conversation_variables=draft.conversation_variables,
         )
-        issues = validate_plan(plan)
+        issues = [
+            *validate_plan(plan),
+            *validate_runtime_model_bindings(
+                plan,
+                model_catalog,
+                existing_as_warning=True,
+            ),
+        ]
         return {
             "app_id": app_id,
             "workflow_url": settings.workflow_url(app_id),
@@ -639,15 +708,29 @@ def _modify_workflow(
         require_configured=not (apply and request.plan is not None),
     )
     version_info = read_dify_version_info(settings.dify_source_path)
-    compiler = DifyDslCompiler(
-        dsl_version=version_info.app_dsl_version,
-        default_model_provider=effective_settings.dify_default_model_provider,
-        default_model_name=effective_settings.dify_default_model_name,
-        default_dataset_ids=effective_settings.dify_default_dataset_ids,
-    )
 
     try:
         with DifyClient(settings) as client:
+            model_catalog, runtime_models = _runtime_model_context(
+                settings,
+                request.model_selections,
+                client=client,
+            )
+            effective_settings = _settings_with_primary_runtime_model(
+                effective_settings,
+                runtime_models,
+            )
+            _ensure_agent_runtime_models(
+                request.agent_selections,
+                model_catalog,
+                runtime_models,
+            )
+            compiler = DifyDslCompiler(
+                dsl_version=version_info.app_dsl_version,
+                default_model_provider=effective_settings.dify_default_model_provider,
+                default_model_name=effective_settings.dify_default_model_name,
+                default_dataset_ids=effective_settings.dify_default_dataset_ids,
+            )
             app_detail = _load_app_detail(client, request.app_id)
             app_mode = _app_mode(app_detail)
             _ensure_chatflow_trigger_selection(app_mode, request.trigger_selection)
@@ -687,6 +770,7 @@ def _modify_workflow(
                     default_dataset_ids=effective_settings.dify_default_dataset_ids,
                     tool_selections=_tool_selection_payloads(request.tool_selections),
                     agent_selections=_agent_selection_payloads(request.agent_selections),
+                    model_selections=model_selection_payloads(runtime_models),
                     trigger_selection=None,
                 )
                 plan = WorkflowPlan.model_validate(normalized.payload)
@@ -705,6 +789,8 @@ def _modify_workflow(
                     request,
                     trigger_selection=trigger_selection,
                 )
+                edit_kwargs["model_selections"] = runtime_models
+                edit_kwargs["model_catalog"] = model_catalog
                 if task_context is not None:
                     edit_kwargs["task_context"] = task_context
                 edit_result = WorkflowEditPlanner(effective_settings).generate(
@@ -732,6 +818,12 @@ def _modify_workflow(
                 plan=plan,
                 raw_plan=raw_plan,
                 planner_metadata=planner_metadata,
+                model_issues=validate_runtime_model_bindings(
+                    plan,
+                    model_catalog,
+                    allowed_models=runtime_models,
+                    baseline_plan=before_plan,
+                ),
             )
 
             if not apply:
@@ -779,6 +871,8 @@ def _modify_workflow(
             return response
     except HTTPException:
         raise
+    except RuntimeModelSelectionError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail) from exc
     except UnsupportedExistingNodeType as exc:
         raise HTTPException(
             status_code=422,
@@ -928,10 +1022,15 @@ def _build_modify_response(
     plan: WorkflowPlan,
     raw_plan: dict,
     planner_metadata: dict,
+    model_issues: list | None = None,
 ) -> tuple[dict, dict]:
     dsl = compiler.compile(plan)
     graph = compile_plan_to_dify_graph(plan, compiler=compiler, base_graph=base_graph)
-    issues = [*validate_plan(plan), *validate_dsl(dsl, expected_dsl_version=version_info.app_dsl_version)]
+    issues = [
+        *validate_plan(plan),
+        *validate_dsl(dsl, expected_dsl_version=version_info.app_dsl_version),
+        *(model_issues or []),
+    ]
     changes = diff_plans(before_plan, plan)
     guard = guard_plan_change(before_plan, plan, changes)
     explanation = explain_plan(plan)
@@ -965,6 +1064,47 @@ def _settings_with_request_dataset_ids(settings: Settings, dataset_ids: list[str
     if not request_dataset_ids:
         return settings
     return replace(settings, dify_default_dataset_ids=request_dataset_ids)
+
+
+def _runtime_model_context(
+    settings: Settings,
+    selections,
+    *,
+    client: DifyClient | None = None,
+):
+    if client is not None:
+        catalog = load_runtime_model_catalog(client, settings)
+    else:
+        with DifyClient(settings) as model_client:
+            catalog = load_runtime_model_catalog(model_client, settings)
+    return catalog, resolve_runtime_model_selections(catalog, settings, selections)
+
+
+def _settings_with_primary_runtime_model(settings: Settings, models) -> Settings:
+    if not models:
+        return settings
+    primary = models[0]
+    return replace(
+        settings,
+        dify_default_model_provider=primary.provider,
+        dify_default_model_name=primary.model,
+    )
+
+
+def _ensure_agent_runtime_models(agent_selections, catalog, runtime_models) -> None:
+    issues = validate_agent_selection_models(
+        agent_selections,
+        catalog,
+        runtime_models,
+    )
+    if issues:
+        raise RuntimeModelSelectionError(
+            {
+                "code": "AGENT_MODEL_SELECTION_INVALID",
+                "message": "Agent Strategy runtime model validation failed.",
+                "issues": [issue.model_dump() for issue in issues],
+            }
+        )
 
 
 def _settings_with_request_planner(

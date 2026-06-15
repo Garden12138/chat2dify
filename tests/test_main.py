@@ -18,6 +18,8 @@ from app.dify.client import (
     DifyDraftRunResult,
     DifyDraftSyncResult,
     DifyDraftWorkflow,
+    DifyModelListItem,
+    DifyModelListResult,
     DifyPublishResult,
     DifyToolListItem,
     DifyToolListResult,
@@ -199,6 +201,7 @@ def test_draft_rejects_unconfigured_planner_provider(monkeypatch) -> None:
 
 def test_draft_uses_requested_nvidia_planner(monkeypatch) -> None:
     seen = {}
+    _patch_runtime_model_context(monkeypatch, _test_settings())
 
     class CapturingPlanner:
         def __init__(self, settings):
@@ -245,6 +248,7 @@ def test_draft_uses_requested_nvidia_planner(monkeypatch) -> None:
 
 def test_draft_creates_advanced_chat_plan(monkeypatch) -> None:
     seen = {}
+    _patch_runtime_model_context(monkeypatch, _test_settings())
 
     class CapturingPlanner:
         def __init__(self, _settings):
@@ -289,6 +293,8 @@ def test_draft_creates_advanced_chat_plan(monkeypatch) -> None:
 
 
 def test_draft_returns_valid_advanced_chat_iteration(monkeypatch) -> None:
+    _patch_runtime_model_context(monkeypatch, _test_settings())
+
     class AdvancedNodePlanner:
         def __init__(self, _settings):
             pass
@@ -381,6 +387,7 @@ def test_draft_returns_valid_advanced_chat_iteration(monkeypatch) -> None:
 
 def test_chatflow_draft_passes_existing_resource_selections_to_planner(monkeypatch) -> None:
     seen = {}
+    _patch_runtime_model_context(monkeypatch, _test_settings())
 
     class ResourceAwarePlanner:
         def __init__(self, settings):
@@ -516,6 +523,65 @@ def test_list_dify_datasets_api_returns_slim_dataset_list(monkeypatch) -> None:
         "updated_at": 123,
         "retrieval_model_dict": None,
     }
+
+
+def test_list_dify_models_api_returns_runtime_capabilities(monkeypatch) -> None:
+    seen = {}
+    model = DifyModelListItem(
+        provider="langgenius/tongyi/tongyi",
+        provider_label="Tongyi",
+        model="qwen-plus",
+        model_label="Qwen Plus",
+        model_type="llm",
+        status="active",
+        provider_status="active",
+        deprecated=False,
+        features=["tool-call", "vision"],
+        context_length=131072,
+        mode="chat",
+        fetch_from="predefined-model",
+    )
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def list_models(self, *, model_type, keyword=None, features=None):
+            seen.update(
+                model_type=model_type,
+                keyword=keyword,
+                features=features,
+            )
+            return DifyModelListResult(
+                data=[model],
+                count=1,
+                model_type="llm",
+                providers=[model.provider],
+                features=list(model.features),
+            )
+
+    monkeypatch.setattr("app.main.load_settings", _test_settings)
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/dify/models?model_type=llm&keyword=qwen&feature=vision&feature=tool-call"
+        )
+
+    assert response.status_code == 200
+    assert seen == {
+        "model_type": "llm",
+        "keyword": "qwen",
+        "features": ["vision", "tool-call"],
+    }
+    assert response.json()["data"][0]["context_length"] == 131072
+    assert response.json()["data"][0]["features"] == ["tool-call", "vision"]
 
 
 def test_list_dify_datasets_api_wraps_dify_errors(monkeypatch) -> None:
@@ -924,12 +990,13 @@ def test_draft_workflow_rejects_plugin_subscription_from_another_provider(monkey
 
 def test_draft_workflow_passes_tool_selections_to_planner(monkeypatch) -> None:
     seen = {}
+    _patch_runtime_model_context(monkeypatch, _test_settings())
 
     class ToolAwarePlanner:
         def __init__(self, settings):
             self.settings = settings
 
-        def generate(self, message, *, app_name=None, dsl_version, tool_selections=None):
+        def generate(self, message, *, app_name=None, dsl_version, tool_selections=None, **_kwargs):
             seen["tool_selections"] = tool_selections
             plan = fallback_plan(message, app_name=app_name)
             return PlannerResult(
@@ -972,12 +1039,13 @@ def test_draft_workflow_passes_tool_selections_to_planner(monkeypatch) -> None:
 
 def test_draft_workflow_passes_agent_selections_to_planner(monkeypatch) -> None:
     seen = {}
+    _patch_runtime_model_context(monkeypatch, _test_settings())
 
     class AgentAwarePlanner:
         def __init__(self, settings):
             self.settings = settings
 
-        def generate(self, message, *, app_name=None, dsl_version, agent_selections=None):
+        def generate(self, message, *, app_name=None, dsl_version, agent_selections=None, **_kwargs):
             seen["agent_selections"] = agent_selections
             plan = fallback_plan(message, app_name=app_name)
             return PlannerResult(
@@ -1096,6 +1164,17 @@ def test_draft_workflow_validates_agent_selection_required_parameters_before_pla
 
 
 def test_draft_response_includes_phase2_fields(monkeypatch) -> None:
+    _patch_runtime_model_context(
+        monkeypatch,
+        Settings.from_env(
+            {
+                "DIFY_SOURCE_DIR": "../dify",
+                "DIFY_DEFAULT_MODEL_PROVIDER": "openai",
+                "DIFY_DEFAULT_MODEL_NAME": "gpt-4o-mini",
+            },
+            validate_dify=False,
+        ),
+    )
     monkeypatch.setattr(
         "app.main.load_settings",
         lambda: Settings.from_env(
@@ -1130,6 +1209,7 @@ def test_draft_response_includes_phase2_fields(monkeypatch) -> None:
 
 
 def test_draft_request_dataset_ids_override_env_defaults(monkeypatch) -> None:
+    _patch_runtime_model_context(monkeypatch, _test_settings())
     monkeypatch.setattr("app.main.load_settings", lambda: _test_settings(dataset_ids="env-dataset"))
     monkeypatch.setattr(
         "app.main.read_dify_version_info",
@@ -1155,6 +1235,7 @@ def test_draft_request_dataset_ids_override_env_defaults(monkeypatch) -> None:
 
 
 def test_create_knowledge_workflow_without_any_dataset_ids_returns_422(monkeypatch) -> None:
+    _patch_runtime_model_context(monkeypatch, _test_settings())
     monkeypatch.setattr("app.main.load_settings", _test_settings)
     monkeypatch.setattr(
         "app.main.read_dify_version_info",
@@ -2415,8 +2496,8 @@ def test_chatflow_modify_rejects_trigger_when_mode_is_inferred_from_graph(monkey
     graph = yaml.safe_load(
         DifyDslCompiler(
             dsl_version="9.9.9",
-            default_model_provider="openai",
-            default_model_name="gpt-4o-mini",
+            default_model_provider=settings.dify_default_model_provider,
+            default_model_name=settings.dify_default_model_name,
         ).compile(plan)
     )["workflow"]["graph"]
 
@@ -2586,8 +2667,8 @@ def test_chatflow_publish_validates_and_skips_workflow_triggers(monkeypatch) -> 
     graph = yaml.safe_load(
         DifyDslCompiler(
             dsl_version="9.9.9",
-            default_model_provider="openai",
-            default_model_name="gpt-4o-mini",
+            default_model_provider=settings.dify_default_model_provider,
+            default_model_name=settings.dify_default_model_name,
         ).compile(plan)
     )["workflow"]["graph"]
     seen = {}
@@ -2656,6 +2737,121 @@ def test_chatflow_publish_validates_and_skips_workflow_triggers(monkeypatch) -> 
     assert data["triggers"] == []
     assert data["webhooks"] == []
     assert seen["publish"] == ("chat-app-1", "v1.1", "Chatflow release")
+
+
+def test_old_chatflow_draft_warns_for_unavailable_runtime_model(monkeypatch) -> None:
+    settings = _test_settings()
+    plan, graph = _chatflow_graph_with_model("legacy/provider", "retired-model")
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get_app_detail(self, app_id):
+            return DifyAppDetail(
+                id=app_id,
+                name=plan.name,
+                mode="advanced-chat",
+                description="",
+                raw={},
+            )
+
+        def get_draft_workflow(self, _app_id):
+            return DifyDraftWorkflow(
+                id="workflow-1",
+                graph=graph,
+                features={},
+                hash="hash-1",
+                version="draft",
+                environment_variables=[],
+                conversation_variables=[],
+                raw={},
+            )
+
+        def list_models(self, *, model_type="llm"):
+            return _active_default_model_catalog(settings)
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo("../dify", "test", "9.9.9"),
+    )
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+
+    with TestClient(app) as client:
+        response = client.get("/api/workflows/chat-app-1/draft")
+
+    assert response.status_code == 200
+    validation = response.json()["validation"]
+    assert validation["ok"] is True
+    assert validation["issues"][0]["code"] == "PLAN_MODEL_NOT_FOUND"
+    assert validation["issues"][0]["severity"] == "warning"
+
+
+def test_publish_blocks_chatflow_with_unavailable_runtime_model(monkeypatch) -> None:
+    settings = _test_settings()
+    plan, graph = _chatflow_graph_with_model("legacy/provider", "retired-model")
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get_app_detail(self, app_id):
+            return DifyAppDetail(
+                id=app_id,
+                name=plan.name,
+                mode="advanced-chat",
+                description="",
+                raw={},
+            )
+
+        def get_draft_workflow(self, _app_id):
+            return DifyDraftWorkflow(
+                id="workflow-1",
+                graph=graph,
+                features={},
+                hash="hash-1",
+                version="draft",
+                environment_variables=[],
+                conversation_variables=[],
+                raw={},
+            )
+
+        def list_models(self, *, model_type="llm"):
+            return _active_default_model_catalog(settings)
+
+        def publish_workflow(self, *_args, **_kwargs):
+            raise AssertionError("Unavailable runtime models must block publish.")
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo("../dify", "test", "9.9.9"),
+    )
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/chat-app-1/publish",
+            json={"expected_hash": "hash-1"},
+        )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["code"] == "WORKFLOW_PUBLISH_VALIDATION_FAILED"
+    assert detail["validation"]["issues"][-1]["code"] == "PLAN_MODEL_NOT_FOUND"
 
 
 def test_publish_and_trigger_management_apis(monkeypatch) -> None:
@@ -3032,3 +3228,67 @@ def _test_settings(dataset_ids: str = "", *, nvidia_api_key: str = "") -> Settin
     if nvidia_api_key:
         env["NVIDIA_API_KEY"] = nvidia_api_key
     return Settings.from_env(env, validate_dify=False)
+
+
+def _patch_runtime_model_context(monkeypatch, settings: Settings) -> None:
+    item = DifyModelListItem(
+        provider=settings.dify_default_model_provider,
+        provider_label=settings.dify_default_model_provider,
+        model=settings.dify_default_model_name,
+        model_label=settings.dify_default_model_name,
+        model_type="llm",
+        status="active",
+        provider_status="active",
+        deprecated=False,
+        features=["vision", "tool-call"],
+        mode="chat",
+    )
+    catalog = DifyModelListResult(
+        data=[item],
+        count=1,
+        model_type="llm",
+        providers=[item.provider],
+        features=list(item.features),
+    )
+    monkeypatch.setattr(
+        "app.main._runtime_model_context",
+        lambda _settings, _selections, client=None: (catalog, [item]),
+    )
+
+
+def _active_default_model_catalog(settings: Settings) -> DifyModelListResult:
+    item = DifyModelListItem(
+        provider=settings.dify_default_model_provider,
+        provider_label=settings.dify_default_model_provider,
+        model=settings.dify_default_model_name,
+        model_label=settings.dify_default_model_name,
+        model_type="llm",
+        status="active",
+        provider_status="active",
+        deprecated=False,
+        features=["vision", "tool-call"],
+        mode="chat",
+    )
+    return DifyModelListResult(
+        data=[item],
+        count=1,
+        model_type="llm",
+        providers=[item.provider],
+        features=list(item.features),
+    )
+
+
+def _chatflow_graph_with_model(provider: str, model: str):
+    plan = fallback_plan(
+        "创建模型认证客服",
+        app_name="模型认证客服",
+        app_mode="advanced-chat",
+    )
+    graph = yaml.safe_load(
+        DifyDslCompiler(
+            dsl_version="9.9.9",
+            default_model_provider=provider,
+            default_model_name=model,
+        ).compile(plan)
+    )["workflow"]["graph"]
+    return plan, graph

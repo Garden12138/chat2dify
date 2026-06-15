@@ -228,6 +228,8 @@ def test_chatflow_prompt_is_mode_specific_and_lists_certified_nodes() -> None:
     assert "human-input is top-level only" in CHATFLOW_SYSTEM_PROMPT
     assert "one connected acyclic graph" in CHATFLOW_SYSTEM_PROMPT
     assert "all branches must explicitly" in CHATFLOW_SYSTEM_PROMPT
+    assert "routing node; never reference invented outputs" in CHATFLOW_SYSTEM_PROMPT
+    assert "output variable is named output" in CHATFLOW_SYSTEM_PROMPT
     assert "response path must finish at an answer node" in CHATFLOW_SYSTEM_PROMPT
 
 
