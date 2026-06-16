@@ -11,6 +11,7 @@ from app.models import PlanNode, WorkflowPlan
 from app.agent.normalizer import normalize_template_refs
 from app.input_variables import file_upload_settings, is_file_input_type
 from app.list_operator import normalize_list_comparison_operator, normalize_list_variable_selector
+from app.node_outputs import node_output_types, plan_output_types
 
 
 CUSTOM_NODE_TYPE = "custom"
@@ -1247,114 +1248,11 @@ def _unique_prompt_alias(reference: tuple[str, str], existing: set[str]) -> str:
 
 
 def _plan_output_types(plan: WorkflowPlan) -> dict[tuple[str, str], str]:
-    output_types: dict[tuple[str, str], str] = {
-        ("sys", "timestamp"): "number",
-        ("sys", "query"): "string",
-        ("sys", "files"): "array[file]",
-    }
-
-    def register(node: PlanNode) -> None:
-        for variable, variable_type in _node_output_types(node).items():
-            output_types[(node.id, variable)] = variable_type
-        for child in node.params.get("children") if isinstance(node.params.get("children"), list) else []:
-            if isinstance(child, dict):
-                register(PlanNode.model_validate(child))
-
-    for node in plan.nodes:
-        register(node)
-    return output_types
+    return plan_output_types(plan)
 
 
 def _node_output_types(node: PlanNode) -> dict[str, str]:
-    params = node.params
-    match node.type:
-        case "start":
-            return {
-                str(item.get("name") or item.get("variable")): _start_output_type(item.get("type"))
-                for item in params.get("variables", [])
-                if isinstance(item, dict) and (item.get("name") or item.get("variable"))
-            }
-        case "trigger-webhook":
-            variables = params.get("variables") if isinstance(params.get("variables"), list) else []
-            result = {
-                str(item.get("variable") or item.get("name")): str(
-                    item.get("value_type") or item.get("type") or "string"
-                )
-                for item in variables
-                if isinstance(item, dict) and (item.get("variable") or item.get("name"))
-            }
-            if result:
-                return result
-            result = {"_webhook_raw": "object"}
-            for group in ("headers", "params", "body"):
-                for item in params.get(group) if isinstance(params.get(group), list) else []:
-                    if not isinstance(item, dict) or not item.get("name"):
-                        continue
-                    variable = str(item["name"]).replace("-", "_") if group == "headers" else str(item["name"])
-                    result[variable] = str(item.get("type") or "string")
-            return result
-        case "trigger-plugin":
-            schema = params.get("output_schema") if isinstance(params.get("output_schema"), dict) else {}
-            properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
-            return {
-                str(name): str(config.get("type") or "object") if isinstance(config, dict) else "object"
-                for name, config in properties.items()
-            }
-        case "llm":
-            return {"text": "string"}
-        case "code":
-            outputs = params.get("outputs") if isinstance(params.get("outputs"), dict) else {}
-            return {
-                str(name): str(config.get("type") or "string") if isinstance(config, dict) else "string"
-                for name, config in outputs.items()
-            }
-        case "http-request":
-            return {"body": "string", "status_code": "number", "headers": "object"}
-        case "template-transform":
-            return {"output": "string"}
-        case "question-classifier":
-            return {"class_name": "string"}
-        case "parameter-extractor":
-            return {
-                str(item.get("name")): str(item.get("type") or "string")
-                for item in params.get("parameters", [])
-                if isinstance(item, dict) and item.get("name")
-            }
-        case "variable-aggregator":
-            return {"output": str(params.get("output_type") or "string")}
-        case "document-extractor":
-            return {"text": "string"}
-        case "list-operator":
-            return {
-                "result": str(params.get("var_type") or "array"),
-                "first_record": str(params.get("item_var_type") or "string"),
-                "last_record": str(params.get("item_var_type") or "string"),
-            }
-        case "knowledge-retrieval":
-            return {"result": "array[object]"}
-        case "human-input":
-            result = {
-                str(item.get("output_variable_name")): str(item.get("type") or "string")
-                for item in params.get("inputs", [])
-                if isinstance(item, dict) and item.get("output_variable_name")
-            }
-            result.update({"selected_action": "string", "submitted_at": "string"})
-            return result
-        case "tool" | "agent":
-            return {"text": "string", "files": "array[file]", "json": "object"}
-        case "knowledge-index":
-            return {"result": "object", "document_ids": "array[string]"}
-        case "datasource" | "datasource-empty":
-            return {"datasource_type": "string", "file": "file"}
-        case "iteration":
-            return {"output": "array", "item": "object", "index": "number"}
-        case "loop":
-            result = {"loop_round": "number"}
-            for item in params.get("loop_variables", []):
-                if isinstance(item, dict) and item.get("label"):
-                    result[str(item["label"])] = str(item.get("var_type") or item.get("type") or "string")
-            return result
-    return {}
+    return node_output_types(node.type, node.params)
 
 
 def _start_output_type(value: Any) -> str:

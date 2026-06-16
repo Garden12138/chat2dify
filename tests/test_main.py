@@ -4,7 +4,7 @@ import yaml
 
 from app.agent.editor import WorkflowEditResult
 from app.agent.normalizer import normalize_plan_payload
-from app.agent.planner import PlannerResult, fallback_plan
+from app.agent.planner import PlannerError, PlannerResult, fallback_plan
 from app.compiler.dify import DifyDslCompiler
 from app.config import Settings
 from app.dify.client import (
@@ -197,6 +197,69 @@ def test_draft_rejects_unconfigured_planner_provider(monkeypatch) -> None:
 
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "PLANNER_PROVIDER_NOT_CONFIGURED"
+
+
+def test_planner_invalid_detail_is_preserved_by_sync_and_task_apis(
+    monkeypatch,
+) -> None:
+    settings = _test_settings()
+    _patch_runtime_model_context(monkeypatch, settings)
+    detail = {
+        "code": "PLANNER_PLAN_INVALID",
+        "provider": "nvidia",
+        "model": "deepseek-ai/deepseek-v4-flash",
+        "attempts": 2,
+        "repair_actions": [],
+        "attempt_diagnostics": [],
+        "validation_issues": [],
+        "preflight": {
+            "ok": False,
+            "dsl_version": "9.9.9",
+            "roundtrip_ok": False,
+            "issues": [],
+        },
+        "raw_plan_excerpt": "{}",
+    }
+
+    class FailingPlanner:
+        def __init__(self, _settings):
+            pass
+
+        def generate(self, *_args, **_kwargs):
+            raise PlannerError("invalid plan", detail=detail)
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(
+            source_dir="../dify",
+            git_describe="test",
+            app_dsl_version="9.9.9",
+        ),
+    )
+    monkeypatch.setattr("app.main.WorkflowPlanner", FailingPlanner)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/draft",
+            json={"message": "生成复杂 Chatflow", "app_mode": "advanced-chat"},
+        )
+        task_response = client.post(
+            "/api/tasks/workflows/create",
+            json={"message": "生成复杂 Chatflow", "app_mode": "advanced-chat"},
+        )
+        task_id = task_response.json()["task_id"]
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            task = client.get(f"/api/tasks/{task_id}").json()
+            if task["status"] == "failed":
+                break
+            time.sleep(0.01)
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == detail
+    assert task["error"]["status_code"] == 502
+    assert task["error"]["detail"] == detail
 
 
 def test_draft_uses_requested_nvidia_planner(monkeypatch) -> None:

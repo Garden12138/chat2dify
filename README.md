@@ -27,6 +27,14 @@ flow as Workflow. Existing `advanced-chat` drafts can be loaded, revised through
 Modify Preview, applied with draft hash protection, run across multiple
 conversation turns, and published without introducing Workflow triggers.
 
+Creation and modification now share a deterministic Planner reliability
+pipeline. A unified node-output registry validates static and dynamic outputs,
+repairs only unambiguous aliases such as LLM `text`, template/iteration
+`output`, retrieval `result`, and document `text`, and rejects invented
+Classifier values. Every repaired plan is compiled to the current Dify DSL,
+validated, decompiled locally, and compared by execution signature before it
+can be returned or written to Dify.
+
 ## Phase 1 MVP
 
 This repository runs as an independent FastAPI sidecar. It does not modify Dify
@@ -56,7 +64,7 @@ DIFY_CONSOLE_WEB_BASE=http://127.0.0.1
 The second-stage flow is:
 
 ```text
-user request -> raw LLM plan -> normalized WorkflowPlan IR -> Dify DSL YAML -> validation -> /console/api/apps/imports
+user request -> raw LLM plan -> normalize/repair -> validate -> local DSL round-trip preflight -> /console/api/apps/imports
 ```
 
 The create API returns the imported Dify `app_id` and a console workflow URL in
@@ -70,8 +78,11 @@ Chatflow creation uses the same draft/create APIs with
 the request's `dataset_ids`, `tool_selections`, and `agent_selections`; planner
 output cannot introduce unselected resources.
 
-Draft/create responses include `raw_plan`, normalized `plan`, rule-based
-`explanation`, `planner` metadata, `dsl`, and structured validation issues.
+Draft/create responses include the unchanged Planner `raw_plan`, repaired
+`plan`, rule-based `explanation`, `planner` metadata, `dsl`, and structured
+validation issues. Planner metadata includes `repair_actions`,
+`attempt_diagnostics`, and
+`preflight: {ok, dsl_version, roundtrip_ok, issues}`.
 
 ## Screenshots
 
@@ -172,9 +183,11 @@ OPENAI_MODEL=gpt-4o-mini
 If the default planner provider has no API key, the create draft endpoint uses
 a deterministic fallback plan: `start -> llm -> end` for Workflow or
 `start -> llm -> answer` for Chatflow. Modify Preview requires a configured
-planner provider. When an LLM provider is configured, the planner tries up to
-three attempts and feeds structured validation errors back into the model for
-self-repair.
+planner provider. When an LLM provider is configured, the planner performs one
+initial semantic generation. It then normalizes and deterministically repairs
+safe output aliases before validation and local Dify preflight. Only a
+remaining semantic error triggers one targeted retry, so `attempts` is never
+greater than 2.
 
 Knowledge retrieval workflows require real Dify dataset IDs. Configure a
 comma-separated default in `.env`, or use the Web UI Knowledge panel to search
@@ -251,7 +264,11 @@ not call the selected Planner model a second time.
 response. NVIDIA NIM can take several minutes for complex structured workflow
 plans, so the default is 600 seconds. `PLANNER_REQUEST_RETRIES`
 retries transient disconnects, timeouts, rate limits, and temporary upstream
-errors without consuming an additional Plan self-repair attempt.
+errors without consuming an additional semantic attempt. If both semantic
+attempts fail, the API returns HTTP 502 with
+`detail.code="PLANNER_PLAN_INVALID"` plus provider/model identity, repair
+actions, attempt diagnostics, final validation issues, preflight results, and
+a truncated raw-plan excerpt. Background tasks persist the same detail object.
 NVIDIA Planner requests use streaming and default to `NVIDIA_THINKING=false`
 for lower latency and fewer hosted-endpoint disconnects. Set it to `true` and
 raise `NVIDIA_REASONING_EFFORT` only when a deployment can sustain longer

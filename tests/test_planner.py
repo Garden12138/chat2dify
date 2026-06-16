@@ -188,6 +188,75 @@ def test_planner_retries_transient_server_disconnect(monkeypatch) -> None:
     assert captured["sleeps"] == [1]
 
 
+def test_streaming_http_error_is_reported_as_planner_network_failure(
+    monkeypatch,
+) -> None:
+    captured = {"posts": 0}
+
+    class FakeResponse:
+        status_code = 503
+        reason_phrase = "Service Unavailable"
+        is_error = True
+
+        def __init__(self, method, url):
+            self.request = httpx.Request(method, url)
+            self._read = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def read(self):
+            self._read = True
+            return b"NIM temporarily unavailable"
+
+        @property
+        def text(self):
+            if not self._read:
+                raise httpx.ResponseNotRead()
+            return "NIM temporarily unavailable"
+
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError(
+                "service unavailable",
+                request=self.request,
+                response=self,
+            )
+
+    class FakeClient:
+        def __init__(self, *, timeout):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def stream(self, method, url, *, json, headers):
+            captured["posts"] += 1
+            return FakeResponse(method, url)
+
+    monkeypatch.setattr("app.agent.planner.httpx.Client", FakeClient)
+    monkeypatch.setattr("app.agent.planner.time.sleep", lambda _seconds: None)
+    planner = WorkflowPlanner(
+        _settings(
+            openai_api_key=None,
+            planner_provider="nvidia",
+            nvidia_api_key="nvapi-test",
+        )
+    )
+
+    with pytest.raises(PlannerError) as exc:
+        planner._call_llm("生成售后工作流", app_name="售后")
+
+    assert captured["posts"] == 3
+    assert "503 NIM temporarily unavailable" in str(exc.value)
+    assert "3 network attempts" in str(exc.value)
+
+
 def test_streamed_planner_response_honors_cancellation() -> None:
     class FakeResponse:
         def iter_lines(self):
@@ -740,6 +809,96 @@ def test_planner_self_repairs_after_validation_failure() -> None:
     assert "PLAN_VARIABLE_UNKNOWN" in planner.last_errors[1]
 
 
+def test_planner_repairs_safe_output_alias_without_semantic_retry() -> None:
+    raw = fallback_plan("hello").model_dump()
+    raw["nodes"][2]["params"]["outputs"][0]["value_selector"] = [
+        "llm",
+        "answer",
+    ]
+    planner = FakePlanner([json.dumps(raw)])
+
+    result = planner.generate("fix", dsl_version="9.9.9")
+
+    assert result.attempts == 1
+    assert result.plan.nodes[2].params["outputs"][0]["value_selector"] == [
+        "llm",
+        "text",
+    ]
+    assert result.raw_plan["nodes"][2]["params"]["outputs"][0][
+        "value_selector"
+    ] == ["llm", "answer"]
+    assert result.repair_actions[0]["code"] == "SAFE_OUTPUT_ALIAS_REPAIRED"
+    assert result.preflight["ok"] is True
+
+
+def test_chatflow_planner_retries_classifier_virtual_output_with_catalog() -> None:
+    bad = {
+        "name": "售后分流",
+        "app_mode": "advanced-chat",
+        "nodes": [
+            {
+                "id": "start",
+                "type": "start",
+                "title": "接收售后问题",
+                "params": {"variables": []},
+            },
+            {
+                "id": "classify",
+                "type": "question-classifier",
+                "title": "判断售后类型",
+                "params": {
+                    "query_variable_selector": ["start", "sys.query"],
+                    "instruction": "判断投诉或咨询。",
+                    "classes": [
+                        {"id": "complaint", "name": "投诉", "label": "投诉"},
+                        {"id": "consult", "name": "咨询", "label": "咨询"},
+                    ],
+                },
+            },
+            {
+                "id": "answer",
+                "type": "answer",
+                "title": "回复分类结果",
+                "params": {"answer": "{{#classify.class_name#}}"},
+            },
+        ],
+        "edges": [
+            {"source": "start", "target": "classify"},
+            {
+                "source": "classify",
+                "target": "answer",
+                "source_handle": "complaint",
+            },
+            {
+                "source": "classify",
+                "target": "answer",
+                "source_handle": "consult",
+            },
+        ],
+    }
+    good = json.loads(json.dumps(bad))
+    good["nodes"][2]["params"]["answer"] = "已收到：{{#sys.query#}}"
+    planner = FakePlanner([json.dumps(bad), json.dumps(good)])
+
+    result = planner.generate(
+        "创建售后分类 Chatflow",
+        app_mode="advanced-chat",
+        dsl_version="9.9.9",
+    )
+
+    assert result.attempts == 2
+    feedback = json.loads(planner.last_errors[1])
+    assert feedback["actual_node_outputs"]["classify"] == []
+    assert any(
+        "Question Classifier has no" in rule
+        for rule in feedback["branch_constraints"]
+    )
+    assert any(
+        issue["code"] == "PLAN_VARIABLE_UNKNOWN"
+        for issue in feedback["validation_issues"]
+    )
+
+
 def test_chatflow_planner_retries_invalid_conversation_assigner_target() -> None:
     bad = {
         "name": "记忆姓名",
@@ -808,13 +967,20 @@ def test_chatflow_planner_retries_invalid_conversation_assigner_target() -> None
     assert "PLAN_CHATFLOW_ASSIGNER_TARGET_INVALID" in planner.last_errors[1]
 
 
-def test_planner_fails_after_three_bad_attempts() -> None:
+def test_planner_fails_after_two_bad_attempts_with_structured_diagnostics() -> None:
     planner = FakePlanner(["{}", "{}", "{}"])
 
     with pytest.raises(PlannerError) as exc:
         planner.generate("bad", dsl_version="9.9.9")
 
-    assert "after 3 attempts" in str(exc.value)
+    assert "2 semantic attempts" in str(exc.value)
+    assert exc.value.detail["code"] == "PLANNER_PLAN_INVALID"
+    assert exc.value.detail["attempts"] == 2
+    assert len(exc.value.detail["attempt_diagnostics"]) == 2
+    assert exc.value.detail["validation_issues"][0]["code"] == (
+        "PLANNER_RESPONSE_INVALID"
+    )
+    assert exc.value.detail["raw_plan_excerpt"] == "{}"
 
 
 def _shorthand_plan() -> dict:

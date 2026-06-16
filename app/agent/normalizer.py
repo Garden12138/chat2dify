@@ -9,6 +9,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from app.dify.runtime_models import apply_default_runtime_models
 from app.input_variables import file_upload_settings, is_file_input_type
 from app.list_operator import normalize_list_comparison_operator, normalize_list_variable_selector
+from app.node_outputs import node_output_types, repair_plan_references
 
 
 SOURCE_HANDLE = "source"
@@ -259,6 +260,7 @@ class NormalizationResult:
     payload: dict[str, Any]
     changed: bool
     changes: list[str] = field(default_factory=list)
+    repair_actions: list[dict[str, Any]] = field(default_factory=list)
 
 
 def normalize_plan_payload(
@@ -307,6 +309,8 @@ def normalize_plan_payload(
         raise ValueError("plan.nodes must be a list")
     if not isinstance(edges, list):
         raise ValueError("plan.edges must be a list")
+
+    _normalize_top_level_node_ids(nodes, edges, changes)
 
     if target_app_mode == "advanced-chat":
         _normalize_chatflow_terminal_nodes(nodes, changes)
@@ -516,7 +520,20 @@ def normalize_plan_payload(
 
     _repair_code_edge_variable_bindings(nodes, edges, changes)
 
-    return NormalizationResult(payload=data, changed=bool(changes), changes=changes)
+    repaired = repair_plan_references(data)
+    if repaired.actions:
+        data = repaired.payload
+        changes.extend(
+            f"repaired output reference at {action['path']}"
+            for action in repaired.actions
+        )
+
+    return NormalizationResult(
+        payload=data,
+        changed=bool(changes),
+        changes=changes,
+        repair_actions=repaired.actions,
+    )
 
 
 def _normalize_conversation_variables(
@@ -975,6 +992,182 @@ def _normalize_node_type(value: str) -> str:
     return NODE_TYPE_ALIASES.get(alias_key, normalized)
 
 
+def _normalize_top_level_node_ids(
+    nodes: list[Any],
+    edges: list[Any],
+    changes: list[str],
+) -> None:
+    typed_nodes = [node for node in nodes if isinstance(node, dict)]
+    used_ids = {
+        str(node.get("id")).strip()
+        for node in typed_nodes
+        if str(node.get("id") or "").strip()
+    }
+    branch_labels: list[tuple[str, str]] = []
+    for node in typed_nodes:
+        if _normalize_node_type(str(node.get("type") or "")) != "question-classifier":
+            continue
+        params = node.get("params") if isinstance(node.get("params"), dict) else {}
+        for item in params.get("classes") or []:
+            if not isinstance(item, dict):
+                continue
+            class_id = str(item.get("id") or item.get("class_id") or "").strip()
+            class_name = str(item.get("name") or item.get("label") or "").strip()
+            if class_id:
+                branch_labels.append((class_id, class_name))
+
+    for index, node in enumerate(typed_nodes):
+        if str(node.get("id") or "").strip():
+            node["id"] = str(node["id"]).strip()
+            continue
+        node_type = _normalize_node_type(str(node.get("type") or "node"))
+        base = _generated_node_id_base(
+            node,
+            node_type=node_type,
+            index=index,
+            branch_labels=branch_labels,
+        )
+        node["id"] = _unique_node_id(base, used_ids)
+        changes.append(f"generated missing node id: {node['id']}")
+
+    aliases = _node_id_aliases(typed_nodes)
+    for node in typed_nodes:
+        params = node.get("params")
+        if isinstance(params, dict):
+            rewritten, count = _rewrite_node_id_placeholders(params, aliases)
+            if count:
+                node["params"] = rewritten
+                changes.append(
+                    f"resolved {count} node id placeholder(s) for {node['id']}"
+                )
+
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        for target_key, aliases_keys in (
+            ("source", ("source_id", "sourceId", "source_node_id")),
+            ("target", ("target_id", "targetId", "target_node_id")),
+        ):
+            if not edge.get(target_key):
+                for alias_key in aliases_keys:
+                    if edge.get(alias_key):
+                        edge[target_key] = edge[alias_key]
+                        break
+            if isinstance(edge.get(target_key), str):
+                rewritten, count = _rewrite_node_id_placeholders(
+                    edge[target_key],
+                    aliases,
+                )
+                if count:
+                    edge[target_key] = rewritten
+                    changes.append(
+                        f"resolved node id placeholder in edge {target_key}"
+                    )
+        for alias_key in (
+            "source_id",
+            "sourceId",
+            "source_node_id",
+            "target_id",
+            "targetId",
+            "target_node_id",
+        ):
+            edge.pop(alias_key, None)
+
+
+def _generated_node_id_base(
+    node: dict[str, Any],
+    *,
+    node_type: str,
+    index: int,
+    branch_labels: list[tuple[str, str]],
+) -> str:
+    title = str(node.get("title") or "")
+    title_lower = title.lower()
+    branch_id = next(
+        (
+            class_id
+            for class_id, class_name in branch_labels
+            if class_id.lower() in title_lower
+            or (class_name and class_name in title)
+        ),
+        "",
+    )
+    suffix = {
+        "question-classifier": "classifier",
+        "parameter-extractor": "extractor",
+        "template-transform": "template",
+        "knowledge-retrieval": "knowledge",
+        "http-request": "http",
+        "variable-aggregator": "merge",
+    }.get(node_type, node_type.replace("-", "_") or "node")
+    if node_type == "start":
+        return "start"
+    if branch_id:
+        return f"{_safe_variable_name(branch_id) or 'branch'}_{suffix}"
+    return suffix if suffix not in {"llm", "answer"} else f"{suffix}_{index + 1}"
+
+
+def _node_id_aliases(nodes: list[dict[str, Any]]) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    nodes_by_type: dict[str, list[str]] = {}
+    for node in nodes:
+        node_id = str(node.get("id") or "")
+        node_type = _normalize_node_type(str(node.get("type") or ""))
+        if not node_id:
+            continue
+        aliases[f"<{node_id}>"] = node_id
+        aliases[f"<{node_id}_id>"] = node_id
+        nodes_by_type.setdefault(node_type, []).append(node_id)
+    type_aliases = {
+        "start": ("start",),
+        "question-classifier": ("classifier", "question_classifier"),
+        "parameter-extractor": ("extractor", "parameter_extractor"),
+    }
+    for node_type, names in type_aliases.items():
+        node_ids = nodes_by_type.get(node_type) or []
+        if len(node_ids) != 1:
+            continue
+        for name in names:
+            aliases[f"<{name}_id>"] = node_ids[0]
+    return aliases
+
+
+def _rewrite_node_id_placeholders(
+    value: Any,
+    aliases: dict[str, str],
+) -> tuple[Any, int]:
+    if isinstance(value, str):
+        count = 0
+        result = value
+        for alias, node_id in sorted(
+            aliases.items(),
+            key=lambda item: len(item[0]),
+            reverse=True,
+        ):
+            occurrences = result.count(alias)
+            if occurrences:
+                result = result.replace(alias, node_id)
+                count += occurrences
+        return result, count
+    if isinstance(value, list):
+        result = []
+        count = 0
+        for item in value:
+            rewritten, item_count = _rewrite_node_id_placeholders(item, aliases)
+            result.append(rewritten)
+            count += item_count
+        return result, count
+    if isinstance(value, dict):
+        result = {}
+        count = 0
+        for key, item in value.items():
+            rewritten, item_count = _rewrite_node_id_placeholders(item, aliases)
+            result[key] = rewritten
+            count += item_count
+        return result, count
+    return value, 0
+
+
 def _normalize_start_params(params: dict[str, Any], *, app_mode: str = "workflow") -> dict[str, Any]:
     raw_variables = params.get("variables") or params.get("inputs") or []
     variables = []
@@ -1012,6 +1205,15 @@ def _normalize_llm_params(
     app_mode: str = "workflow",
 ) -> dict[str, Any]:
     result = dict(params)
+    model = result.get("model") if isinstance(result.get("model"), dict) else {}
+    if model:
+        result.setdefault("model_provider", model.get("provider"))
+        result.setdefault("model_name", model.get("name") or model.get("model"))
+        result.setdefault("model_mode", model.get("mode") or "chat")
+        result.setdefault(
+            "completion_params",
+            model.get("completion_params") or {"temperature": 0.7},
+        )
     raw_prompt = str(params.get("prompt", "") or "")
     raw_system = str(params.get("system_prompt", "") or "")
     raw_user = str(params.get("user_prompt", "") or raw_prompt or "")
@@ -1884,16 +2086,9 @@ def _single_container_terminal_child(
 def _default_node_output_name(node: dict[str, Any]) -> str:
     node_type = str(node.get("type") or "")
     params = node.get("params", {}) if isinstance(node.get("params"), dict) else {}
-    if node_type == "llm":
-        return "text"
-    if node_type == "code":
-        outputs = params.get("outputs") if isinstance(params.get("outputs"), dict) else {}
-        return next(iter(outputs.keys()), "result")
-    if node_type == "parameter-extractor":
-        parameters = params.get("parameters") if isinstance(params.get("parameters"), list) else []
-        first = next((item for item in parameters if isinstance(item, dict) and item.get("name")), None)
-        return str(first.get("name")) if first else "__reason"
-    mapping = {
+    outputs = node_output_types(node_type, params)
+    preferred = {
+        "llm": "text",
         "template-transform": "output",
         "variable-aggregator": "output",
         "document-extractor": "text",
@@ -1901,8 +2096,10 @@ def _default_node_output_name(node: dict[str, Any]) -> str:
         "knowledge-retrieval": "result",
         "http-request": "body",
         "human-input": "selected_action",
-    }
-    return mapping.get(node_type, "output")
+    }.get(node_type)
+    if preferred in outputs:
+        return str(preferred)
+    return next(iter(outputs), "output")
 
 
 def _normalize_loop_break_conditions(value: Any) -> list[dict[str, Any]]:

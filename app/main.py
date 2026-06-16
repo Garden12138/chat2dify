@@ -25,6 +25,7 @@ from app.dify.graph import (
     decompile_dify_graph,
 )
 from app.dify.knowledge_retrieval import apply_dataset_retrieval_settings, knowledge_dataset_ids
+from app.dify.preflight import preflight_plan
 from app.dify.runtime_models import (
     RuntimeModelSelectionError,
     apply_default_runtime_models,
@@ -266,7 +267,10 @@ def _draft_workflow(request: WorkflowRequest, *, task_context: TaskContext | Non
     except DifyClientError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except PlannerError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=502,
+            detail=exc.detail if exc.detail is not None else str(exc),
+        ) from exc
     if task_context is not None:
         task_context.update("compiling", 70, "Compiling the validated plan into Dify DSL.")
     plan = WorkflowPlan.model_validate(
@@ -282,21 +286,27 @@ def _draft_workflow(request: WorkflowRequest, *, task_context: TaskContext | Non
         default_model_name=effective_settings.dify_default_model_name,
         default_dataset_ids=effective_settings.dify_default_dataset_ids,
     )
-    dsl = compiler.compile(plan)
+    preflight = preflight_plan(
+        plan,
+        compiler=compiler,
+        expected_dsl_version=version_info.app_dsl_version,
+    )
+    dsl = preflight.dsl
     issues = [
-        *validate_plan(plan),
-        *validate_dsl(dsl, expected_dsl_version=version_info.app_dsl_version),
+        *preflight.issues,
         *validate_runtime_model_bindings(
             plan,
             model_catalog,
             allowed_models=runtime_models,
         ),
     ]
+    planner_metadata = planner_result.metadata()
+    planner_metadata["preflight"] = preflight.metadata()
     return {
         "raw_plan": planner_result.raw_plan,
         "plan": plan.model_dump(),
         "explanation": explain_plan(plan),
-        "planner": planner_result.metadata(),
+        "planner": planner_metadata,
         "dsl": dsl,
         "validation": {
             "ok": not has_errors(issues),
@@ -777,6 +787,7 @@ def _modify_workflow(
                 raw_plan = plan.model_dump()
                 planner_metadata = _preview_plan_planner_metadata(
                     normalized.changes,
+                    repair_actions=normalized.repair_actions,
                     settings=effective_settings,
                 )
             else:
@@ -888,7 +899,10 @@ def _modify_workflow(
     except DifyConflictError as exc:
         raise HTTPException(status_code=409, detail={"code": "DRAFT_HASH_MISMATCH", "message": str(exc)}) from exc
     except PlannerError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=502,
+            detail=exc.detail if exc.detail is not None else str(exc),
+        ) from exc
     except DifyClientError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -1024,11 +1038,15 @@ def _build_modify_response(
     planner_metadata: dict,
     model_issues: list | None = None,
 ) -> tuple[dict, dict]:
-    dsl = compiler.compile(plan)
+    preflight = preflight_plan(
+        plan,
+        compiler=compiler,
+        expected_dsl_version=version_info.app_dsl_version,
+    )
+    dsl = preflight.dsl
     graph = compile_plan_to_dify_graph(plan, compiler=compiler, base_graph=base_graph)
     issues = [
-        *validate_plan(plan),
-        *validate_dsl(dsl, expected_dsl_version=version_info.app_dsl_version),
+        *preflight.issues,
         *(model_issues or []),
     ]
     changes = diff_plans(before_plan, plan)
@@ -1037,6 +1055,8 @@ def _build_modify_response(
     explanation["changes"] = [change["message"] for change in changes]
     explanation["preserved"] = _preserved_node_summary(before_plan, plan, changes)
 
+    final_planner_metadata = dict(planner_metadata)
+    final_planner_metadata["preflight"] = preflight.metadata()
     response = {
         "app_id": app_id,
         "app_mode": plan.app_mode,
@@ -1048,7 +1068,7 @@ def _build_modify_response(
         "plan": plan.model_dump(),
         "changes": changes,
         "explanation": explanation,
-        "planner": planner_metadata,
+        "planner": final_planner_metadata,
         "guard": guard.to_dict(),
         "validation": {
             "ok": not has_errors(issues),
@@ -1431,16 +1451,20 @@ def _datasets_by_id(dataset_result) -> dict[str, object]:
 def _preview_plan_planner_metadata(
     normalizations: list[str] | None = None,
     *,
+    repair_actions: list[dict] | None = None,
     settings: Settings | None = None,
 ) -> dict:
     metadata = {
         "mode": "preview-plan",
         "attempts": 0,
         "used_fallback": False,
-        "repaired": False,
+        "repaired": bool(normalizations or repair_actions),
         "replanned": False,
         "normalizations": normalizations or [],
         "errors": [],
+        "repair_actions": repair_actions or [],
+        "attempt_diagnostics": [],
+        "preflight": {},
     }
     if settings is not None:
         runtime = settings.planner_runtime()

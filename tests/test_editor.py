@@ -93,6 +93,30 @@ def test_edit_planner_self_repairs_after_validation_failure() -> None:
     assert "PLAN_VARIABLE_UNKNOWN" in planner.last_errors[1]
 
 
+def test_edit_planner_repairs_safe_output_alias_without_replanning() -> None:
+    current = fallback_plan("hello", app_name="Existing")
+    revised = current.model_dump()
+    revised["nodes"][2]["params"]["outputs"][0]["value_selector"] = [
+        "llm",
+        "answer",
+    ]
+    planner = FakeEditPlanner([json.dumps(revised)])
+
+    result = planner.generate(
+        "修复输出引用",
+        current_plan=current,
+        dsl_version="9.9.9",
+    )
+
+    assert result.attempts == 1
+    assert result.plan.nodes[2].params["outputs"][0]["value_selector"] == [
+        "llm",
+        "text",
+    ]
+    assert result.repair_actions[0]["code"] == "SAFE_OUTPUT_ALIAS_REPAIRED"
+    assert result.preflight["roundtrip_ok"] is True
+
+
 def test_chatflow_edit_planner_locks_mode_and_repairs_chatflow_contract() -> None:
     current = fallback_plan(
         "创建汽车售后多轮客服",
@@ -162,11 +186,14 @@ def test_chatflow_edit_planner_preserves_variables_when_field_is_omitted() -> No
     )
 
 
-def test_edit_planner_fails_after_three_bad_attempts() -> None:
+def test_edit_planner_fails_after_two_bad_attempts_with_structured_diagnostics() -> None:
     current = fallback_plan("hello")
     planner = FakeEditPlanner(["{}", "{}", "{}"])
 
     with pytest.raises(PlannerError) as exc:
         planner.generate("bad", current_plan=current, dsl_version="9.9.9")
 
-    assert "after 3 attempts" in str(exc.value)
+    assert "2 semantic attempts" in str(exc.value)
+    assert exc.value.detail["code"] == "PLANNER_PLAN_INVALID"
+    assert exc.value.detail["attempts"] == 2
+    assert len(exc.value.detail["attempt_diagnostics"]) == 2

@@ -9,6 +9,12 @@ from pydantic import ValidationError
 
 from app.list_operator import DIFY_LIST_COMPARISON_OPERATORS
 from app.models import ENTRY_NODE_TYPES, PlanNode, ValidationIssue, WorkflowPlan
+from app.node_outputs import (
+    input_variable_type,
+    known_outputs,
+    node_output_types,
+    plan_output_types,
+)
 
 
 SUPPORTED_NODE_TYPES = {
@@ -2323,23 +2329,7 @@ def _container_child_output_type(
     params: dict[str, Any],
     output_name: str,
 ) -> str | None:
-    if node_type == "llm" and output_name == "text":
-        return "string"
-    if node_type == "template-transform" and output_name == "output":
-        return "string"
-    if node_type == "document-extractor" and output_name == "text":
-        return "string"
-    if node_type == "code":
-        outputs = params.get("outputs")
-        config = outputs.get(output_name) if isinstance(outputs, dict) else None
-        return str(config.get("type")) if isinstance(config, dict) and config.get("type") else None
-    if node_type == "parameter-extractor":
-        for parameter in params.get("parameters") or []:
-            if isinstance(parameter, dict) and str(parameter.get("name")) == output_name:
-                return str(parameter.get("type") or "string")
-    if node_type == "variable-aggregator" and output_name == "output":
-        return str(params.get("output_type") or "string")
-    return None
+    return node_output_types(node_type, params).get(output_name)
 
 
 def _reachable_from(start_node_id: str, adjacency: dict[str, list[str]]) -> set[str]:
@@ -2409,7 +2399,7 @@ def _validate_plan_variable_references(plan: WorkflowPlan) -> list[ValidationIss
                         suggestion="修正变量引用中的节点 ID。",
                     )
                 )
-            elif variable and outputs[node_id] and variable not in outputs[node_id]:
+            elif variable and variable not in outputs[node_id]:
                 issues.append(
                     ValidationIssue(
                         code="PLAN_VARIABLE_UNKNOWN",
@@ -2551,63 +2541,11 @@ def _types_compatible(expected: str, actual: str) -> bool:
 
 
 def _known_output_types(plan: WorkflowPlan) -> dict[tuple[str, str], str]:
-    result: dict[tuple[str, str], str] = {
-        ("sys", "query"): "string",
-        ("sys", "files"): "array[object]",
-    }
-    for variable in plan.conversation_variables:
-        result[("conversation", variable.name)] = variable.value_type
-    for node in plan.nodes:
-        if node.type == "start":
-            for variable in node.params.get("variables") or []:
-                if not isinstance(variable, dict):
-                    continue
-                name = str(variable.get("name") or variable.get("variable") or "")
-                if name:
-                    result[(node.id, name)] = _input_variable_type(
-                        str(variable.get("type") or "paragraph")
-                    )
-            if plan.app_mode == "advanced-chat":
-                result[(node.id, "sys.query")] = "string"
-                result[(node.id, "sys.files")] = "array[object]"
-        elif node.type == "llm":
-            result[(node.id, "text")] = "string"
-        elif node.type == "code":
-            outputs = node.params.get("outputs")
-            for name, config in outputs.items() if isinstance(outputs, dict) else []:
-                if isinstance(config, dict) and config.get("type"):
-                    result[(node.id, str(name))] = str(config["type"])
-        elif node.type == "parameter-extractor":
-            for parameter in node.params.get("parameters") or []:
-                if isinstance(parameter, dict) and parameter.get("name"):
-                    result[(node.id, str(parameter["name"]))] = str(
-                        parameter.get("type") or "string"
-                    )
-        elif node.type == "template-transform":
-            result[(node.id, "output")] = "string"
-        elif node.type == "document-extractor":
-            result[(node.id, "text")] = "string"
-        elif node.type == "variable-aggregator":
-            result[(node.id, "output")] = str(
-                node.params.get("output_type") or "string"
-            )
-        elif node.type == "iteration":
-            result[(node.id, "output")] = str(
-                node.params.get("output_type") or "array[string]"
-            )
-    return result
+    return plan_output_types(plan)
 
 
 def _input_variable_type(value: str) -> str:
-    return {
-        "text": "string",
-        "paragraph": "string",
-        "number": "number",
-        "boolean": "boolean",
-        "json": "object",
-        "file": "object",
-        "file-list": "array[object]",
-    }.get(value, "string")
+    return input_variable_type(value)
 
 
 def _validate_chatflow_system_references(plan: WorkflowPlan) -> list[ValidationIssue]:
@@ -2642,94 +2580,7 @@ def _validate_chatflow_system_references(plan: WorkflowPlan) -> list[ValidationI
 
 
 def _known_outputs(plan: WorkflowPlan) -> dict[str, set[str]]:
-    outputs: dict[str, set[str]] = {
-        "sys": set(SYSTEM_OUTPUTS),
-        "conversation": {
-            variable.name
-            for variable in plan.conversation_variables
-        },
-    }
-    for node in plan.nodes:
-        match node.type:
-            case "start":
-                names = {
-                    str(item.get("name") or item.get("variable"))
-                    for item in node.params.get("variables") or node.params.get("inputs", [])
-                    if item.get("name") or item.get("variable")
-                }
-                if plan.app_mode == "advanced-chat":
-                    outputs[node.id] = {*names, "sys.query", "sys.files"}
-                else:
-                    outputs[node.id] = names or {"query"}
-            case "llm":
-                outputs[node.id] = {"text"}
-            case "code":
-                declared = node.params.get("outputs") or {"result": {"type": "string", "children": None}}
-                outputs[node.id] = set(declared.keys()) if isinstance(declared, dict) else set()
-            case "http-request":
-                outputs[node.id] = {"body", "status_code", "headers"}
-            case "template-transform":
-                outputs[node.id] = {"output"}
-            case "question-classifier":
-                outputs[node.id] = set()
-            case "parameter-extractor":
-                names = {
-                    str(item.get("name"))
-                    for item in node.params.get("parameters", [])
-                    if isinstance(item, dict) and item.get("name")
-                }
-                outputs[node.id] = {*names, "__is_success", "__reason", "__usage"}
-            case "variable-aggregator":
-                outputs[node.id] = {"output"}
-            case "document-extractor":
-                outputs[node.id] = {"text"}
-            case "list-operator":
-                outputs[node.id] = {"result", "first_record", "last_record"}
-            case "knowledge-retrieval":
-                outputs[node.id] = {"result"}
-            case "human-input":
-                names = {
-                    str(item.get("output_variable_name"))
-                    for item in node.params.get("inputs", [])
-                    if isinstance(item, dict) and item.get("output_variable_name")
-                }
-                outputs[node.id] = {*names, "selected_action", "submitted_at", "__action_id", "__action_value", "__rendered_content"}
-            case "iteration":
-                outputs[node.id] = {"output", "item", "index"}
-            case "loop":
-                labels = {
-                    str(item.get("label"))
-                    for item in node.params.get("loop_variables", [])
-                    if isinstance(item, dict) and item.get("label")
-                }
-                outputs[node.id] = {*labels, "loop_round"}
-            case "tool" | "agent":
-                outputs[node.id] = {"text", "files", "json", *_schema_output_names(node.params)}
-            case "datasource" | "datasource-empty":
-                outputs[node.id] = {"datasource_type", "file", *_schema_output_names(node.params)}
-            case "knowledge-index":
-                outputs[node.id] = {"result", "document_ids", *_schema_output_names(node.params)}
-            case "trigger-webhook":
-                outputs[node.id] = _webhook_outputs(node.params)
-            case "trigger-schedule":
-                outputs[node.id] = {"sys.timestamp"}
-            case "trigger-plugin":
-                outputs[node.id] = _external_trigger_outputs(node.params)
-            case "iteration-start" | "loop-start" | "loop-end":
-                outputs[node.id] = set()
-            case "assigner":
-                outputs[node.id] = set()
-            case "end" | "answer" | "if-else":
-                outputs[node.id] = set()
-        children = node.params.get("children") if isinstance(node.params.get("children"), list) else []
-        for child in children:
-            if not isinstance(child, dict) or not child.get("id") or not child.get("type"):
-                continue
-            outputs[str(child["id"])] = _outputs_for_node(
-                str(child["type"]),
-                child.get("params") if isinstance(child.get("params"), dict) else {},
-            )
-    return outputs
+    return known_outputs(plan)
 
 
 def _strings_in_value(value: Any) -> list[str]:
@@ -2747,60 +2598,7 @@ def _strings_in_value(value: Any) -> list[str]:
 
 
 def _outputs_for_node(node_type: str, params: dict[str, Any]) -> set[str]:
-    match node_type:
-        case "llm":
-            return {"text"}
-        case "code":
-            declared = params.get("outputs") or {"result": {"type": "string", "children": None}}
-            return set(declared.keys()) if isinstance(declared, dict) else set()
-        case "http-request":
-            return {"body", "status_code", "headers"}
-        case "template-transform":
-            return {"output"}
-        case "parameter-extractor":
-            names = {
-                str(item.get("name"))
-                for item in params.get("parameters", [])
-                if isinstance(item, dict) and item.get("name")
-            }
-            return {*names, "__is_success", "__reason", "__usage"}
-        case "variable-aggregator":
-            return {"output"}
-        case "document-extractor":
-            return {"text"}
-        case "list-operator":
-            return {"result", "first_record", "last_record"}
-        case "knowledge-retrieval":
-            return {"result"}
-        case "human-input":
-            names = {
-                str(item.get("output_variable_name"))
-                for item in params.get("inputs", [])
-                if isinstance(item, dict) and item.get("output_variable_name")
-            }
-            return {*names, "selected_action", "submitted_at", "__action_id", "__action_value", "__rendered_content"}
-        case "iteration":
-            return {"output", "item", "index"}
-        case "loop":
-            labels = {
-                str(item.get("label"))
-                for item in params.get("loop_variables", [])
-                if isinstance(item, dict) and item.get("label")
-            }
-            return {*labels, "loop_round"}
-        case "tool" | "agent":
-            return {"text", "files", "json", *_schema_output_names(params)}
-        case "datasource" | "datasource-empty":
-            return {"datasource_type", "file", *_schema_output_names(params)}
-        case "knowledge-index":
-            return {"result", "document_ids", *_schema_output_names(params)}
-        case "trigger-webhook":
-            return _webhook_outputs(params)
-        case "trigger-schedule":
-            return {"sys.timestamp"}
-        case "trigger-plugin":
-            return _external_trigger_outputs(params)
-    return set()
+    return set(node_output_types(node_type, params))
 
 
 def _schema_output_names(params: dict[str, Any]) -> set[str]:

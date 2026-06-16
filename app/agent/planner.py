@@ -12,12 +12,14 @@ from app.agent.normalizer import normalize_plan_payload
 from app.compiler.dify import DifyDslCompiler
 from app.config import PlannerRuntime, Settings
 from app.dify.client import DifyModelListItem, DifyModelListResult
+from app.dify.preflight import PreflightResult, preflight_plan
 from app.dify.runtime_models import (
     model_selection_payloads,
     validate_runtime_model_bindings,
 )
 from app.models import ValidationIssue, WorkflowPlan
-from app.validator import has_errors, validate_dsl, validate_plan
+from app.node_outputs import output_catalog
+from app.validator import has_errors
 
 if TYPE_CHECKING:
     from app.tasks import TaskContext
@@ -278,6 +280,15 @@ Start, LLM, Answer, Code, Node, 开始, 大模型, 回复.
 class PlannerError(RuntimeError):
     """Raised when the planner cannot produce a valid plan."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        self.detail = detail
+        super().__init__(message)
+
 
 @dataclass(frozen=True)
 class PlannerResult:
@@ -291,6 +302,9 @@ class PlannerResult:
     model: str = ""
     normalizations: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    repair_actions: list[dict[str, Any]] = field(default_factory=list)
+    attempt_diagnostics: list[dict[str, Any]] = field(default_factory=list)
+    preflight: dict[str, Any] = field(default_factory=dict)
 
     def metadata(self) -> dict[str, Any]:
         return {
@@ -302,6 +316,9 @@ class PlannerResult:
             "model": self.model,
             "normalizations": self.normalizations,
             "errors": self.errors,
+            "repair_actions": self.repair_actions,
+            "attempt_diagnostics": self.attempt_diagnostics,
+            "preflight": self.preflight,
         }
 
 
@@ -349,6 +366,11 @@ class WorkflowPlanner:
                 trigger_selection=trigger_selection,
             )
             plan = WorkflowPlan.model_validate(normalized.payload)
+            preflight = _preflight_plan(
+                plan,
+                settings=self.settings,
+                dsl_version=dsl_version,
+            )
             model_issues = (
                 validate_runtime_model_bindings(
                     plan,
@@ -358,29 +380,55 @@ class WorkflowPlanner:
                 if model_catalog is not None
                 else []
             )
-            if has_errors(model_issues):
-                raise PlannerError(_issues_to_feedback(model_issues))
+            issues = [*preflight.issues, *model_issues]
+            diagnostics = [
+                _attempt_diagnostic(
+                    attempt=0,
+                    repair_actions=normalized.repair_actions,
+                    issues=issues,
+                    preflight=preflight,
+                )
+            ]
+            if has_errors(issues):
+                raise _invalid_plan_error(
+                    runtime=runtime,
+                    attempts=0,
+                    repair_actions=normalized.repair_actions,
+                    attempt_diagnostics=diagnostics,
+                    issues=issues,
+                    preflight=preflight,
+                    raw_plan=fallback_payload,
+                    revised=False,
+                )
             return PlannerResult(
                 plan=plan,
                 raw_plan=fallback_payload,
                 mode="fallback",
                 attempts=0,
                 used_fallback=True,
-                repaired=False,
+                repaired=normalized.changed,
                 provider=runtime.provider,
                 model=runtime.model,
                 normalizations=normalized.changes,
+                repair_actions=normalized.repair_actions,
+                attempt_diagnostics=diagnostics,
+                preflight=preflight.metadata(),
             )
 
         last_error = ""
         errors: list[str] = []
         final_raw_plan: dict[str, Any] | None = None
-        for attempt in range(1, 4):
+        final_raw_content = ""
+        repair_actions: list[dict[str, Any]] = []
+        attempt_diagnostics: list[dict[str, Any]] = []
+        final_issues: list[ValidationIssue] = []
+        final_preflight = _empty_preflight(dsl_version)
+        for attempt in range(1, 3):
             if task_context is not None:
                 task_context.update(
                     "planning",
                     10 + ((attempt - 1) * 12),
-                    f"Generating workflow plan, semantic attempt {attempt}/3.",
+                    f"Generating workflow plan, semantic attempt {attempt}/2.",
                 )
             call_kwargs = {
                 "app_name": app_name,
@@ -397,12 +445,13 @@ class WorkflowPlanner:
             if task_context is not None:
                 call_kwargs["task_context"] = task_context
             content = self._call_llm(message, **call_kwargs)
+            final_raw_content = content
             try:
                 if task_context is not None:
                     task_context.update(
                         "validating-plan",
                         48 + ((attempt - 1) * 8),
-                        f"Normalizing and validating semantic attempt {attempt}/3.",
+                        f"Normalizing and validating semantic attempt {attempt}/2.",
                     )
                 payload = json.loads(_strip_json_fences(content))
                 raw_plan = _extract_plan_payload(payload)
@@ -418,8 +467,18 @@ class WorkflowPlanner:
                     trigger_selection=trigger_selection,
                 )
                 plan = WorkflowPlan.model_validate(normalized.payload)
+                attempt_repairs = [
+                    {**action, "attempt": attempt}
+                    for action in normalized.repair_actions
+                ]
+                repair_actions.extend(attempt_repairs)
+                preflight = _preflight_plan(
+                    plan,
+                    settings=self.settings,
+                    dsl_version=dsl_version,
+                )
                 issues = [
-                    *_validate_compiled_plan(plan, settings=self.settings, dsl_version=dsl_version),
+                    *preflight.issues,
                     *_validate_creation_resource_bindings(
                         plan,
                         dataset_ids=self.settings.dify_default_dataset_ids,
@@ -436,8 +495,25 @@ class WorkflowPlanner:
                         else []
                     ),
                 ]
+                final_issues = issues
+                final_preflight = preflight
+                attempt_diagnostics.append(
+                    _attempt_diagnostic(
+                        attempt=attempt,
+                        repair_actions=attempt_repairs,
+                        issues=issues,
+                        preflight=preflight,
+                    )
+                )
                 if has_errors(issues):
-                    raise ValueError(_issues_to_feedback(issues))
+                    last_error = _planner_retry_feedback(
+                        plan=plan,
+                        issues=issues,
+                        repair_actions=attempt_repairs,
+                        preflight=preflight,
+                    )
+                    errors.append(last_error)
+                    continue
                 return PlannerResult(
                     plan=plan,
                     raw_plan=raw_plan,
@@ -449,12 +525,40 @@ class WorkflowPlanner:
                     model=runtime.model,
                     normalizations=normalized.changes,
                     errors=errors,
+                    repair_actions=repair_actions,
+                    attempt_diagnostics=attempt_diagnostics,
+                    preflight=preflight.metadata(),
                 )
             except Exception as exc:  # noqa: BLE001 - error text is fed back to the LLM once.
+                if isinstance(exc, PlannerError):
+                    raise
                 last_error = str(exc)
                 errors.append(last_error)
-        raw_hint = f" Last raw plan: {json.dumps(final_raw_plan, ensure_ascii=False)[:1000]}" if final_raw_plan else ""
-        raise PlannerError(f"Could not generate a valid WorkflowPlan after 3 attempts: {last_error}.{raw_hint}")
+                issue = ValidationIssue(
+                    code="PLANNER_RESPONSE_INVALID",
+                    message=last_error,
+                    suggestion="Return one complete WorkflowPlan JSON object.",
+                )
+                final_issues = [issue]
+                final_preflight = _empty_preflight(dsl_version)
+                attempt_diagnostics.append(
+                    _attempt_diagnostic(
+                        attempt=attempt,
+                        repair_actions=[],
+                        issues=final_issues,
+                        preflight=final_preflight,
+                    )
+                )
+        raise _invalid_plan_error(
+            runtime=runtime,
+            attempts=2,
+            repair_actions=repair_actions,
+            attempt_diagnostics=attempt_diagnostics,
+            issues=final_issues,
+            preflight=final_preflight,
+            raw_plan=final_raw_plan if final_raw_plan is not None else final_raw_content,
+            revised=False,
+        )
 
     def _call_llm(
         self,
@@ -552,6 +656,8 @@ def _post_chat_completion(
             with httpx.Client(timeout=timeout) as client:
                 if payload.get("stream"):
                     with client.stream("POST", url, json=payload, headers=headers) as response:
+                        if getattr(response, "is_error", False):
+                            response.read()
                         response.raise_for_status()
                         return _read_streamed_chat_completion(response, task_context=task_context)
                 response = client.post(url, json=payload, headers=headers)
@@ -563,7 +669,10 @@ def _post_chat_completion(
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code not in {429, 502, 503, 504}:
                 raise PlannerError(
-                    f"{error_prefix} request failed: {exc.response.status_code} {exc.response.text}"
+                    (
+                        f"{error_prefix} request failed: "
+                        f"{exc.response.status_code} {_response_error_text(exc.response)}"
+                    )
                 ) from exc
             last_error = exc
         except httpx.RequestError as exc:
@@ -580,12 +689,22 @@ def _post_chat_completion(
     if isinstance(last_error, httpx.ReadTimeout):
         message = f"timed out after {runtime.timeout_seconds:g} seconds while waiting for a response"
     elif isinstance(last_error, httpx.HTTPStatusError):
-        message = f"{last_error.response.status_code} {last_error.response.text}"
+        message = (
+            f"{last_error.response.status_code} "
+            f"{_response_error_text(last_error.response)}"
+        )
     else:
         message = str(last_error)
     raise PlannerError(
         f"{error_prefix} request failed after {total_attempts} network attempts: {message}"
     ) from last_error
+
+
+def _response_error_text(response: httpx.Response) -> str:
+    try:
+        return response.text
+    except (httpx.ResponseNotRead, httpx.StreamClosed):
+        return response.reason_phrase or "HTTP error"
 
 
 def _read_streamed_chat_completion(
@@ -770,17 +889,30 @@ def _prepare_fallback_for_trigger(
 
 
 def _validate_compiled_plan(plan: WorkflowPlan, *, settings: Settings, dsl_version: str) -> list[ValidationIssue]:
+    return _preflight_plan(
+        plan,
+        settings=settings,
+        dsl_version=dsl_version,
+    ).issues
+
+
+def _preflight_plan(
+    plan: WorkflowPlan,
+    *,
+    settings: Settings,
+    dsl_version: str,
+) -> PreflightResult:
     compiler = DifyDslCompiler(
         dsl_version=dsl_version,
         default_model_provider=settings.dify_default_model_provider,
         default_model_name=settings.dify_default_model_name,
         default_dataset_ids=settings.dify_default_dataset_ids,
     )
-    dsl = compiler.compile(plan)
-    return [
-        *validate_plan(plan),
-        *validate_dsl(dsl, expected_dsl_version=dsl_version),
-    ]
+    return preflight_plan(
+        plan,
+        compiler=compiler,
+        expected_dsl_version=dsl_version,
+    )
 
 
 def _validate_creation_resource_bindings(
@@ -1152,6 +1284,99 @@ def _cyclic_creation_nodes(adjacency: dict[str, list[str]]) -> list[str]:
 
 def _issues_to_feedback(issues: list[ValidationIssue]) -> str:
     return json.dumps([issue.model_dump() for issue in issues], ensure_ascii=False)
+
+
+def _planner_retry_feedback(
+    *,
+    plan: WorkflowPlan,
+    issues: list[ValidationIssue],
+    repair_actions: list[dict[str, Any]],
+    preflight: PreflightResult,
+) -> str:
+    feedback = {
+        "code": "PLANNER_PLAN_INVALID",
+        "validation_issues": [
+            issue.model_dump()
+            for issue in issues
+            if issue.severity == "error"
+        ][:40],
+        "actual_node_outputs": output_catalog(plan),
+        "branch_constraints": [
+            "Question Classifier routes only through edge source_handle values.",
+            "Question Classifier has no classification, class_name, or text output.",
+            "Use only outputs listed in actual_node_outputs.",
+            "Do not invent node ids, output names, or implicit branch convergence.",
+        ],
+        "repair_actions": repair_actions,
+        "preflight": preflight.metadata(),
+    }
+    return json.dumps(feedback, ensure_ascii=False, separators=(",", ":"))[:12000]
+
+
+def _attempt_diagnostic(
+    *,
+    attempt: int,
+    repair_actions: list[dict[str, Any]],
+    issues: list[ValidationIssue],
+    preflight: PreflightResult,
+) -> dict[str, Any]:
+    return {
+        "attempt": attempt,
+        "repair_actions": repair_actions,
+        "validation_issues": [issue.model_dump() for issue in issues],
+        "preflight": preflight.metadata(),
+    }
+
+
+def _empty_preflight(dsl_version: str) -> PreflightResult:
+    return PreflightResult(
+        ok=False,
+        dsl="",
+        dsl_version=dsl_version,
+        roundtrip_ok=False,
+        issues=[],
+    )
+
+
+def _invalid_plan_error(
+    *,
+    runtime: PlannerRuntime,
+    attempts: int,
+    repair_actions: list[dict[str, Any]],
+    attempt_diagnostics: list[dict[str, Any]],
+    issues: list[ValidationIssue],
+    preflight: PreflightResult,
+    raw_plan: Any,
+    revised: bool,
+) -> PlannerError:
+    label = "revised WorkflowPlan" if revised else "WorkflowPlan"
+    detail = {
+        "code": "PLANNER_PLAN_INVALID",
+        "message": (
+            f"Planner could not produce a valid {label} within "
+            f"{attempts} semantic attempts."
+        ),
+        "provider": runtime.provider,
+        "model": runtime.model,
+        "attempts": attempts,
+        "repair_actions": repair_actions,
+        "attempt_diagnostics": attempt_diagnostics,
+        "validation_issues": [issue.model_dump() for issue in issues],
+        "preflight": preflight.metadata(),
+        "raw_plan_excerpt": _raw_plan_excerpt(raw_plan),
+    }
+    return PlannerError(detail["message"], detail=detail)
+
+
+def _raw_plan_excerpt(raw_plan: Any, *, limit: int = 2000) -> str:
+    if isinstance(raw_plan, str):
+        value = raw_plan
+    else:
+        try:
+            value = json.dumps(raw_plan, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError):
+            value = str(raw_plan)
+    return value[:limit]
 
 
 def _extract_plan_payload(payload: dict[str, Any]) -> dict[str, Any]:
