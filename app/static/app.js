@@ -2196,7 +2196,10 @@ function loadAppMode() {
 }
 
 function normalizedAppMode(value) {
-  return value === "advanced-chat" ? "advanced-chat" : "workflow";
+  if (value === "advanced-chat" || value === "agent-chat") {
+    return value;
+  }
+  return "workflow";
 }
 
 function setAppMode(value) {
@@ -2210,16 +2213,18 @@ function setAppMode(value) {
   els.createAppMode.value = appMode;
   els.runAppMode.value = appMode;
   const isChatflow = appMode === "advanced-chat";
-  els.triggerPanel.classList.toggle("is-hidden", isChatflow);
-  els.modifyPanel.classList.remove("is-hidden");
-  els.publishPanel.classList.remove("is-hidden");
-  els.refreshWorkflowTriggers.classList.toggle("is-hidden", isChatflow);
-  els.workflowTriggerList.classList.toggle("is-hidden", isChatflow);
-  els.runWorkflowFields.classList.toggle("is-hidden", isChatflow);
-  els.runChatflowFields.classList.toggle("is-hidden", !isChatflow);
-  els.runInputs.required = !isChatflow;
-  els.runChatflowQuery.required = isChatflow;
-  els.createSubmit.textContent = isChatflow ? "Create chatflow" : "Create workflow";
+  const isAgent = appMode === "agent-chat";
+  const isConversational = isChatflow || isAgent;
+  els.triggerPanel.classList.toggle("is-hidden", isConversational);
+  els.modifyPanel.classList.toggle("is-hidden", isAgent);
+  els.publishPanel.classList.toggle("is-hidden", isAgent);
+  els.refreshWorkflowTriggers.classList.toggle("is-hidden", isConversational);
+  els.workflowTriggerList.classList.toggle("is-hidden", isConversational);
+  els.runWorkflowFields.classList.toggle("is-hidden", isConversational);
+  els.runChatflowFields.classList.toggle("is-hidden", !isConversational);
+  els.runInputs.required = !isConversational;
+  els.runChatflowQuery.required = isConversational;
+  els.createSubmit.textContent = isAgent ? "Create agent" : isChatflow ? "Create chatflow" : "Create workflow";
   els.modifyTitle.textContent = isChatflow ? "Modify Chatflow Draft" : "Modify Workflow Draft";
   els.publishTitle.textContent = isChatflow ? "Publish Chatflow" : "Publish & Triggers";
   els.publishSubmit.textContent = isChatflow ? "Publish chatflow" : "Publish workflow";
@@ -2241,7 +2246,9 @@ async function handleCreate() {
       trigger_selection: appMode === "workflow" ? currentTriggerSelection() : null,
       planner: currentPlannerSelection(),
     };
-    ensureAgentSelectionReady(payload.message, payload.agent_selections);
+    if (appMode !== "agent-chat") {
+      ensureAgentSelectionReady(payload.message, payload.agent_selections);
+    }
     await submitBackgroundTask("create", "/api/tasks/workflows/create", payload, {
       kind: "create",
       payload,
@@ -2413,10 +2420,10 @@ function triggerSelectionFromPlan(plan) {
 async function handleRun() {
   try {
     const appMode = normalizedAppMode(els.runAppMode.value);
-    if (appMode === "advanced-chat") {
+    if (appMode === "advanced-chat" || appMode === "agent-chat") {
       const query = els.runChatflowQuery.value.trim();
       if (!query) {
-        throw new Error("Chatflow Query is required.");
+        throw new Error(`${appMode === "agent-chat" ? "Agent" : "Chatflow"} Query is required.`);
       }
       const conversationId = els.runConversationId.value.trim();
       const payload = {
@@ -2429,8 +2436,8 @@ async function handleRun() {
           : null,
         timeout_seconds: Number(valueOf("#run-timeout") || 120),
       };
-      await submitBackgroundTask("run", "/api/tasks/chatflows/run/draft", payload, {
-        kind: "chatflow-run",
+      await submitBackgroundTask("run", appMode === "agent-chat" ? "/api/tasks/agents/run/draft" : "/api/tasks/chatflows/run/draft", payload, {
+        kind: appMode === "agent-chat" ? "agent-run" : "chatflow-run",
         payload,
       });
       return;
@@ -2837,6 +2844,27 @@ function completeBackgroundTask(metadata, data) {
     renderResult({ ...data, app_mode: "advanced-chat" }, "outputs");
     return;
   }
+  if (metadata.kind === "agent-run") {
+    state.chatflow.conversationId = data.conversation_id || payload.conversation_id || "";
+    state.chatflow.parentMessageId = data.message_id || "";
+    els.runConversationId.value = state.chatflow.conversationId;
+    setAppMode("agent-chat");
+    syncAppContext({ ...data, app_mode: "agent-chat" }, payload.app_id);
+    rememberApp(
+      { ...data, app_mode: "agent-chat" },
+      {
+        operation: "agent draft",
+        request: payload.query,
+        appId: payload.app_id,
+        lastRunStatus: data.status,
+        conversationId: state.chatflow.conversationId,
+        messageId: state.chatflow.parentMessageId,
+      }
+    );
+    setPanelStatus(els.runStatus, data.status || "Done", runStatusTone(data));
+    renderResult({ ...data, app_mode: "agent-chat" }, "outputs");
+    return;
+  }
   if (metadata.kind === "publish") {
     syncAppContext(data, payload.app_id);
     rememberApp(data, {
@@ -3053,6 +3081,7 @@ function backgroundTaskPath(operation) {
     "workflow.modify.apply": "/api/tasks/workflows/modify/apply",
     "workflow.run.draft": "/api/tasks/workflows/run/draft",
     "chatflow.run.draft": "/api/tasks/chatflows/run/draft",
+    "agent.run.draft": "/api/tasks/agents/run/draft",
     "workflow.publish": "/api/tasks/workflows/publish",
   }[operation] || "";
 }
@@ -3064,6 +3093,7 @@ function backgroundTaskKind(operation) {
     "workflow.modify.apply": "modify-apply",
     "workflow.run.draft": "run",
     "chatflow.run.draft": "chatflow-run",
+    "agent.run.draft": "agent-run",
     "workflow.publish": "publish",
   }[operation] || "";
 }
@@ -3318,7 +3348,9 @@ function renderPlanPanel(data) {
   }
   if (data.plan) {
     sections.push(planSummary(data.plan));
-    sections.push(planNodeOverview(data.before_plan ? "After plan nodes" : "Current draft nodes", data.plan));
+    if (data.plan.app_mode !== "agent-chat") {
+      sections.push(planNodeOverview(data.before_plan ? "After plan nodes" : "Current draft nodes", data.plan));
+    }
     sections.push(jsonBlock("Plan IR", data.plan));
   }
   if (data.before_plan) {
@@ -3749,6 +3781,15 @@ function jsonBlock(title, value) {
 }
 
 function planSummary(plan) {
+  if (plan?.app_mode === "agent-chat") {
+    return keyValueGroup("Agent summary", {
+      name: plan.name || "Untitled",
+      mode: "agent-chat",
+      strategy: plan.agent_mode?.strategy || "react",
+      tools: Array.isArray(plan.agent_mode?.tools) ? plan.agent_mode.tools.length : 0,
+      model: [plan.model?.provider, plan.model?.name].filter(Boolean).join(" / ") || "default",
+    });
+  }
   const nodes = Array.isArray(plan.nodes) ? plan.nodes : [];
   const edges = Array.isArray(plan.edges) ? plan.edges : [];
   return keyValueGroup("Plan summary", {
@@ -4355,7 +4396,7 @@ function renderHistory() {
 
 function historyMeta(item) {
   const parts = [
-    item.app_mode === "advanced-chat" ? "chatflow" : "workflow",
+    appModeLabel(item.app_mode).toLowerCase(),
     item.last_operation,
     item.last_run_status,
     item.new_hash || item.base_hash ? "hash saved" : "",
@@ -4364,6 +4405,16 @@ function historyMeta(item) {
     parts.push(new Date(item.updated_at).toLocaleString());
   }
   return parts.join(" · ");
+}
+
+function appModeLabel(mode) {
+  if (mode === "advanced-chat") {
+    return "Chatflow";
+  }
+  if (mode === "agent-chat") {
+    return "Agent";
+  }
+  return "Workflow";
 }
 
 function selectHistoryItem(index) {
@@ -4384,7 +4435,7 @@ function selectHistoryItem(index) {
   if (item.app_name) {
     els.createAppName.value = item.app_name;
   }
-  if (item.app_mode === "advanced-chat") {
+  if (item.app_mode === "advanced-chat" || item.app_mode === "agent-chat") {
     state.chatflow.conversationId = item.conversation_id || "";
     state.chatflow.parentMessageId = item.message_id || "";
     els.runConversationId.value = state.chatflow.conversationId;

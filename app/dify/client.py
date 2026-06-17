@@ -1050,6 +1050,51 @@ class DifyClient:
             self.login()
         raise DifyClientError("Dify Chatflow draft run authorization failed after login.")
 
+    def run_agent_chat(
+        self,
+        app_id: str,
+        *,
+        query: str,
+        model_config: dict[str, Any],
+        inputs: dict[str, Any] | None = None,
+        files: list[dict[str, Any]] | None = None,
+        conversation_id: str | None = None,
+        parent_message_id: str | None = None,
+        timeout_seconds: float = 120,
+        cancellation_check: Callable[[], None] | None = None,
+        event_callback: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
+    ) -> DifyChatflowRunResult:
+        if cancellation_check is not None:
+            cancellation_check()
+        self._ensure_logged_in()
+        payload: dict[str, Any] = {
+            "query": query,
+            "inputs": inputs or {},
+            "model_config": model_config,
+            "response_mode": "streaming",
+            "retriever_from": "dev",
+        }
+        if files is not None:
+            payload["files"] = files
+        if conversation_id:
+            payload["conversation_id"] = conversation_id
+        if parent_message_id:
+            payload["parent_message_id"] = parent_message_id
+        for auth_attempt in range(3):
+            result = self._run_agent_chat_once(
+                app_id,
+                payload=payload,
+                timeout_seconds=timeout_seconds,
+                cancellation_check=cancellation_check,
+                event_callback=event_callback,
+            )
+            if result is not None:
+                return result
+            if auth_attempt == 0 and self.refresh_token():
+                continue
+            self.login()
+        raise DifyClientError("Dify Agent chat run authorization failed after login.")
+
     def _ensure_logged_in(self) -> None:
         if not self.csrf_token:
             self.login()
@@ -1151,6 +1196,102 @@ class DifyClient:
             )
         except httpx.RequestError as exc:
             raise DifyClientError(f"Dify request failed: {exc}") from exc
+
+    def _run_agent_chat_once(
+        self,
+        app_id: str,
+        *,
+        payload: dict[str, Any],
+        timeout_seconds: float,
+        cancellation_check: Callable[[], None] | None = None,
+        event_callback: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
+    ) -> DifyChatflowRunResult | None:
+        path = f"/apps/{app_id}/chat-messages"
+        try:
+            with self._client.stream(
+                "POST",
+                path,
+                json=payload,
+                headers=self._csrf_headers(),
+                timeout=timeout_seconds,
+            ) as response:
+                if response.status_code == 401:
+                    response.read()
+                    return None
+                if response.status_code >= 400:
+                    self._raise_for_stream_response(response)
+                return self._agent_chat_result_from_stream(
+                    app_id=app_id,
+                    lines=response.iter_lines(),
+                    timeout_seconds=timeout_seconds,
+                    cancellation_check=cancellation_check,
+                    event_callback=event_callback,
+                )
+        except (DifyRunTimeoutError, httpx.TimeoutException):
+            return _timeout_agent_result(
+                app_id=app_id,
+                workflow_url=self.settings.app_url(app_id, "agent-chat"),
+            )
+        except httpx.RequestError as exc:
+            raise DifyClientError(f"Dify request failed: {exc}") from exc
+
+    def _agent_chat_result_from_stream(
+        self,
+        *,
+        app_id: str,
+        lines: Any,
+        timeout_seconds: float,
+        cancellation_check: Callable[[], None] | None = None,
+        event_callback: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
+    ) -> DifyChatflowRunResult:
+        events: list[dict[str, Any]] = []
+        parse_errors: list[SseParseIssue] = []
+        answer_parts: list[str] = []
+        final: dict[str, Any] | None = None
+        deadline = time.monotonic() + timeout_seconds
+        try:
+            for parsed in iter_sse_events(_lines_until_deadline(lines, deadline)):
+                if cancellation_check is not None:
+                    cancellation_check()
+                if isinstance(parsed, SseParseIssue):
+                    parse_errors.append(parsed)
+                    continue
+                events.append(parsed)
+                if parsed.get("event") in {"message", "agent_message"}:
+                    chunk = parsed.get("answer")
+                    if isinstance(chunk, str):
+                        answer_parts.append(chunk)
+                if event_callback is not None:
+                    event_callback(parsed, summarize_events(events, parse_errors))
+                final = _agent_chat_terminal_event(events)
+                if final is not None:
+                    break
+        except (DifyRunTimeoutError, httpx.TimeoutException):
+            return _timeout_agent_result(
+                app_id=app_id,
+                workflow_url=self.settings.app_url(app_id, "agent-chat"),
+                answer="".join(answer_parts),
+                events=events,
+                parse_errors=parse_errors,
+            )
+        if final is None:
+            return DifyChatflowRunResult(
+                ok=False,
+                status="error",
+                app_id=app_id,
+                workflow_url=self.settings.app_url(app_id, "agent-chat"),
+                answer="".join(answer_parts),
+                error="Dify Agent chat stream ended before a terminal event.",
+                events_summary=summarize_events(events, parse_errors),
+            )
+        return _agent_chat_result_from_terminal_event(
+            app_id=app_id,
+            workflow_url=self.settings.app_url(app_id, "agent-chat"),
+            answer="".join(answer_parts),
+            events=events,
+            parse_errors=parse_errors,
+            final_event=final,
+        )
 
     def _chatflow_run_result_from_stream(
         self,
@@ -1292,7 +1433,7 @@ class DifyClient:
         workflow_url = None
         app_id = payload.get("app_id")
         if app_id:
-            workflow_url = self.settings.workflow_url(str(app_id))
+            workflow_url = self.settings.app_url(str(app_id), _string_or_none(payload.get("app_mode")))
 
         if response.status_code >= 400 and payload.get("status") != "failed":
             self._raise_for_response(response)
@@ -1670,6 +1811,49 @@ def _chatflow_result_from_terminal_event(
     )
 
 
+def _agent_chat_terminal_event(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for event in reversed(events):
+        if event.get("event") in {"message_end", "error"}:
+            return event
+    return None
+
+
+def _agent_chat_result_from_terminal_event(
+    *,
+    app_id: str,
+    workflow_url: str,
+    answer: str,
+    events: list[dict[str, Any]],
+    parse_errors: list[SseParseIssue],
+    final_event: dict[str, Any],
+) -> DifyChatflowRunResult:
+    event_type = str(final_event.get("event", "error"))
+    metadata = final_event.get("metadata") if isinstance(final_event.get("metadata"), dict) else {}
+    usage = metadata.get("usage") if isinstance(metadata.get("usage"), dict) else {}
+
+    def event_value(name: str) -> Any:
+        for event in reversed(events):
+            if event.get(name) not in (None, ""):
+                return event.get(name)
+        return final_event.get(name)
+
+    return DifyChatflowRunResult(
+        ok=event_type == "message_end",
+        status="succeeded" if event_type == "message_end" else "error",
+        app_id=app_id,
+        workflow_url=workflow_url,
+        answer=answer,
+        conversation_id=_string_or_none(event_value("conversation_id")),
+        message_id=_string_or_none(final_event.get("id") or event_value("message_id")),
+        task_id=_string_or_none(final_event.get("task_id") or event_value("task_id")),
+        error=_string_or_none(final_event.get("message") or final_event.get("error")),
+        elapsed_time=_float_or_none(usage.get("latency")),
+        total_tokens=_int_or_none(usage.get("total_tokens")),
+        events_summary=summarize_events(events, parse_errors),
+        final_event=final_event,
+    )
+
+
 def _timeout_run_result(
     *,
     app_id: str,
@@ -1702,6 +1886,25 @@ def _timeout_chatflow_result(
         workflow_url=workflow_url,
         answer=answer,
         error="Dify Chatflow draft run timed out before a terminal event.",
+        events_summary=summarize_events(events or [], parse_errors or []),
+    )
+
+
+def _timeout_agent_result(
+    *,
+    app_id: str,
+    workflow_url: str,
+    answer: str = "",
+    events: list[dict[str, Any]] | None = None,
+    parse_errors: list[SseParseIssue] | None = None,
+) -> DifyChatflowRunResult:
+    return DifyChatflowRunResult(
+        ok=False,
+        status="timeout",
+        app_id=app_id,
+        workflow_url=workflow_url,
+        answer=answer,
+        error="Dify Agent chat run timed out before a terminal event.",
         events_summary=summarize_events(events or [], parse_errors or []),
     )
 

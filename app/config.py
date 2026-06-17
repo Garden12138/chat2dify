@@ -125,6 +125,11 @@ class Settings:
     def workflow_url(self, app_id: str) -> str:
         return f"{self.dify_console_web_base}/app/{app_id}/workflow"
 
+    def app_url(self, app_id: str, mode: str | None = None) -> str:
+        if mode == "agent-chat":
+            return f"{self.dify_console_web_base}/app/{app_id}/configuration"
+        return self.workflow_url(app_id)
+
     def planner_runtime(self) -> PlannerRuntime:
         provider = self.planner_default_provider
         if provider == "openai":

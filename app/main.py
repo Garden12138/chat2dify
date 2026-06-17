@@ -15,6 +15,11 @@ from app.agent.explainer import explain_plan
 from app.agent.guard import guard_plan_change
 from app.agent.normalizer import normalize_plan_payload
 from app.agent.planner import PlannerError, WorkflowPlanner
+from app.compiler.agent import (
+    agent_app_plan_payload,
+    compile_agent_app_dsl,
+    validate_agent_app_dsl,
+)
 from app.compiler.dify import DifyDslCompiler
 from app.config import ConfigurationError, Settings, load_settings
 from app.dify.client import DifyAppDetail, DifyClient, DifyClientError, DifyConflictError
@@ -37,6 +42,7 @@ from app.dify.runtime_models import (
 )
 from app.dify.version import read_dify_version_info
 from app.models import (
+    AgentRunDraftRequest,
     ChatflowRunDraftRequest,
     WorkflowModifyRequest,
     WorkflowPlan,
@@ -221,6 +227,8 @@ def _draft_workflow(request: WorkflowRequest, *, task_context: TaskContext | Non
     if task_context is not None:
         task_context.update("loading-config", 5, "Loading Dify and planner configuration.")
     settings = load_settings()
+    if request.app_mode == "agent-chat":
+        return _draft_agent_app(request, settings=settings, task_context=task_context)
     effective_settings = _settings_with_request_dataset_ids(settings, request.dataset_ids)
     effective_settings = _settings_with_request_planner(effective_settings, request.planner)
     version_info = read_dify_version_info(settings.dify_source_path)
@@ -316,6 +324,77 @@ def _draft_workflow(request: WorkflowRequest, *, task_context: TaskContext | Non
     }
 
 
+def _draft_agent_app(
+    request: WorkflowRequest,
+    *,
+    settings: Settings,
+    task_context: TaskContext | None = None,
+) -> dict:
+    if task_context is not None:
+        task_context.update("loading-models", 20, "Loading Dify model configuration for Agent app.")
+    try:
+        model_catalog, runtime_models = _runtime_model_context(
+            settings,
+            request.model_selections,
+        )
+    except RuntimeModelSelectionError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail) from exc
+    except DifyClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    effective_settings = _settings_with_primary_runtime_model(settings, runtime_models)
+    version_info = read_dify_version_info(settings.dify_source_path)
+    tool_payloads = _tool_selection_payloads(request.tool_selections)
+    if task_context is not None:
+        task_context.update("compiling", 70, "Compiling Agent app configuration into Dify DSL.")
+    dsl = compile_agent_app_dsl(
+        message=request.message,
+        app_name=request.app_name,
+        dsl_version=version_info.app_dsl_version,
+        settings=effective_settings,
+        model_selections=runtime_models,
+        tool_selections=tool_payloads,
+    )
+    issues = validate_agent_app_dsl(dsl, expected_dsl_version=version_info.app_dsl_version)
+    plan = agent_app_plan_payload(
+        message=request.message,
+        app_name=request.app_name,
+        settings=effective_settings,
+        model_selections=runtime_models,
+        tool_selections=tool_payloads,
+    )
+    planner_runtime = effective_settings.planner_runtime()
+    return {
+        "raw_plan": plan,
+        "plan": plan,
+        "explanation": {
+            "summary": "Creates a Dify Agent app using the basic agent-chat app type.",
+            "nodes": [],
+            "mode": "agent-chat",
+        },
+        "planner": {
+            "mode": "agent-template",
+            "attempts": 0,
+            "used_fallback": True,
+            "repaired": False,
+            "provider": planner_runtime.provider,
+            "model": planner_runtime.model,
+            "normalizations": [],
+            "errors": [],
+            "repair_actions": [],
+            "attempt_diagnostics": [],
+            "preflight": {},
+            "model_catalog": {"count": model_catalog.count},
+        },
+        "dsl": dsl,
+        "validation": {
+            "ok": not issues,
+            "issues": issues,
+        },
+        "dify": asdict(version_info),
+    }
+
+
 @app.post("/api/workflows/create")
 def create_workflow(request: WorkflowRequest) -> dict:
     return _create_workflow(request)
@@ -333,7 +412,7 @@ def _create_workflow(request: WorkflowRequest, *, task_context: TaskContext | No
         with DifyClient(settings) as client:
             result = client.import_yaml(draft["dsl"], name=request.app_name or draft["plan"]["name"])
             imported_draft = None
-            if result.app_id:
+            if result.app_id and request.app_mode != "agent-chat":
                 try:
                     imported_draft = client.get_draft_workflow(result.app_id)
                 except (AttributeError, DifyClientError):
@@ -380,6 +459,16 @@ def _publish_workflow(
         task_context.update("loading-draft", 15, "Loading and validating the current Dify draft.")
     try:
         with DifyClient(settings) as client:
+            app_detail = _load_app_detail(client, app_id)
+            app_mode = _app_mode(app_detail)
+            if app_mode == "agent-chat":
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "AGENT_PUBLISH_NOT_SUPPORTED",
+                        "message": "agent-chat apps are configured apps and do not publish workflow drafts in v1.",
+                    },
+                )
             draft = client.get_draft_workflow(app_id)
             if request.expected_hash and request.expected_hash != draft.hash:
                 raise HTTPException(
@@ -391,7 +480,6 @@ def _publish_workflow(
                         "current_hash": draft.hash,
                     },
                 )
-            app_detail = _load_app_detail(client, app_id)
             app_mode = _app_mode(app_detail, draft.graph)
             plan = decompile_dify_graph(
                 draft.graph,
@@ -517,6 +605,14 @@ def get_workflow_draft(app_id: str) -> dict:
     try:
         with DifyClient(settings) as client:
             app_detail = _load_app_detail(client, app_id)
+            if _app_mode(app_detail) == "agent-chat":
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "AGENT_DRAFT_NOT_SUPPORTED",
+                        "message": "agent-chat apps do not have a workflow draft graph in v1.",
+                    },
+                )
             draft = client.get_draft_workflow(app_id)
             model_catalog = load_runtime_model_catalog(client, settings)
 
@@ -597,6 +693,14 @@ def _run_draft_workflow(
                         detail={
                             "code": "CHATFLOW_USE_CHAT_RUN_API",
                             "message": "Use /api/chatflows/run/draft for advanced-chat apps.",
+                        },
+                    )
+                if app_detail and app_detail.mode == "agent-chat":
+                    raise HTTPException(
+                        status_code=422,
+                        detail={
+                            "code": "AGENT_USE_AGENT_RUN_API",
+                            "message": "Use /api/agents/run/draft for agent-chat apps.",
                         },
                     )
                 draft = client.get_draft_workflow(request.app_id)
@@ -700,6 +804,66 @@ def _run_draft_chatflow(
     return asdict(result)
 
 
+@app.post("/api/agents/run/draft")
+def run_draft_agent(request: AgentRunDraftRequest) -> dict:
+    return _run_draft_agent(request)
+
+
+def _run_draft_agent(
+    request: AgentRunDraftRequest,
+    *,
+    task_context: TaskContext | None = None,
+) -> dict:
+    settings = load_settings()
+    if task_context is not None:
+        task_context.update("connecting", None, "Connecting to the Dify Agent chat stream.")
+    try:
+        with DifyClient(settings) as client:
+            app_detail = _load_app_detail(client, request.app_id)
+            if app_detail and app_detail.mode != "agent-chat":
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "APP_IS_NOT_AGENT",
+                        "message": "The selected app is not an agent-chat app.",
+                        "app_mode": app_detail.mode,
+                    },
+                )
+            model_config = _agent_model_config(app_detail)
+            if model_config is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "AGENT_MODEL_CONFIG_MISSING",
+                        "message": "Dify app detail did not include model_config for this Agent app.",
+                    },
+                )
+            run_kwargs = {
+                "query": request.query,
+                "inputs": request.inputs,
+                "files": request.files,
+                "conversation_id": request.conversation_id,
+                "parent_message_id": request.parent_message_id,
+                "model_config": model_config,
+                "timeout_seconds": request.timeout_seconds,
+            }
+            if task_context is not None:
+                run_kwargs["cancellation_check"] = task_context.raise_if_cancelled
+                run_kwargs["event_callback"] = lambda event, summary: _update_agent_run_task(
+                    task_context,
+                    event,
+                    summary,
+                )
+            result = client.run_agent_chat(request.app_id, **run_kwargs)
+    except HTTPException:
+        raise
+    except DifyClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    payload = asdict(result)
+    payload["app_mode"] = "agent-chat"
+    return payload
+
+
 def _modify_workflow(
     request: WorkflowModifyRequest,
     *,
@@ -743,6 +907,14 @@ def _modify_workflow(
             )
             app_detail = _load_app_detail(client, request.app_id)
             app_mode = _app_mode(app_detail)
+            if app_mode == "agent-chat":
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "AGENT_MODIFY_NOT_SUPPORTED",
+                        "message": "agent-chat apps do not have a workflow draft graph to modify in v1.",
+                    },
+                )
             _ensure_chatflow_trigger_selection(app_mode, request.trigger_selection)
             draft = client.get_draft_workflow(request.app_id)
             app_mode = _app_mode(app_detail, draft.graph)
@@ -957,6 +1129,16 @@ def run_draft_chatflow_task(request: ChatflowRunDraftRequest, http_request: Requ
     )
 
 
+@app.post("/api/tasks/agents/run/draft", status_code=status.HTTP_202_ACCEPTED)
+def run_draft_agent_task(request: AgentRunDraftRequest, http_request: Request) -> dict:
+    return _submit_task(
+        http_request,
+        "agent.run.draft",
+        request.model_dump(mode="json"),
+        lambda context: _run_draft_agent(request, task_context=context),
+    )
+
+
 @app.post("/api/tasks/workflows/publish", status_code=status.HTTP_202_ACCEPTED)
 def publish_workflow_task(request: WorkflowPublishTaskRequest, http_request: Request) -> dict:
     publish_request = WorkflowPublishRequest.model_validate(request.model_dump(exclude={"app_id"}))
@@ -1019,6 +1201,20 @@ def _update_chatflow_run_task(task_context: TaskContext, event: dict, summary: d
         (
             f"Dify event {event_type}; {node_finished} nodes finished, "
             f"{message_chunks} answer chunks received."
+        ),
+    )
+
+
+def _update_agent_run_task(task_context: TaskContext, event: dict, summary: dict) -> None:
+    event_type = str(event.get("event") or "event")
+    message_chunks = int((summary.get("event_counts") or {}).get("message") or 0)
+    agent_chunks = int((summary.get("event_counts") or {}).get("agent_message") or 0)
+    task_context.update(
+        "running-agent",
+        None,
+        (
+            f"Dify event {event_type}; {message_chunks + agent_chunks} "
+            "Agent answer chunks received."
         ),
     )
 
@@ -1510,6 +1706,8 @@ def _draft_plan_name(app_detail: DifyAppDetail | None, app_id: str) -> str:
 
 
 def _app_mode(app_detail: DifyAppDetail | None, graph: dict | None = None) -> str:
+    if app_detail and app_detail.mode == "agent-chat":
+        return "agent-chat"
     if app_detail and app_detail.mode == "advanced-chat":
         return "advanced-chat"
     if app_detail and app_detail.mode == "workflow":
@@ -1549,6 +1747,17 @@ def _app_payload(app_detail: DifyAppDetail | None) -> dict | None:
         "mode": app_detail.mode,
         "description": app_detail.description,
     }
+
+
+def _agent_model_config(app_detail: DifyAppDetail | None) -> dict | None:
+    if app_detail is None:
+        return None
+    raw = app_detail.raw if isinstance(app_detail.raw, dict) else {}
+    for key in ("model_config", "model_config_data"):
+        value = raw.get(key)
+        if isinstance(value, dict):
+            return value
+    return None
 
 
 def _webhook_details(client: DifyClient, app_id: str, plan: WorkflowPlan) -> list[dict]:
