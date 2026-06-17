@@ -2909,12 +2909,15 @@ def test_chatbot_modify_apply_updates_model_config(monkeypatch) -> None:
             pass
 
         def get_app_detail(self, app_id):
+            raw_config = model_config
+            if seen.get("payload") is not None:
+                raw_config = {**seen["payload"], "updated_at": "hash-2"}
             return DifyAppDetail(
                 id=app_id,
                 name="售后聊天助手",
                 mode="chat",
                 description="",
-                raw={"model_config": model_config},
+                raw={"model_config": raw_config},
             )
 
         def get_draft_workflow(self, _app_id):
@@ -2923,7 +2926,7 @@ def test_chatbot_modify_apply_updates_model_config(monkeypatch) -> None:
         def update_model_config(self, app_id, payload):
             seen["app_id"] = app_id
             seen["payload"] = payload
-            return {"result": "success", "updated_at": "hash-2"}
+            return {"result": "success"}
 
     monkeypatch.setattr("app.main.load_settings", lambda: settings)
     monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
@@ -2947,7 +2950,8 @@ def test_chatbot_modify_apply_updates_model_config(monkeypatch) -> None:
     assert seen["payload"]["dataset_configs"] == model_config["dataset_configs"]
     assert "Additional instruction" in seen["payload"]["pre_prompt"]
     assert seen["payload"]["opening_statement"] == "您好，我是售后助手。"
-    assert seen["payload"]["suggested_questions"] == ["您好，我是售后助手。", "如何预约维修", "如何查询订单"]
+    assert seen["payload"]["suggested_questions"] == ["如何预约维修", "如何查询订单"]
+    assert data["model_config"]["updated_at"] == "hash-2"
 
 
 def test_chatflow_modify_preview_uses_advanced_chat_plan(monkeypatch) -> None:

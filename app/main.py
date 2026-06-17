@@ -1317,8 +1317,19 @@ def _modify_chat_app(
     if task_context is not None:
         task_context.update("syncing", 88, "Writing the Chatbot model configuration back to Dify.")
     sync = client.update_model_config(request.app_id, revised_config)
+    refreshed_hash = None
+    try:
+        refreshed_detail = client.get_app_detail(request.app_id)
+    except (AttributeError, DifyClientError):
+        refreshed_detail = None
+    if refreshed_detail is not None:
+        refreshed_config = _configured_app_model_config(refreshed_detail)
+        if refreshed_config is not None:
+            refreshed_hash = _model_config_hash(refreshed_detail, refreshed_config)
+            response["app"] = _app_payload(refreshed_detail)
+            response["model_config"] = refreshed_config
     response["sync"] = sync
-    response["new_hash"] = _model_config_hash_from_payload(sync) or base_hash
+    response["new_hash"] = _model_config_hash_from_payload(sync) or refreshed_hash or base_hash
     return response
 
 
@@ -2110,14 +2121,16 @@ def _extract_chat_opening_statement(message: str) -> str | None:
 
 
 def _extract_suggested_questions(message: str) -> list[str] | None:
-    if not re.search(r"(建议问题|推荐问题|suggested questions?)", message, re.IGNORECASE):
+    match = re.search(r"(建议问题|推荐问题|suggested questions?)", message, re.IGNORECASE)
+    if not match:
         return None
-    quoted = _quoted_segments(message)
+    question_text = message[match.end() :]
+    quoted = _quoted_segments(question_text)
     if quoted:
         return quoted[:5]
     parts = [
         item.strip(" -，,;；。")
-        for item in re.split(r"[|｜\n;；]", message)
+        for item in re.split(r"[|｜\n;；]", question_text)
         if item.strip(" -，,;；。")
     ]
     return parts[:5]
