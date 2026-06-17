@@ -96,6 +96,23 @@ def test_agent_import_uses_configuration_url() -> None:
     assert result.workflow_url == "http://dify.local/app/agent-1/configuration"
 
 
+def test_chat_import_uses_configuration_url() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/console/api/login":
+            return httpx.Response(200, json={"result": "success"}, headers=[("set-cookie", "csrf_token=csrf123; Path=/")])
+        if request.url.path == "/console/api/apps/imports":
+            return httpx.Response(
+                200,
+                json={"id": "import-1", "status": "completed", "app_id": "chat-1", "app_mode": "chat"},
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+    result = client.import_yaml("kind: app")
+
+    assert result.workflow_url == "http://dify.local/app/chat-1/configuration"
+
+
 def test_completed_with_warnings_is_returned_without_confirm() -> None:
     calls: list[str] = []
 
@@ -1023,6 +1040,95 @@ def test_run_agent_chat_accumulates_answer_and_uses_chat_messages_endpoint() -> 
     assert seen["body"] == {
         "query": "帮我分析售后问题",
         "inputs": {"priority": "high"},
+        "model_config": model_config,
+        "response_mode": "streaming",
+        "retriever_from": "dev",
+        "conversation_id": "conv-old",
+        "parent_message_id": "msg-old",
+    }
+    assert seen["csrf"] == "csrf123"
+
+
+def test_update_model_config_posts_to_dify_model_config_endpoint() -> None:
+    seen: dict[str, object] = {}
+    model_config = {
+        "model": {"provider": "openai", "name": "gpt-4o", "mode": "chat"},
+        "pre_prompt": "help",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/console/api/login":
+            return httpx.Response(
+                200,
+                json={"result": "success"},
+                headers=[("set-cookie", "csrf_token=csrf123; Path=/")],
+            )
+        if request.url.path == "/console/api/apps/chat-1/model-config":
+            seen["body"] = json.loads(request.content)
+            seen["csrf"] = request.headers.get(CSRF_HEADER_NAME, "")
+            return httpx.Response(200, json={"result": "success", "updated_at": "hash-2"})
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+    result = client.update_model_config("chat-1", model_config)
+
+    assert result["updated_at"] == "hash-2"
+    assert seen["body"] == model_config
+    assert seen["csrf"] == "csrf123"
+
+
+def test_run_chatbot_chat_accumulates_answer_and_uses_chat_messages_endpoint() -> None:
+    seen: dict[str, object] = {}
+    model_config = {
+        "model": {"provider": "openai", "name": "gpt-4o", "mode": "chat"},
+        "pre_prompt": "help",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/console/api/login":
+            return httpx.Response(
+                200,
+                json={"result": "success"},
+                headers=[("set-cookie", "csrf_token=csrf123; Path=/")],
+            )
+        if request.url.path == "/console/api/apps/chat-1/chat-messages":
+            seen["body"] = json.loads(request.content)
+            seen["csrf"] = request.headers.get(CSRF_HEADER_NAME, "")
+            return httpx.Response(
+                200,
+                content=(
+                    'data: {"event":"message","answer":"您好，","conversation_id":"conv-1",'
+                    '"message_id":"msg-1","task_id":"task-1"}\n\n'
+                    'data: {"event":"message","answer":"请继续描述。","conversation_id":"conv-1",'
+                    '"message_id":"msg-1","task_id":"task-1"}\n\n'
+                    'data: {"event":"message_end","id":"msg-1","conversation_id":"conv-1",'
+                    '"task_id":"task-1","metadata":{"usage":{"total_tokens":18,"latency":0.8}}}\n\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+    result = client.run_chatbot_chat(
+        "chat-1",
+        query="你好",
+        inputs={"store": "城西"},
+        model_config=model_config,
+        conversation_id="conv-old",
+        parent_message_id="msg-old",
+    )
+
+    assert result.ok is True
+    assert result.status == "succeeded"
+    assert result.answer == "您好，请继续描述。"
+    assert result.conversation_id == "conv-1"
+    assert result.message_id == "msg-1"
+    assert result.task_id == "task-1"
+    assert result.total_tokens == 18
+    assert result.workflow_url == "http://dify.local/app/chat-1/configuration"
+    assert seen["body"] == {
+        "query": "你好",
+        "inputs": {"store": "城西"},
         "model_config": model_config,
         "response_mode": "streaming",
         "retriever_from": "dev",

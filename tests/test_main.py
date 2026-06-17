@@ -97,14 +97,18 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert "handleCreate" in script.text
     assert "chatflow.run.draft" in script.text
     assert "chatflow-run" in script.text
+    assert 'value="chat">聊天助手' in index.text
+    assert "chatbot.run.draft" in script.text
+    assert "chatbot-run" in script.text
+    assert 'value === "chat" || value === "advanced-chat" || value === "agent-chat"' in script.text
+    assert 'return "聊天助手";' in script.text
     assert 'value="agent-chat">Agent' in index.text
     assert "agent.run.draft" in script.text
     assert "agent-run" in script.text
     assert "setAppMode" in script.text
     assert 'state.appMode === "workflow" ? currentTriggerSelection() : null' in script.text
     assert 'els.modifyPanel.classList.toggle("is-hidden", isAgent)' in script.text
-    assert 'els.publishPanel.classList.toggle("is-hidden", isAgent)' in script.text
-    assert 'value === "advanced-chat" || value === "agent-chat"' in script.text
+    assert 'els.publishPanel.classList.toggle("is-hidden", isChatbot || isAgent)' in script.text
     assert "loadPlannerProviders" in script.text
     assert "currentPlannerSelection" in script.text
     assert "formatTaskDuration" in script.text
@@ -360,6 +364,35 @@ def test_draft_creates_advanced_chat_plan(monkeypatch) -> None:
     assert yaml.safe_load(data["dsl"])["app"]["mode"] == "advanced-chat"
 
 
+def test_draft_creates_chatbot_app_dsl(monkeypatch) -> None:
+    settings = _test_settings()
+    _patch_runtime_model_context(monkeypatch, settings)
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/draft",
+            json={
+                "app_mode": "chat",
+                "message": "创建汽车售后聊天助手",
+                "app_name": "汽车售后聊天助手",
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    dsl = yaml.safe_load(data["dsl"])
+    assert data["plan"]["app_mode"] == "chat"
+    assert data["validation"]["ok"] is True
+    assert dsl["app"]["mode"] == "chat"
+    assert dsl["model_config"]["pre_prompt"]
+    assert dsl["model_config"]["agent_mode"]["enabled"] is False
+
+
 def test_draft_creates_agent_app_dsl(monkeypatch) -> None:
     settings = _test_settings()
     _patch_runtime_model_context(monkeypatch, settings)
@@ -438,6 +471,58 @@ def test_create_agent_app_imports_and_links_configuration(monkeypatch) -> None:
     assert seen["dsl"]["app"]["mode"] == "agent-chat"
     assert data["app_mode"] == "agent-chat"
     assert data["workflow_url"] == "http://dify.local/app/agent-app-1/configuration"
+    assert data["base_hash"] is None
+
+
+def test_create_chatbot_app_imports_and_links_configuration(monkeypatch) -> None:
+    settings = _test_settings()
+    _patch_runtime_model_context(monkeypatch, settings)
+    seen = {}
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def import_yaml(self, yaml_content, *, name=None):
+            seen["name"] = name
+            seen["dsl"] = yaml.safe_load(yaml_content)
+            return DifyImportResult(
+                id="import-1",
+                status="completed",
+                app_id="chat-app-1",
+                app_mode="chat",
+                workflow_url=settings.app_url("chat-app-1", "chat"),
+            )
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/create",
+            json={
+                "app_mode": "chat",
+                "message": "创建聊天助手",
+                "app_name": "售后聊天助手",
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert seen["name"] == "售后聊天助手"
+    assert seen["dsl"]["app"]["mode"] == "chat"
+    assert data["app_mode"] == "chat"
+    assert data["workflow_url"] == "http://dify.local/app/chat-app-1/configuration"
     assert data["base_hash"] is None
 
 
@@ -2430,6 +2515,42 @@ def test_run_draft_workflow_rejects_agent_app(monkeypatch) -> None:
     assert response.json()["detail"]["code"] == "AGENT_USE_AGENT_RUN_API"
 
 
+def test_run_draft_workflow_rejects_chatbot_app(monkeypatch) -> None:
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get_app_detail(self, app_id):
+            return DifyAppDetail(
+                id=app_id,
+                name="售后聊天助手",
+                mode="chat",
+                description="",
+                raw={},
+            )
+
+        def get_draft_workflow(self, _app_id):
+            raise AssertionError("Chatbot workflow run should reject before loading draft.")
+
+    monkeypatch.setattr("app.main.load_settings", _test_settings)
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/run/draft",
+            json={"app_id": "chat-app-1", "inputs": {"query": "hi"}},
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "CHATBOT_USE_CHATBOT_RUN_API"
+
+
 def test_run_draft_workflow_api_can_return_timeout(monkeypatch) -> None:
     settings = _test_settings()
 
@@ -2541,6 +2662,75 @@ def test_run_draft_chatflow_api_reuses_conversation(monkeypatch) -> None:
         "parent_message_id": "message-1",
         "timeout_seconds": 15.0,
     }
+
+
+def test_run_draft_chatbot_api_reuses_conversation(monkeypatch) -> None:
+    settings = _test_settings()
+    seen = {}
+    model_config = {
+        "model": {"provider": "openai", "name": "gpt-4o", "mode": "chat"},
+        "pre_prompt": "help",
+    }
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get_app_detail(self, app_id):
+            return DifyAppDetail(
+                id=app_id,
+                name="售后聊天助手",
+                mode="chat",
+                description="",
+                raw={"model_config": model_config},
+            )
+
+        def run_chatbot_chat(self, app_id, **kwargs):
+            seen["app_id"] = app_id
+            seen.update(kwargs)
+            return DifyChatflowRunResult(
+                ok=True,
+                status="succeeded",
+                app_id=app_id,
+                workflow_url=settings.app_url(app_id, "chat"),
+                answer="请提供维修单号。",
+                conversation_id="conv-next",
+                message_id="msg-next",
+                events_summary={"events": 3},
+            )
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/chatbots/run/draft",
+            json={
+                "app_id": "chat-app-1",
+                "query": "发动机抖动",
+                "inputs": {"store": "城西"},
+                "conversation_id": "conv-prev",
+                "parent_message_id": "msg-prev",
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["app_mode"] == "chat"
+    assert data["answer"] == "请提供维修单号。"
+    assert data["conversation_id"] == "conv-next"
+    assert seen["app_id"] == "chat-app-1"
+    assert seen["query"] == "发动机抖动"
+    assert seen["inputs"] == {"store": "城西"}
+    assert seen["conversation_id"] == "conv-prev"
+    assert seen["parent_message_id"] == "msg-prev"
+    assert seen["model_config"]["pre_prompt"] == "help"
 
 
 def test_run_draft_agent_api_uses_model_config(monkeypatch) -> None:
@@ -2694,6 +2884,70 @@ def test_agent_modify_draft_is_explicitly_not_supported(monkeypatch) -> None:
         "code": "AGENT_MODIFY_NOT_SUPPORTED",
         "message": "agent-chat apps do not have a workflow draft graph to modify in v1.",
     }
+
+
+def test_chatbot_modify_apply_updates_model_config(monkeypatch) -> None:
+    settings = _test_settings()
+    model_config = {
+        "model": {"provider": "openai", "name": "gpt-4o", "mode": "chat"},
+        "pre_prompt": "你是汽车售后客服。",
+        "opening_statement": "",
+        "suggested_questions": [],
+        "dataset_configs": {"retrieval_model": "multiple", "datasets": {"datasets": ["keep"]}},
+        "updated_at": "hash-1",
+    }
+    seen = {}
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get_app_detail(self, app_id):
+            return DifyAppDetail(
+                id=app_id,
+                name="售后聊天助手",
+                mode="chat",
+                description="",
+                raw={"model_config": model_config},
+            )
+
+        def get_draft_workflow(self, _app_id):
+            raise AssertionError("Chatbot modify must not load a workflow draft.")
+
+        def update_model_config(self, app_id, payload):
+            seen["app_id"] = app_id
+            seen["payload"] = payload
+            return {"result": "success", "updated_at": "hash-2"}
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/modify/apply",
+            json={
+                "app_id": "chat-app-1",
+                "message": "把回复改得更温暖，开场白设为“您好，我是售后助手。”，建议问题“如何预约维修”“如何查询订单”",
+                "expected_hash": "hash-1",
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["app_mode"] == "chat"
+    assert data["base_hash"] == "hash-1"
+    assert data["new_hash"] == "hash-2"
+    assert seen["app_id"] == "chat-app-1"
+    assert seen["payload"]["dataset_configs"] == model_config["dataset_configs"]
+    assert "Additional instruction" in seen["payload"]["pre_prompt"]
+    assert seen["payload"]["opening_statement"] == "您好，我是售后助手。"
+    assert seen["payload"]["suggested_questions"] == ["您好，我是售后助手。", "如何预约维修", "如何查询订单"]
 
 
 def test_chatflow_modify_preview_uses_advanced_chat_plan(monkeypatch) -> None:
@@ -3492,6 +3746,56 @@ def test_background_chatflow_run_task_returns_202_and_can_be_polled(monkeypatch,
     assert task["operation"] == "chatflow.run.draft"
     assert task["result"]["conversation_id"] == "conversation-1"
     assert task["result"]["answer"] == "请提供维修单号。"
+
+
+def test_background_chatbot_run_task_returns_202_and_can_be_polled(monkeypatch, tmp_path) -> None:
+    settings = Settings.from_env(
+        {
+            "DIFY_SOURCE_DIR": "../dify",
+            "OPENAI_API_KEY": "token",
+            "CHAT2DIFY_TASK_DB": str(tmp_path / "chatbot-tasks.sqlite3"),
+        },
+        validate_dify=False,
+    )
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+
+    def fake_run(request, *, task_context=None):
+        assert task_context is not None
+        task_context.update("running-chatbot", None, "Received 2 answer chunks.")
+        return {
+            "ok": True,
+            "status": "succeeded",
+            "app_id": request.app_id,
+            "app_mode": "chat",
+            "answer": "请提供维修单号。",
+            "conversation_id": "conversation-1",
+            "message_id": "message-1",
+        }
+
+    monkeypatch.setattr("app.main._run_draft_chatbot", fake_run)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/tasks/chatbots/run/draft",
+            json={"app_id": "chat-app-1", "query": "发动机抖动"},
+        )
+        assert response.status_code == 202
+        task_id = response.json()["task_id"]
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            task_response = client.get(f"/api/tasks/{task_id}")
+            if task_response.json()["status"] == "succeeded":
+                break
+            time.sleep(0.01)
+
+    task = task_response.json()
+    assert task["operation"] == "chatbot.run.draft"
+    assert task["result"]["app_mode"] == "chat"
+    assert task["result"]["conversation_id"] == "conversation-1"
 
 
 class _KnowledgePlanner:

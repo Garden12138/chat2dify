@@ -2196,7 +2196,7 @@ function loadAppMode() {
 }
 
 function normalizedAppMode(value) {
-  if (value === "advanced-chat" || value === "agent-chat") {
+  if (value === "chat" || value === "advanced-chat" || value === "agent-chat") {
     return value;
   }
   return "workflow";
@@ -2212,20 +2212,21 @@ function setAppMode(value) {
   }
   els.createAppMode.value = appMode;
   els.runAppMode.value = appMode;
+  const isChatbot = appMode === "chat";
   const isChatflow = appMode === "advanced-chat";
   const isAgent = appMode === "agent-chat";
-  const isConversational = isChatflow || isAgent;
+  const isConversational = isChatbot || isChatflow || isAgent;
   els.triggerPanel.classList.toggle("is-hidden", isConversational);
   els.modifyPanel.classList.toggle("is-hidden", isAgent);
-  els.publishPanel.classList.toggle("is-hidden", isAgent);
+  els.publishPanel.classList.toggle("is-hidden", isChatbot || isAgent);
   els.refreshWorkflowTriggers.classList.toggle("is-hidden", isConversational);
   els.workflowTriggerList.classList.toggle("is-hidden", isConversational);
   els.runWorkflowFields.classList.toggle("is-hidden", isConversational);
   els.runChatflowFields.classList.toggle("is-hidden", !isConversational);
   els.runInputs.required = !isConversational;
   els.runChatflowQuery.required = isConversational;
-  els.createSubmit.textContent = isAgent ? "Create agent" : isChatflow ? "Create chatflow" : "Create workflow";
-  els.modifyTitle.textContent = isChatflow ? "Modify Chatflow Draft" : "Modify Workflow Draft";
+  els.createSubmit.textContent = isAgent ? "Create agent" : isChatbot ? "Create chatbot" : isChatflow ? "Create chatflow" : "Create workflow";
+  els.modifyTitle.textContent = isChatbot ? "Modify 聊天助手" : isChatflow ? "Modify Chatflow Draft" : "Modify Workflow Draft";
   els.publishTitle.textContent = isChatflow ? "Publish Chatflow" : "Publish & Triggers";
   els.publishSubmit.textContent = isChatflow ? "Publish chatflow" : "Publish workflow";
   els.publishHelp.textContent = isChatflow
@@ -2420,10 +2421,10 @@ function triggerSelectionFromPlan(plan) {
 async function handleRun() {
   try {
     const appMode = normalizedAppMode(els.runAppMode.value);
-    if (appMode === "advanced-chat" || appMode === "agent-chat") {
+    if (appMode === "chat" || appMode === "advanced-chat" || appMode === "agent-chat") {
       const query = els.runChatflowQuery.value.trim();
       if (!query) {
-        throw new Error(`${appMode === "agent-chat" ? "Agent" : "Chatflow"} Query is required.`);
+        throw new Error(`${appMode === "agent-chat" ? "Agent" : appMode === "chat" ? "聊天助手" : "Chatflow"} Query is required.`);
       }
       const conversationId = els.runConversationId.value.trim();
       const payload = {
@@ -2436,8 +2437,16 @@ async function handleRun() {
           : null,
         timeout_seconds: Number(valueOf("#run-timeout") || 120),
       };
-      await submitBackgroundTask("run", appMode === "agent-chat" ? "/api/tasks/agents/run/draft" : "/api/tasks/chatflows/run/draft", payload, {
-        kind: appMode === "agent-chat" ? "agent-run" : "chatflow-run",
+      const runPath = appMode === "agent-chat"
+        ? "/api/tasks/agents/run/draft"
+        : appMode === "chat"
+        ? "/api/tasks/chatbots/run/draft"
+        : "/api/tasks/chatflows/run/draft";
+      const runKind = appMode === "agent-chat" ? "agent-run" : appMode === "chat" ? "chatbot-run" : "chatflow-run";
+      await submitBackgroundTask("run", runPath, {
+        ...payload,
+      }, {
+        kind: runKind,
         payload,
       });
       return;
@@ -2844,6 +2853,27 @@ function completeBackgroundTask(metadata, data) {
     renderResult({ ...data, app_mode: "advanced-chat" }, "outputs");
     return;
   }
+  if (metadata.kind === "chatbot-run") {
+    state.chatflow.conversationId = data.conversation_id || payload.conversation_id || "";
+    state.chatflow.parentMessageId = data.message_id || "";
+    els.runConversationId.value = state.chatflow.conversationId;
+    setAppMode("chat");
+    syncAppContext({ ...data, app_mode: "chat" }, payload.app_id);
+    rememberApp(
+      { ...data, app_mode: "chat" },
+      {
+        operation: "chatbot draft",
+        request: payload.query,
+        appId: payload.app_id,
+        lastRunStatus: data.status,
+        conversationId: state.chatflow.conversationId,
+        messageId: state.chatflow.parentMessageId,
+      }
+    );
+    setPanelStatus(els.runStatus, data.status || "Done", runStatusTone(data));
+    renderResult({ ...data, app_mode: "chat" }, "outputs");
+    return;
+  }
   if (metadata.kind === "agent-run") {
     state.chatflow.conversationId = data.conversation_id || payload.conversation_id || "";
     state.chatflow.parentMessageId = data.message_id || "";
@@ -3081,6 +3111,7 @@ function backgroundTaskPath(operation) {
     "workflow.modify.apply": "/api/tasks/workflows/modify/apply",
     "workflow.run.draft": "/api/tasks/workflows/run/draft",
     "chatflow.run.draft": "/api/tasks/chatflows/run/draft",
+    "chatbot.run.draft": "/api/tasks/chatbots/run/draft",
     "agent.run.draft": "/api/tasks/agents/run/draft",
     "workflow.publish": "/api/tasks/workflows/publish",
   }[operation] || "";
@@ -3093,6 +3124,7 @@ function backgroundTaskKind(operation) {
     "workflow.modify.apply": "modify-apply",
     "workflow.run.draft": "run",
     "chatflow.run.draft": "chatflow-run",
+    "chatbot.run.draft": "chatbot-run",
     "agent.run.draft": "agent-run",
     "workflow.publish": "publish",
   }[operation] || "";
@@ -4408,6 +4440,9 @@ function historyMeta(item) {
 }
 
 function appModeLabel(mode) {
+  if (mode === "chat") {
+    return "聊天助手";
+  }
   if (mode === "advanced-chat") {
     return "Chatflow";
   }
@@ -4435,7 +4470,7 @@ function selectHistoryItem(index) {
   if (item.app_name) {
     els.createAppName.value = item.app_name;
   }
-  if (item.app_mode === "advanced-chat" || item.app_mode === "agent-chat") {
+  if (item.app_mode === "chat" || item.app_mode === "advanced-chat" || item.app_mode === "agent-chat") {
     state.chatflow.conversationId = item.conversation_id || "";
     state.chatflow.parentMessageId = item.message_id || "";
     els.runConversationId.value = state.chatflow.conversationId;
