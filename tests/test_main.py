@@ -2653,6 +2653,49 @@ def test_run_draft_agent_rejects_non_agent_app(monkeypatch) -> None:
     assert response.json()["detail"]["code"] == "APP_IS_NOT_AGENT"
 
 
+def test_agent_modify_draft_is_explicitly_not_supported(monkeypatch) -> None:
+    settings = _test_settings()
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get_app_detail(self, app_id):
+            return DifyAppDetail(
+                id=app_id,
+                name="售后 Agent",
+                mode="agent-chat",
+                description="",
+                raw={},
+            )
+
+        def get_draft_workflow(self, _app_id):
+            raise AssertionError("Agent modify should reject before loading a workflow draft.")
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr("app.main.read_dify_version_info", lambda _: DifyVersionInfo("../dify", "test", "9.9.9"))
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+    _patch_runtime_model_context(monkeypatch, settings)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/modify/draft",
+            json={"app_id": "agent-app-1", "message": "调整回复风格"},
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "code": "AGENT_MODIFY_NOT_SUPPORTED",
+        "message": "agent-chat apps do not have a workflow draft graph to modify in v1.",
+    }
+
+
 def test_chatflow_modify_preview_uses_advanced_chat_plan(monkeypatch) -> None:
     settings = _test_settings()
     current_plan = fallback_plan(
