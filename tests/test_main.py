@@ -100,15 +100,19 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert 'value="chat">聊天助手' in index.text
     assert "chatbot.run.draft" in script.text
     assert "chatbot-run" in script.text
-    assert 'value === "chat" || value === "advanced-chat" || value === "agent-chat"' in script.text
+    assert "completion.run.draft" in script.text
+    assert "completion-run" in script.text
+    assert 'value === "chat" || value === "advanced-chat" || value === "agent-chat" || value === "completion"' in script.text
     assert 'return "聊天助手";' in script.text
+    assert 'value="completion">文本生成应用' in index.text
     assert 'value="agent-chat">Agent' in index.text
+    assert 'id="run-conversation-fields"' in index.text
     assert "agent.run.draft" in script.text
     assert "agent-run" in script.text
     assert "setAppMode" in script.text
     assert 'state.appMode === "workflow" ? currentTriggerSelection() : null' in script.text
     assert 'els.modifyPanel.classList.toggle("is-hidden", isAgent)' in script.text
-    assert 'els.publishPanel.classList.toggle("is-hidden", isChatbot || isAgent)' in script.text
+    assert 'els.publishPanel.classList.toggle("is-hidden", isConfiguredApp)' in script.text
     assert "loadPlannerProviders" in script.text
     assert "currentPlannerSelection" in script.text
     assert "formatTaskDuration" in script.text
@@ -393,6 +397,35 @@ def test_draft_creates_chatbot_app_dsl(monkeypatch) -> None:
     assert dsl["model_config"]["agent_mode"]["enabled"] is False
 
 
+def test_draft_creates_completion_app_dsl(monkeypatch) -> None:
+    settings = _test_settings()
+    _patch_runtime_model_context(monkeypatch, settings)
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/draft",
+            json={
+                "app_mode": "completion",
+                "message": "创建维修单总结文本生成应用",
+                "app_name": "维修单总结",
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    dsl = yaml.safe_load(data["dsl"])
+    assert data["plan"]["app_mode"] == "completion"
+    assert data["validation"]["ok"] is True
+    assert dsl["app"]["mode"] == "completion"
+    assert dsl["model_config"]["pre_prompt"]
+    assert dsl["model_config"]["model"]["name"] == "qwen3.5-plus"
+
+
 def test_draft_creates_agent_app_dsl(monkeypatch) -> None:
     settings = _test_settings()
     _patch_runtime_model_context(monkeypatch, settings)
@@ -523,6 +556,61 @@ def test_create_chatbot_app_imports_and_links_configuration(monkeypatch) -> None
     assert seen["dsl"]["app"]["mode"] == "chat"
     assert data["app_mode"] == "chat"
     assert data["workflow_url"] == "http://dify.local/app/chat-app-1/configuration"
+    assert data["base_hash"] is None
+
+
+def test_create_completion_app_imports_and_links_configuration(monkeypatch) -> None:
+    settings = _test_settings()
+    _patch_runtime_model_context(monkeypatch, settings)
+    seen = {}
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def import_yaml(self, yaml_content, *, name=None):
+            seen["name"] = name
+            seen["dsl"] = yaml.safe_load(yaml_content)
+            return DifyImportResult(
+                id="import-1",
+                status="completed",
+                app_id="completion-app-1",
+                app_mode="completion",
+                workflow_url=settings.app_url("completion-app-1", "completion"),
+            )
+
+        def get_draft_workflow(self, app_id):  # pragma: no cover - should never be called
+            raise AssertionError(f"Completion app should not load draft workflow: {app_id}")
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/create",
+            json={
+                "app_mode": "completion",
+                "message": "创建维修单总结文本生成应用",
+                "app_name": "维修单总结",
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert seen["name"] == "维修单总结"
+    assert seen["dsl"]["app"]["mode"] == "completion"
+    assert data["app_mode"] == "completion"
+    assert data["workflow_url"] == "http://dify.local/app/completion-app-1/configuration"
     assert data["base_hash"] is None
 
 
@@ -2551,6 +2639,42 @@ def test_run_draft_workflow_rejects_chatbot_app(monkeypatch) -> None:
     assert response.json()["detail"]["code"] == "CHATBOT_USE_CHATBOT_RUN_API"
 
 
+def test_run_draft_workflow_rejects_completion_app(monkeypatch) -> None:
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get_app_detail(self, app_id):
+            return DifyAppDetail(
+                id=app_id,
+                name="文本生成",
+                mode="completion",
+                description="",
+                raw={},
+            )
+
+        def get_draft_workflow(self, _app_id):
+            raise AssertionError("Completion workflow run should reject before loading draft.")
+
+    monkeypatch.setattr("app.main.load_settings", _test_settings)
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/run/draft",
+            json={"app_id": "completion-app-1", "inputs": {"query": "hi"}},
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "COMPLETION_USE_COMPLETION_RUN_API"
+
+
 def test_run_draft_workflow_api_can_return_timeout(monkeypatch) -> None:
     settings = _test_settings()
 
@@ -2731,6 +2855,74 @@ def test_run_draft_chatbot_api_reuses_conversation(monkeypatch) -> None:
     assert seen["conversation_id"] == "conv-prev"
     assert seen["parent_message_id"] == "msg-prev"
     assert seen["model_config"]["pre_prompt"] == "help"
+
+
+def test_run_draft_completion_api_uses_model_config(monkeypatch) -> None:
+    settings = _test_settings()
+    seen = {}
+    model_config = {
+        "model": {"provider": "openai", "name": "gpt-4o", "mode": "chat"},
+        "pre_prompt": "summarize",
+    }
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get_app_detail(self, app_id):
+            return DifyAppDetail(
+                id=app_id,
+                name="维修单总结",
+                mode="completion",
+                description="",
+                raw={"model_config": model_config},
+            )
+
+        def run_completion(self, app_id, **kwargs):
+            seen["app_id"] = app_id
+            seen.update(kwargs)
+            return DifyChatflowRunResult(
+                ok=True,
+                status="succeeded",
+                app_id=app_id,
+                workflow_url=settings.app_url(app_id, "completion"),
+                answer="故障：发动机抖动。",
+                message_id="msg-completion",
+                events_summary={"events": 3},
+            )
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/completions/run/draft",
+            json={
+                "app_id": "completion-app-1",
+                "query": "维修单原文",
+                "inputs": {"style": "short"},
+                "timeout_seconds": 15,
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["app_mode"] == "completion"
+    assert data["answer"] == "故障：发动机抖动。"
+    assert seen == {
+        "app_id": "completion-app-1",
+        "query": "维修单原文",
+        "inputs": {"style": "short"},
+        "files": None,
+        "model_config": model_config,
+        "timeout_seconds": 15.0,
+    }
 
 
 def test_run_draft_agent_api_uses_model_config(monkeypatch) -> None:
@@ -2951,6 +3143,73 @@ def test_chatbot_modify_apply_updates_model_config(monkeypatch) -> None:
     assert "Additional instruction" in seen["payload"]["pre_prompt"]
     assert seen["payload"]["opening_statement"] == "您好，我是售后助手。"
     assert seen["payload"]["suggested_questions"] == ["如何预约维修", "如何查询订单"]
+    assert data["model_config"]["updated_at"] == "hash-2"
+
+
+def test_completion_modify_apply_updates_model_config(monkeypatch) -> None:
+    settings = _test_settings()
+    model_config = {
+        "model": {"provider": "openai", "name": "gpt-4o", "mode": "chat"},
+        "pre_prompt": "总结维修单。",
+        "dataset_configs": {"retrieval_model": "multiple", "datasets": {"datasets": []}},
+        "updated_at": "hash-1",
+    }
+    seen = {}
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get_app_detail(self, app_id):
+            raw_config = model_config
+            if seen.get("payload") is not None:
+                raw_config = {**seen["payload"], "updated_at": "hash-2"}
+            return DifyAppDetail(
+                id=app_id,
+                name="维修单总结",
+                mode="completion",
+                description="",
+                raw={"model_config": raw_config},
+            )
+
+        def get_draft_workflow(self, _app_id):
+            raise AssertionError("Completion modify must not load a workflow draft.")
+
+        def update_model_config(self, app_id, payload):
+            seen["app_id"] = app_id
+            seen["payload"] = payload
+            return {"result": "success"}
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/modify/apply",
+            json={
+                "app_id": "completion-app-1",
+                "message": "输出更短，只保留故障、建议、待补充信息",
+                "expected_hash": "hash-1",
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["app_mode"] == "completion"
+    assert data["workflow_url"] == "http://dify.local/app/completion-app-1/configuration"
+    assert data["base_hash"] == "hash-1"
+    assert data["new_hash"] == "hash-2"
+    assert seen["app_id"] == "completion-app-1"
+    assert seen["payload"]["dataset_configs"] == model_config["dataset_configs"]
+    assert "Additional instruction" in seen["payload"]["pre_prompt"]
+    assert "opening_statement" not in seen["payload"]
+    assert "suggested_questions" not in seen["payload"]
     assert data["model_config"]["updated_at"] == "hash-2"
 
 

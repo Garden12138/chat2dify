@@ -5,7 +5,9 @@ from uuid import UUID
 
 from app.agent.planner import fallback_plan
 from app.agent.normalizer import normalize_plan_payload
+from app.compiler.agent import compile_completion_app_dsl, validate_completion_app_dsl
 from app.compiler.dify import DifyDslCompiler
+from app.config import Settings
 from app.dify.graph import decompile_dify_graph
 from app.dify.knowledge_retrieval import apply_dataset_retrieval_settings
 from app.models import WorkflowPlan
@@ -53,6 +55,30 @@ def test_compiler_outputs_dify_workflow_dsl() -> None:
 def test_validator_accepts_compiled_fallback_plan() -> None:
     dsl = _compiler().compile(fallback_plan("hello"))
 
+    assert validate_dsl(dsl, expected_dsl_version="9.9.9") == []
+
+
+def test_completion_app_dsl_validates_as_configured_app() -> None:
+    settings = Settings.from_env(
+        {
+            "DIFY_SOURCE_DIR": "../dify",
+            "DIFY_DEFAULT_MODEL_PROVIDER": "openai",
+            "DIFY_DEFAULT_MODEL_NAME": "gpt-4o-mini",
+        },
+        validate_dify=False,
+    )
+    dsl = compile_completion_app_dsl(
+        message="总结用户输入的维修单",
+        app_name="维修单总结",
+        dsl_version="9.9.9",
+        settings=settings,
+    )
+    data = yaml.safe_load(dsl)
+
+    assert data["app"]["mode"] == "completion"
+    assert data["model_config"]["model"]["name"] == "gpt-4o-mini"
+    assert data["model_config"]["pre_prompt"]
+    assert validate_completion_app_dsl(dsl, expected_dsl_version="9.9.9") == []
     assert validate_dsl(dsl, expected_dsl_version="9.9.9") == []
 
 

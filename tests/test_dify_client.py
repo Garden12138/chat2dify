@@ -1138,6 +1138,107 @@ def test_run_chatbot_chat_accumulates_answer_and_uses_chat_messages_endpoint() -
     assert seen["csrf"] == "csrf123"
 
 
+def test_run_completion_accumulates_answer_and_uses_completion_messages_endpoint() -> None:
+    seen: dict[str, object] = {}
+    model_config = {
+        "model": {"provider": "openai", "name": "gpt-4o", "mode": "chat"},
+        "pre_prompt": "summarize",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/console/api/login":
+            return httpx.Response(
+                200,
+                json={"result": "success"},
+                headers=[("set-cookie", "csrf_token=csrf123; Path=/")],
+            )
+        if request.url.path == "/console/api/apps/completion-1/completion-messages":
+            seen["body"] = json.loads(request.content)
+            seen["csrf"] = request.headers.get(CSRF_HEADER_NAME, "")
+            return httpx.Response(
+                200,
+                content=(
+                    'data: {"event":"message","answer":"故障：","message_id":"msg-1","task_id":"task-1"}\n\n'
+                    'data: {"event":"message","answer":"发动机抖动。","message_id":"msg-1","task_id":"task-1"}\n\n'
+                    'data: {"event":"message_end","id":"msg-1","task_id":"task-1",'
+                    '"metadata":{"usage":{"total_tokens":12,"latency":0.4}}}\n\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+    result = client.run_completion(
+        "completion-1",
+        query="维修单原文",
+        inputs={"style": "short"},
+        model_config=model_config,
+    )
+
+    assert result.ok is True
+    assert result.status == "succeeded"
+    assert result.answer == "故障：发动机抖动。"
+    assert result.message_id == "msg-1"
+    assert result.task_id == "task-1"
+    assert result.total_tokens == 12
+    assert result.workflow_url == "http://dify.local/app/completion-1/configuration"
+    assert seen["body"] == {
+        "query": "维修单原文",
+        "inputs": {"style": "short"},
+        "model_config": model_config,
+        "response_mode": "streaming",
+        "retriever_from": "dev",
+    }
+    assert seen["csrf"] == "csrf123"
+
+
+def test_run_completion_refreshes_after_401() -> None:
+    calls: list[str] = []
+    model_config = {"model": {"provider": "openai", "name": "gpt-4o", "mode": "chat"}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(f"{request.method} {request.url.path}")
+        if request.url.path == "/console/api/login":
+            return httpx.Response(200, json={"result": "success"}, headers=[("set-cookie", "csrf_token=csrf123; Path=/")])
+        if request.url.path == "/console/api/refresh-token":
+            return httpx.Response(200, json={"result": "success"})
+        if request.url.path == "/console/api/apps/completion-1/completion-messages":
+            if calls.count("POST /console/api/apps/completion-1/completion-messages") == 1:
+                return httpx.Response(401, json={"message": "expired"})
+            return httpx.Response(
+                200,
+                content='data: {"event":"message_end","id":"msg-1"}\n\n',
+                headers={"content-type": "text/event-stream"},
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+    result = client.run_completion("completion-1", query="hi", model_config=model_config)
+
+    assert result.ok is True
+    assert calls.count("POST /console/api/apps/completion-1/completion-messages") == 2
+    assert "POST /console/api/refresh-token" in calls
+
+
+def test_run_completion_timeout_returns_timeout_result() -> None:
+    model_config = {"model": {"provider": "openai", "name": "gpt-4o", "mode": "chat"}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/console/api/login":
+            return httpx.Response(200, json={"result": "success"}, headers=[("set-cookie", "csrf_token=csrf123; Path=/")])
+        if request.url.path == "/console/api/apps/completion-1/completion-messages":
+            raise httpx.TimeoutException("slow", request=request)
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+    result = client.run_completion("completion-1", query="hi", model_config=model_config)
+
+    assert result.ok is False
+    assert result.status == "timeout"
+    assert result.workflow_url == "http://dify.local/app/completion-1/configuration"
+    assert "Dify Completion" in (result.error or "")
+
+
 def test_connection_error_is_wrapped() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("connection refused", request=request)

@@ -265,6 +265,7 @@
             App type
             <select id="create-app-mode">
               <option value="workflow">Workflow</option>
+              <option value="completion">文本生成应用</option>
               <option value="chat">聊天助手</option>
               <option value="advanced-chat">Chatflow</option>
               <option value="agent-chat">Agent</option>
@@ -385,6 +386,7 @@
             App type
             <select id="run-app-mode">
               <option value="workflow">Workflow</option>
+              <option value="completion">文本生成应用</option>
               <option value="chat">聊天助手</option>
               <option value="advanced-chat">Chatflow</option>
               <option value="agent-chat">Agent</option>
@@ -409,12 +411,14 @@
               Query
               <textarea id="run-chatflow-query" rows="5" placeholder="输入本轮消息"></textarea>
             </label>
-            <label>
-              Conversation ID
-              <input id="run-conversation-id" autocomplete="off" placeholder="首轮留空；后续轮次自动复用">
-            </label>
-            <button id="new-chatflow-conversation" type="button" class="secondary">New conversation</button>
-            <p class="field-help">同一 Conversation ID 会继续多轮对话；新建会话会清空当前上下文。</p>
+            <div id="run-conversation-fields" class="conditional-fields">
+              <label>
+                Conversation ID
+                <input id="run-conversation-id" autocomplete="off" placeholder="首轮留空；后续轮次自动复用">
+              </label>
+              <button id="new-chatflow-conversation" type="button" class="secondary">New conversation</button>
+              <p class="field-help">同一 Conversation ID 会继续多轮对话；新建会话会清空当前上下文。</p>
+            </div>
           </div>
           <label>
             Timeout seconds

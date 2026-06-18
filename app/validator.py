@@ -257,28 +257,28 @@ def validate_dsl(yaml_content: str, *, expected_dsl_version: str | None = None) 
 
     app = data.get("app")
     app_mode = app.get("mode") if isinstance(app, dict) else None
-    if app_mode not in {"workflow", "advanced-chat", "agent-chat"}:
+    if app_mode not in {"workflow", "advanced-chat", "agent-chat", "chat", "completion"}:
         issues.append(
             ValidationIssue(
                 code="DSL_APP_MODE_INVALID",
-                message="DSL app.mode must be workflow, advanced-chat, or agent-chat.",
+                message="DSL app.mode must be workflow, advanced-chat, agent-chat, chat, or completion.",
                 path="app.mode",
             )
         )
 
-    if app_mode == "agent-chat":
+    if app_mode in {"agent-chat", "chat", "completion"}:
         model_config = data.get("model_config")
         if not isinstance(model_config, dict):
             issues.append(
                 ValidationIssue(
                     code="DSL_MODEL_CONFIG_INVALID",
-                    message="agent-chat DSL must contain model_config.",
+                    message=f"{app_mode} DSL must contain model_config.",
                     path="model_config",
                 )
             )
             return issues
         agent_mode = model_config.get("agent_mode")
-        if not isinstance(agent_mode, dict) or not agent_mode.get("enabled"):
+        if app_mode == "agent-chat" and (not isinstance(agent_mode, dict) or not agent_mode.get("enabled")):
             issues.append(
                 ValidationIssue(
                     code="DSL_AGENT_MODE_INVALID",
@@ -291,7 +291,7 @@ def validate_dsl(yaml_content: str, *, expected_dsl_version: str | None = None) 
             issues.append(
                 ValidationIssue(
                     code="DSL_AGENT_MODEL_INVALID",
-                    message="agent-chat DSL must include model provider and name.",
+                    message=f"{app_mode} DSL must include model provider and name.",
                     path="model_config.model",
                 )
             )

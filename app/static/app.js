@@ -164,6 +164,7 @@ const els = {
   runWorkflowFields: document.querySelector("#run-workflow-fields"),
   runChatflowFields: document.querySelector("#run-chatflow-fields"),
   runChatflowQuery: document.querySelector("#run-chatflow-query"),
+  runConversationFields: document.querySelector("#run-conversation-fields"),
   runConversationId: document.querySelector("#run-conversation-id"),
   newChatflowConversation: document.querySelector("#new-chatflow-conversation"),
   publishForm: document.querySelector("#publish-form"),
@@ -2196,7 +2197,7 @@ function loadAppMode() {
 }
 
 function normalizedAppMode(value) {
-  if (value === "chat" || value === "advanced-chat" || value === "agent-chat") {
+  if (value === "chat" || value === "advanced-chat" || value === "agent-chat" || value === "completion") {
     return value;
   }
   return "workflow";
@@ -2212,21 +2213,24 @@ function setAppMode(value) {
   }
   els.createAppMode.value = appMode;
   els.runAppMode.value = appMode;
+  const isCompletion = appMode === "completion";
   const isChatbot = appMode === "chat";
   const isChatflow = appMode === "advanced-chat";
   const isAgent = appMode === "agent-chat";
   const isConversational = isChatbot || isChatflow || isAgent;
-  els.triggerPanel.classList.toggle("is-hidden", isConversational);
+  const isConfiguredApp = isCompletion || isChatbot || isAgent;
+  els.triggerPanel.classList.toggle("is-hidden", isConversational || isCompletion);
   els.modifyPanel.classList.toggle("is-hidden", isAgent);
-  els.publishPanel.classList.toggle("is-hidden", isChatbot || isAgent);
-  els.refreshWorkflowTriggers.classList.toggle("is-hidden", isConversational);
-  els.workflowTriggerList.classList.toggle("is-hidden", isConversational);
-  els.runWorkflowFields.classList.toggle("is-hidden", isConversational);
-  els.runChatflowFields.classList.toggle("is-hidden", !isConversational);
-  els.runInputs.required = !isConversational;
-  els.runChatflowQuery.required = isConversational;
-  els.createSubmit.textContent = isAgent ? "Create agent" : isChatbot ? "Create chatbot" : isChatflow ? "Create chatflow" : "Create workflow";
-  els.modifyTitle.textContent = isChatbot ? "Modify 聊天助手" : isChatflow ? "Modify Chatflow Draft" : "Modify Workflow Draft";
+  els.publishPanel.classList.toggle("is-hidden", isConfiguredApp);
+  els.refreshWorkflowTriggers.classList.toggle("is-hidden", isConversational || isCompletion);
+  els.workflowTriggerList.classList.toggle("is-hidden", isConversational || isCompletion);
+  els.runWorkflowFields.classList.toggle("is-hidden", isConversational && !isCompletion);
+  els.runChatflowFields.classList.toggle("is-hidden", !(isConversational || isCompletion));
+  els.runConversationFields.classList.toggle("is-hidden", isCompletion);
+  els.runInputs.required = !isConversational || isCompletion;
+  els.runChatflowQuery.required = isConversational || isCompletion;
+  els.createSubmit.textContent = isAgent ? "Create agent" : isCompletion ? "Create completion" : isChatbot ? "Create chatbot" : isChatflow ? "Create chatflow" : "Create workflow";
+  els.modifyTitle.textContent = isCompletion ? "Modify 文本生成应用" : isChatbot ? "Modify 聊天助手" : isChatflow ? "Modify Chatflow Draft" : "Modify Workflow Draft";
   els.publishTitle.textContent = isChatflow ? "Publish Chatflow" : "Publish & Triggers";
   els.publishSubmit.textContent = isChatflow ? "Publish chatflow" : "Publish workflow";
   els.publishHelp.textContent = isChatflow
@@ -2421,28 +2425,32 @@ function triggerSelectionFromPlan(plan) {
 async function handleRun() {
   try {
     const appMode = normalizedAppMode(els.runAppMode.value);
-    if (appMode === "chat" || appMode === "advanced-chat" || appMode === "agent-chat") {
+    if (appMode === "chat" || appMode === "advanced-chat" || appMode === "agent-chat" || appMode === "completion") {
       const query = els.runChatflowQuery.value.trim();
-      if (!query) {
+      if (!query && appMode !== "completion") {
         throw new Error(`${appMode === "agent-chat" ? "Agent" : appMode === "chat" ? "聊天助手" : "Chatflow"} Query is required.`);
       }
       const conversationId = els.runConversationId.value.trim();
       const payload = {
         app_id: valueOf("#run-app-id"),
         query,
-        inputs: {},
-        conversation_id: conversationId || null,
-        parent_message_id: conversationId && conversationId === state.chatflow.conversationId
-          ? state.chatflow.parentMessageId || null
-          : null,
+        inputs: appMode === "completion" ? parseJsonField("#run-inputs", "Inputs JSON") : {},
         timeout_seconds: Number(valueOf("#run-timeout") || 120),
       };
-      const runPath = appMode === "agent-chat"
+      if (appMode !== "completion") {
+        payload.conversation_id = conversationId || null;
+        payload.parent_message_id = conversationId && conversationId === state.chatflow.conversationId
+          ? state.chatflow.parentMessageId || null
+          : null;
+      }
+      const runPath = appMode === "completion"
+        ? "/api/tasks/completions/run/draft"
+        : appMode === "agent-chat"
         ? "/api/tasks/agents/run/draft"
         : appMode === "chat"
         ? "/api/tasks/chatbots/run/draft"
         : "/api/tasks/chatflows/run/draft";
-      const runKind = appMode === "agent-chat" ? "agent-run" : appMode === "chat" ? "chatbot-run" : "chatflow-run";
+      const runKind = appMode === "completion" ? "completion-run" : appMode === "agent-chat" ? "agent-run" : appMode === "chat" ? "chatbot-run" : "chatflow-run";
       await submitBackgroundTask("run", runPath, {
         ...payload,
       }, {
@@ -2874,6 +2882,22 @@ function completeBackgroundTask(metadata, data) {
     renderResult({ ...data, app_mode: "chat" }, "outputs");
     return;
   }
+  if (metadata.kind === "completion-run") {
+    setAppMode("completion");
+    syncAppContext({ ...data, app_mode: "completion" }, payload.app_id);
+    rememberApp(
+      { ...data, app_mode: "completion" },
+      {
+        operation: "completion draft",
+        request: payload.query || JSON.stringify(payload.inputs || {}),
+        appId: payload.app_id,
+        lastRunStatus: data.status,
+      }
+    );
+    setPanelStatus(els.runStatus, data.status || "Done", runStatusTone(data));
+    renderResult({ ...data, app_mode: "completion" }, "outputs");
+    return;
+  }
   if (metadata.kind === "agent-run") {
     state.chatflow.conversationId = data.conversation_id || payload.conversation_id || "";
     state.chatflow.parentMessageId = data.message_id || "";
@@ -3112,6 +3136,7 @@ function backgroundTaskPath(operation) {
     "workflow.run.draft": "/api/tasks/workflows/run/draft",
     "chatflow.run.draft": "/api/tasks/chatflows/run/draft",
     "chatbot.run.draft": "/api/tasks/chatbots/run/draft",
+    "completion.run.draft": "/api/tasks/completions/run/draft",
     "agent.run.draft": "/api/tasks/agents/run/draft",
     "workflow.publish": "/api/tasks/workflows/publish",
   }[operation] || "";
@@ -3125,6 +3150,7 @@ function backgroundTaskKind(operation) {
     "workflow.run.draft": "run",
     "chatflow.run.draft": "chatflow-run",
     "chatbot.run.draft": "chatbot-run",
+    "completion.run.draft": "completion-run",
     "agent.run.draft": "agent-run",
     "workflow.publish": "publish",
   }[operation] || "";
@@ -3822,6 +3848,14 @@ function planSummary(plan) {
       model: [plan.model?.provider, plan.model?.name].filter(Boolean).join(" / ") || "default",
     });
   }
+  if (plan?.app_mode === "chat" || plan?.app_mode === "completion") {
+    return keyValueGroup(plan.app_mode === "completion" ? "Completion summary" : "Chatbot summary", {
+      name: plan.name || "Untitled",
+      mode: plan.app_mode,
+      model: [plan.model?.provider, plan.model?.name].filter(Boolean).join(" / ") || "default",
+      prompt: truncateText(plan.pre_prompt || "", 160),
+    });
+  }
   const nodes = Array.isArray(plan.nodes) ? plan.nodes : [];
   const edges = Array.isArray(plan.edges) ? plan.edges : [];
   return keyValueGroup("Plan summary", {
@@ -4440,6 +4474,9 @@ function historyMeta(item) {
 }
 
 function appModeLabel(mode) {
+  if (mode === "completion") {
+    return "文本生成应用";
+  }
   if (mode === "chat") {
     return "聊天助手";
   }
@@ -4474,6 +4511,10 @@ function selectHistoryItem(index) {
     state.chatflow.conversationId = item.conversation_id || "";
     state.chatflow.parentMessageId = item.message_id || "";
     els.runConversationId.value = state.chatflow.conversationId;
+  } else if (item.app_mode === "completion") {
+    state.chatflow.conversationId = "";
+    state.chatflow.parentMessageId = "";
+    els.runConversationId.value = "";
   }
   renderResult(
     {

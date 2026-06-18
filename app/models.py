@@ -37,7 +37,7 @@ NodeType = Literal[
     "trigger-plugin",
     "trigger-schedule",
 ]
-AppMode = Literal["workflow", "advanced-chat", "chat", "agent-chat"]
+AppMode = Literal["workflow", "advanced-chat", "chat", "agent-chat", "completion"]
 ENTRY_NODE_TYPES = {"start", "datasource", "trigger-webhook", "trigger-plugin", "trigger-schedule"}
 InputType = Literal["text", "paragraph", "number", "boolean", "file", "file-list", "json"]
 ConversationVariableType = Literal[
@@ -376,6 +376,14 @@ class ChatbotRunDraftRequest(BaseModel):
     files: list[dict[str, Any]] | None = None
     conversation_id: str | None = None
     parent_message_id: str | None = None
+    timeout_seconds: float = Field(default=120, gt=0)
+
+
+class CompletionRunDraftRequest(BaseModel):
+    app_id: str = Field(min_length=1)
+    query: str = ""
+    inputs: dict[str, Any] = Field(default_factory=dict)
+    files: list[dict[str, Any]] | None = None
     timeout_seconds: float = Field(default=120, gt=0)
 
 

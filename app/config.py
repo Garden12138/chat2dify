@@ -126,7 +126,7 @@ class Settings:
         return f"{self.dify_console_web_base}/app/{app_id}/workflow"
 
     def app_url(self, app_id: str, mode: str | None = None) -> str:
-        if mode in {"chat", "agent-chat"}:
+        if mode in {"chat", "agent-chat", "completion"}:
             return f"{self.dify_console_web_base}/app/{app_id}/configuration"
         return self.workflow_url(app_id)
 

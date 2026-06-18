@@ -1150,6 +1150,48 @@ class DifyClient:
             self.login()
         raise DifyClientError("Dify Agent chat run authorization failed after login.")
 
+    def run_completion(
+        self,
+        app_id: str,
+        *,
+        query: str,
+        model_config: dict[str, Any],
+        inputs: dict[str, Any] | None = None,
+        files: list[dict[str, Any]] | None = None,
+        timeout_seconds: float = 120,
+        cancellation_check: Callable[[], None] | None = None,
+        event_callback: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
+    ) -> DifyChatflowRunResult:
+        if cancellation_check is not None:
+            cancellation_check()
+        self._ensure_logged_in()
+        payload: dict[str, Any] = {
+            "query": query,
+            "inputs": inputs or {},
+            "model_config": model_config,
+            "response_mode": "streaming",
+            "retriever_from": "dev",
+        }
+        if files is not None:
+            payload["files"] = files
+        for auth_attempt in range(3):
+            result = self._run_chat_messages_once(
+                app_id,
+                path=f"/apps/{app_id}/completion-messages",
+                payload=payload,
+                timeout_seconds=timeout_seconds,
+                app_mode="completion",
+                stream_label="Dify Completion",
+                cancellation_check=cancellation_check,
+                event_callback=event_callback,
+            )
+            if result is not None:
+                return result
+            if auth_attempt == 0 and self.refresh_token():
+                continue
+            self.login()
+        raise DifyClientError("Dify Completion run authorization failed after login.")
+
     def _ensure_logged_in(self) -> None:
         if not self.csrf_token:
             self.login()
@@ -1256,6 +1298,7 @@ class DifyClient:
         self,
         app_id: str,
         *,
+        path: str | None = None,
         payload: dict[str, Any],
         timeout_seconds: float,
         app_mode: str,
@@ -1263,7 +1306,7 @@ class DifyClient:
         cancellation_check: Callable[[], None] | None = None,
         event_callback: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
     ) -> DifyChatflowRunResult | None:
-        path = f"/apps/{app_id}/chat-messages"
+        path = path or f"/apps/{app_id}/chat-messages"
         try:
             with self._client.stream(
                 "POST",
