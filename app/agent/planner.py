@@ -334,6 +334,7 @@ class WorkflowPlanner:
         message: str,
         *,
         app_name: str | None = None,
+        app_description: str | None = None,
         app_mode: str = "workflow",
         dsl_version: str,
         tool_selections: list[dict[str, Any]] | None = None,
@@ -358,6 +359,7 @@ class WorkflowPlanner:
             normalized = normalize_plan_payload(
                 fallback_payload,
                 app_name=app_name,
+                app_description=app_description,
                 app_mode=app_mode,
                 default_dataset_ids=self.settings.dify_default_dataset_ids,
                 tool_selections=tool_selections or [],
@@ -436,6 +438,8 @@ class WorkflowPlanner:
                 "tool_selections": tool_selections or [],
                 "agent_selections": agent_selections or [],
             }
+            if app_description:
+                call_kwargs["app_description"] = app_description
             if model_selections:
                 call_kwargs["model_selections"] = model_selections
             if app_mode == "advanced-chat":
@@ -459,6 +463,7 @@ class WorkflowPlanner:
                 normalized = normalize_plan_payload(
                     raw_plan,
                     app_name=app_name,
+                    app_description=app_description,
                     app_mode=app_mode,
                     default_dataset_ids=self.settings.dify_default_dataset_ids,
                     tool_selections=tool_selections or [],
@@ -565,6 +570,7 @@ class WorkflowPlanner:
         message: str,
         *,
         app_name: str | None,
+        app_description: str | None = None,
         last_error: str = "",
         tool_selections: list[dict[str, Any]] | None = None,
         agent_selections: list[dict[str, Any]] | None = None,
@@ -577,6 +583,7 @@ class WorkflowPlanner:
         url = _chat_completions_url(runtime.base_url)
         user_content = {
             "app_name": app_name or "Generated Workflow",
+            "app_description": app_description or "",
             "request": message,
             "app_mode": app_mode,
             "selected_tools": _planner_tool_schemas(tool_selections or []),

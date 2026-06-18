@@ -328,6 +328,7 @@ class WorkflowTriggerSelection(BaseModel):
 class WorkflowRequest(BaseModel):
     message: str = Field(min_length=1)
     app_name: str | None = None
+    app_description: str | None = None
     app_mode: AppMode = "workflow"
     dry_run: bool = False
     dataset_ids: list[str] | None = None
@@ -344,6 +345,8 @@ class WorkflowModifyRequest(BaseModel):
     expected_hash: str | None = None
     allow_destructive: bool = False
     plan: WorkflowPlan | None = None
+    configured_model_config: dict[str, Any] | None = None
+    configured_model_config_changes: list[dict[str, Any]] | None = None
     dataset_ids: list[str] | None = None
     tool_selections: list[WorkflowToolSelection] | None = None
     agent_selections: list[WorkflowAgentSelection] | None = None

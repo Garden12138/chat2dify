@@ -50,121 +50,42 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
 
     assert index.status_code == 200
     assert "chat2dify" in index.text
-    assert 'id="create-form"' in index.text
-    assert 'id="create-app-mode"' in index.text
-    assert 'id="create-submit"' in index.text
-    assert 'id="create-runtime-provider"' in index.text
-    assert 'id="create-runtime-model"' in index.text
-    assert 'id="planner-form"' in index.text
-    assert 'id="planner-provider"' in index.text
-    assert 'id="planner-model"' in index.text
-    assert 'id="create-duration"' in index.text
-    assert 'id="create-task-progress"' in index.text
-    assert 'id="create-cancel-task"' in index.text
-    assert 'id="modify-duration"' in index.text
-    assert 'id="modify-runtime-provider"' in index.text
-    assert 'id="modify-runtime-model"' in index.text
-    assert 'id="modify-task-progress"' in index.text
-    assert 'id="modify-cancel-task"' in index.text
-    assert 'id="run-duration"' in index.text
-    assert 'id="run-task-progress"' in index.text
-    assert 'id="run-cancel-task"' in index.text
-    assert 'id="run-app-mode"' in index.text
-    assert 'id="run-chatflow-query"' in index.text
-    assert 'id="run-conversation-id"' in index.text
-    assert 'id="new-chatflow-conversation"' in index.text
-    assert 'id="history-list"' in index.text
-    assert 'id="knowledge-search"' in index.text
-    assert 'id="refresh-datasets"' in index.text
-    assert 'id="knowledge-dataset-list"' in index.text
-    assert 'id="knowledge-dataset-ids"' in index.text
-    assert 'id="tools-form"' in index.text
-    assert 'id="tools-list"' in index.text
-    assert 'id="tools-type"' in index.text
-    assert 'id="agents-form"' in index.text
-    assert 'id="agents-list"' in index.text
-    assert 'id="agents-search"' in index.text
-    assert "Agent Strategies" in index.text
-    assert 'id="trigger-form"' in index.text
-    assert 'id="trigger-type"' in index.text
-    assert 'id="trigger-plugin-fields"' in index.text
-    assert 'id="trigger-plugin-event"' in index.text
-    assert 'id="trigger-plugin-subscription"' in index.text
-    assert 'id="trigger-plugin-parameters"' in index.text
-    assert 'id="publish-form"' in index.text
-    assert 'id="publish-submit"' in index.text
-    assert 'id="publish-help"' in index.text
-    assert 'id="workflow-trigger-list"' in index.text
-    assert 'id="result-tabs"' in index.text
-    assert 'id="load-draft"' in index.text
+    assert 'id="chat-log"' in index.text
+    assert 'id="chat-form"' in index.text
+    assert 'id="chat-input"' in index.text
+    assert 'id="chat-submit"' in index.text
+    assert 'id="create-form"' not in index.text
+    assert 'id="modify-form"' not in index.text
+    assert 'id="run-form"' not in index.text
+    assert 'id="planner-form"' not in index.text
+    assert 'id="knowledge-form"' not in index.text
+    assert 'id="tools-form"' not in index.text
+    assert 'id="agents-form"' not in index.text
+    assert 'id="trigger-form"' not in index.text
     assert script.status_code == 200
-    assert "handleCreate" in script.text
-    assert "chatflow.run.draft" in script.text
-    assert "chatflow-run" in script.text
-    assert 'value="chat">聊天助手' in index.text
-    assert "chatbot.run.draft" in script.text
-    assert "chatbot-run" in script.text
-    assert "completion.run.draft" in script.text
-    assert "completion-run" in script.text
-    assert 'value === "chat" || value === "advanced-chat" || value === "agent-chat" || value === "completion"' in script.text
-    assert 'return "聊天助手";' in script.text
-    assert 'value="completion">文本生成应用' in index.text
-    assert 'value="agent-chat">Agent' in index.text
-    assert 'id="run-conversation-fields"' in index.text
-    assert "agent.run.draft" in script.text
-    assert "agent-run" in script.text
-    assert "setAppMode" in script.text
-    assert 'state.appMode === "workflow" ? currentTriggerSelection() : null' in script.text
-    assert 'els.modifyPanel.classList.toggle("is-hidden", false)' in script.text
-    assert 'els.modifyTitle.textContent = isAgent ? "Modify Agent"' in script.text
-    assert 'els.publishPanel.classList.toggle("is-hidden", isConfiguredApp)' in script.text
-    assert "loadRuntimeModels" in script.text
-    assert "currentRuntimeModelSelections" in script.text
-    assert "modelSelectionsEqual" in script.text
-    assert "payload.model_selections = modelSelections" in script.text
-    assert "loadPlannerProviders" in script.text
-    assert "currentPlannerSelection" in script.text
-    assert "formatTaskDuration" in script.text
-    assert "setTaskDuration" in script.text
-    assert "submitBackgroundTask" in script.text
-    assert "pollBackgroundTask" in script.text
-    assert "ACTIVE_TASKS_KEY" in script.text
-    assert "TERMINAL_TASKS_KEY" in script.text
-    assert "retryTerminalTask" in script.text
-    assert "restoreTerminalTasks" in script.text
-    assert "Retry starts a new task" in script.text
-    assert "handleLoadDraft" in script.text
-    assert "handleReviewedPreviewApply" in script.text
-    assert "modifyPreview" in script.text
-    assert "triggerSelectionFromPlan" in script.text
-    assert "loadedTriggerSelection" in script.text
-    assert "DATASET_IDS_KEY" in script.text
-    assert "SELECTED_DATASET_IDS_KEY" in script.text
-    assert "loadDatasets" in script.text
-    assert "currentDatasetIds" in script.text
-    assert "loadTools" in script.text
-    assert "currentToolSelections" in script.text
-    assert "toolConfigurationPanel" in script.text
-    assert "tool_configurations" in script.text
-    assert "tool_parameters" in script.text
-    assert "loadAgentStrategies" in script.text
-    assert app.version == "1.1.0"
-    assert "currentAgentSelections" in script.text
-    assert "agentConfigurationPanel" in script.text
-    assert "agent_parameters" in script.text
-    assert "ensureAgentSelectionReady" in script.text
-    assert "currentTriggerSelection" in script.text
-    assert "handlePublish" in script.text
-    assert "loadWorkflowTriggers" in script.text
-    assert "Applied reviewed preview" in script.text
-    assert "localStorage" in script.text
-    assert "renderValidationPanel" in script.text
-    assert "planNodeOverview" in script.text
+    assert "handleUserMessage" in script.text
+    assert "executePendingAction" in script.text
+    assert "/api/assistant/plan" in script.text
+    assert "/api/assistant/execute" in script.text
+    assert "/api/tasks/" in script.text
+    assert "state.context" in script.text
+    assert "pendingAction" in script.text
+    assert "addActionCard" in script.text
+    assert "addResultMessage" in script.text
+    assert "active_app" in script.text
+    assert "recent_apps" in script.text
+    assert "configured_model_config" in script.text
+    assert "prepareApplyActionFromPreview" in script.text
+    assert "workflow.modify.apply" in script.text
+    assert "尚未写回 Dify" in script.text
+    assert "applyContextHints(text)" not in script.text
+    assert app.version == "2.0.0"
     assert styles.status_code == 200
-    assert ".workspace" in styles.text
-    assert ".history-item" in styles.text
-    assert ".tab-button" in styles.text
-    assert ".node-card" in styles.text
+    assert ".chat-shell" in styles.text
+    assert ".chat-composer" in styles.text
+    assert ".message-user" in styles.text
+    assert ".message-card" in styles.text
+    assert ".result-rows" in styles.text
 
 
 def test_health_returns_configured_dataset_count(monkeypatch) -> None:

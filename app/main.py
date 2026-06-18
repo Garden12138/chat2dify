@@ -9,6 +9,7 @@ import re
 from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import ValidationError
 
 from app.agent.diff import diff_plans
 from app.agent.editor import WorkflowEditPlanner
@@ -16,6 +17,12 @@ from app.agent.explainer import explain_plan
 from app.agent.guard import guard_plan_change
 from app.agent.normalizer import normalize_plan_payload
 from app.agent.planner import PlannerError, WorkflowPlanner
+from app.assistant import (
+    AssistantExecuteRequest,
+    AssistantPlanRequest,
+    assistant_task_meta,
+    plan_assistant_action,
+)
 from app.compiler.agent import (
     agent_app_plan_payload,
     agent_tool_configs,
@@ -81,7 +88,7 @@ async def lifespan(application: FastAPI):
         task_manager.close()
 
 
-app = FastAPI(title="chat2dify", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="chat2dify", version="2.0.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -281,6 +288,7 @@ def _draft_workflow(request: WorkflowRequest, *, task_context: TaskContext | Non
         planner_result = WorkflowPlanner(effective_settings).generate(
             request.message,
             app_name=request.app_name,
+            app_description=request.app_description,
             dsl_version=version_info.app_dsl_version,
             **planner_kwargs,
         )
@@ -364,6 +372,7 @@ def _draft_agent_app(
     dsl = compile_agent_app_dsl(
         message=request.message,
         app_name=request.app_name,
+        app_description=request.app_description,
         dsl_version=version_info.app_dsl_version,
         settings=effective_settings,
         model_selections=runtime_models,
@@ -373,6 +382,7 @@ def _draft_agent_app(
     plan = agent_app_plan_payload(
         message=request.message,
         app_name=request.app_name,
+        app_description=request.app_description,
         settings=effective_settings,
         model_selections=runtime_models,
         tool_selections=tool_payloads,
@@ -434,6 +444,7 @@ def _draft_chat_app(
     dsl = compile_chat_app_dsl(
         message=request.message,
         app_name=request.app_name,
+        app_description=request.app_description,
         dsl_version=version_info.app_dsl_version,
         settings=effective_settings,
         model_selections=runtime_models,
@@ -442,6 +453,7 @@ def _draft_chat_app(
     plan = chat_app_plan_payload(
         message=request.message,
         app_name=request.app_name,
+        app_description=request.app_description,
         settings=effective_settings,
         model_selections=runtime_models,
     )
@@ -502,6 +514,7 @@ def _draft_completion_app(
     dsl = compile_completion_app_dsl(
         message=request.message,
         app_name=request.app_name,
+        app_description=request.app_description,
         dsl_version=version_info.app_dsl_version,
         settings=effective_settings,
         model_selections=runtime_models,
@@ -510,6 +523,7 @@ def _draft_completion_app(
     plan = completion_app_plan_payload(
         message=request.message,
         app_name=request.app_name,
+        app_description=request.app_description,
         settings=effective_settings,
         model_selections=runtime_models,
     )
@@ -1408,17 +1422,28 @@ def _modify_configured_app(
             },
         )
 
-    if task_context is not None:
-        task_context.update("revising-config", 55, f"Revising {label} prompt configuration.")
-    revised_config, changes = _revise_configured_model_config(
-        current_config,
-        request.message,
-        app_mode=mode_label,
-        model_selections=runtime_models if request.model_selections else None,
-        tool_selections=_tool_selection_payloads(request.tool_selections)
-        if request.tool_selections
-        else None,
-    )
+    uses_preview_config = apply and request.configured_model_config is not None
+    if uses_preview_config:
+        if task_context is not None:
+            task_context.update(
+                "validating-preview-config",
+                55,
+                f"Using the reviewed {label} configuration preview.",
+            )
+        revised_config = deepcopy(request.configured_model_config)
+        changes = deepcopy(request.configured_model_config_changes or [])
+    else:
+        if task_context is not None:
+            task_context.update("revising-config", 55, f"Revising {label} prompt configuration.")
+        revised_config, changes = _revise_configured_model_config(
+            current_config,
+            request.message,
+            app_mode=mode_label,
+            model_selections=runtime_models if request.model_selections else None,
+            tool_selections=_tool_selection_payloads(request.tool_selections)
+            if request.tool_selections
+            else None,
+        )
     no_op = revised_config == current_config
     response = {
         "app_id": request.app_id,
@@ -1431,11 +1456,14 @@ def _modify_configured_app(
         "changes": changes,
         "explanation": {
             "summary": f"Updates the {label} prompt configuration.",
-            "changes": [change["message"] for change in changes],
+            "changes": [
+                change.get("message") or change.get("type") or "updated"
+                for change in changes
+            ],
             "mode": mode_label,
         },
         "planner": {
-            "mode": f"{mode_label}-config-template",
+            "mode": f"{mode_label}-config-preview" if uses_preview_config else f"{mode_label}-config-template",
             "attempts": 0,
             "used_fallback": True,
             "repaired": False,
@@ -1484,6 +1512,90 @@ def _modify_configured_app(
     response["sync"] = sync
     response["new_hash"] = _model_config_hash_from_payload(sync) or refreshed_hash or base_hash
     return response
+
+
+@app.post("/api/assistant/plan")
+def plan_assistant(request: AssistantPlanRequest) -> dict:
+    return plan_assistant_action(request).model_dump(mode="json")
+
+
+@app.post("/api/assistant/execute", status_code=status.HTTP_202_ACCEPTED)
+def execute_assistant(request: AssistantExecuteRequest, http_request: Request) -> dict:
+    action = request.action
+    operation = action.operation
+    payload = action.payload
+    if not payload:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "ASSISTANT_ACTION_PAYLOAD_REQUIRED",
+                "message": "Assistant execute requires a confirmed action payload.",
+            },
+        )
+    try:
+        assistant_task_meta(operation)
+        task_request = _assistant_task_request(operation, payload)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "ASSISTANT_ACTION_INVALID",
+                "message": "Assistant action payload does not match the target operation.",
+                "issues": exc.errors(),
+            },
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "ASSISTANT_OPERATION_UNSUPPORTED", "message": str(exc)},
+        ) from exc
+
+    return _submit_task(
+        http_request,
+        operation,
+        task_request.model_dump(mode="json"),
+        _assistant_task_runner(operation, task_request),
+    )
+
+
+def _assistant_task_request(operation: str, payload: dict) -> object:
+    match operation:
+        case "workflow.create":
+            return WorkflowRequest.model_validate(payload)
+        case "workflow.modify.draft" | "workflow.modify.apply":
+            return WorkflowModifyRequest.model_validate(payload)
+        case "workflow.run.draft":
+            return WorkflowRunDraftRequest.model_validate(payload)
+        case "chatflow.run.draft":
+            return ChatflowRunDraftRequest.model_validate(payload)
+        case "chatbot.run.draft":
+            return ChatbotRunDraftRequest.model_validate(payload)
+        case "completion.run.draft":
+            return CompletionRunDraftRequest.model_validate(payload)
+        case "agent.run.draft":
+            return AgentRunDraftRequest.model_validate(payload)
+    raise ValueError(f"Unsupported assistant operation: {operation}")
+
+
+def _assistant_task_runner(operation: str, task_request: object):
+    match operation:
+        case "workflow.create":
+            return lambda context: _create_workflow(task_request, task_context=context)
+        case "workflow.modify.draft":
+            return lambda context: _modify_workflow(task_request, apply=False, task_context=context)
+        case "workflow.modify.apply":
+            return lambda context: _modify_workflow(task_request, apply=True, task_context=context)
+        case "workflow.run.draft":
+            return lambda context: _run_draft_workflow(task_request, task_context=context)
+        case "chatflow.run.draft":
+            return lambda context: _run_draft_chatflow(task_request, task_context=context)
+        case "chatbot.run.draft":
+            return lambda context: _run_draft_chatbot(task_request, task_context=context)
+        case "completion.run.draft":
+            return lambda context: _run_draft_completion(task_request, task_context=context)
+        case "agent.run.draft":
+            return lambda context: _run_draft_agent(task_request, task_context=context)
+    raise ValueError(f"Unsupported assistant operation: {operation}")
 
 
 @app.post("/api/tasks/workflows/create", status_code=status.HTTP_202_ACCEPTED)

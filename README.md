@@ -2,6 +2,20 @@
 
 Generate Dify Workflows and Chatflows via Natural Language Conversation.
 
+## v2.0.0
+
+The Web UI is now a single chat box backed by `POST /api/assistant/plan` and
+`POST /api/assistant/execute`. The assistant is a deterministic orchestrator
+over the existing create, modify, and draft-run task APIs: it identifies the
+requested app type and action from natural language, asks for missing details in
+the conversation, returns a pending action for review, and only submits the
+background task after explicit confirmation. It supports Workflow, Chatflow,
+Agent, Chatbot, and Completion apps without rendering the v1 manual panels.
+The v2 assistant keeps the current app in the browser-side conversation context,
+so follow-up turns such as "modify this app" or "run the Chatflow again: ..."
+can reuse the latest app ID. Workflow draft runs also accept natural-language
+test text and map it to `inputs.query` unless explicit JSON inputs are supplied.
+
 ## v1.1.0
 
 Chatflow creation now has certified support for common Dify node combinations:
