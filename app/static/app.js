@@ -12,6 +12,7 @@ const state = {
 const els = {
   healthStatus: document.querySelector("#health-status"),
   refreshHealth: document.querySelector("#refresh-health"),
+  plannerSelect: document.querySelector("#planner-select"),
   chatLog: document.querySelector("#chat-log"),
   chatForm: document.querySelector("#chat-form"),
   chatInput: document.querySelector("#chat-input"),
@@ -23,27 +24,113 @@ document.addEventListener("DOMContentLoaded", () => {
   addAssistantMessage(
     "告诉我你想创建、修改或测试运行哪类应用。所有信息都可以直接写在这里，比如：创建一个 Agent，名字叫售后助手，帮我分析投诉。"
   );
-  refreshHealth();
+  refreshHeader();
 });
 
 function bindEvents() {
-  els.refreshHealth.addEventListener("click", refreshHealth);
+  els.refreshHealth.addEventListener("click", refreshHeader);
+  els.plannerSelect.addEventListener("change", updatePlannerSelection);
   els.chatForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     await handleUserMessage();
   });
 }
 
+function refreshHeader() {
+  refreshHealth();
+  refreshPlannerProviders();
+}
+
 async function refreshHealth() {
   setHealth("Checking", "muted");
   try {
     const data = await requestJson("/health");
-    const model = data.default_model || {};
-    setHealth(`${data.status} · ${model.name || "model"}`, "ok");
+    setHealth(data.status || "ok", "ok");
   } catch (error) {
     setHealth("Error", "error");
     addAssistantMessage(error.message || "Health check failed.");
   }
+}
+
+async function refreshPlannerProviders() {
+  setPlannerOptions([{ label: "Loading", disabled: true }]);
+  try {
+    const data = await requestJson("/api/planner/providers");
+    renderPlannerProviders(data);
+  } catch (error) {
+    state.context.planner = null;
+    setPlannerOptions([{ label: "Planner unavailable", disabled: true }]);
+  }
+}
+
+function renderPlannerProviders(data) {
+  const defaultProvider = data.default_provider || "";
+  const defaultModel = data.default_model || "";
+  const options = [];
+  for (const provider of data.providers || []) {
+    if (!provider.configured) {
+      continue;
+    }
+    for (const model of provider.models || []) {
+      const isDefault = provider.id === defaultProvider && model.id === defaultModel;
+      options.push({
+        provider: provider.id,
+        model: model.id,
+        label: plannerOptionLabel(provider, model, isDefault),
+      });
+    }
+  }
+  if (!options.length) {
+    state.context.planner = null;
+    setPlannerOptions([{ label: "No planner key", disabled: true }]);
+    return;
+  }
+
+  const current = state.context.planner;
+  const selected =
+    options.find((item) => item.provider === current?.provider && item.model === current?.model) ||
+    options.find((item) => item.provider === defaultProvider && item.model === defaultModel) ||
+    options[0];
+  setPlannerOptions(options, selected);
+  state.context.planner = { provider: selected.provider, model: selected.model };
+}
+
+function plannerOptionLabel(provider, model, isDefault) {
+  const providerLabel = provider.label || provider.id;
+  const modelLabel = model.label || model.id;
+  return `${providerLabel} · ${modelLabel}${isDefault ? " (default)" : ""}`;
+}
+
+function setPlannerOptions(options, selected = null) {
+  els.plannerSelect.replaceChildren(
+    ...options.map((item) => {
+      const option = document.createElement("option");
+      option.textContent = item.label;
+      option.disabled = Boolean(item.disabled);
+      if (item.provider && item.model) {
+        option.value = `${item.provider}::${item.model}`;
+        option.dataset.provider = item.provider;
+        option.dataset.model = item.model;
+      }
+      if (selected && item.provider === selected.provider && item.model === selected.model) {
+        option.selected = true;
+      }
+      return option;
+    })
+  );
+  els.plannerSelect.disabled = options.every((item) => item.disabled);
+}
+
+function updatePlannerSelection() {
+  const option = els.plannerSelect.selectedOptions[0];
+  if (!option?.dataset.provider || !option?.dataset.model) {
+    state.context.planner = null;
+    return;
+  }
+  state.context.planner = {
+    provider: option.dataset.provider,
+    model: option.dataset.model,
+  };
 }
 
 async function handleUserMessage() {
@@ -101,7 +188,7 @@ async function planMessage(planningText, latestText) {
 }
 
 async function executePendingAction() {
-  const action = state.pendingAction;
+  const action = actionWithCurrentPlanner(state.pendingAction);
   if (!action) {
     addAssistantMessage("当前没有待确认操作。");
     return;
@@ -131,6 +218,22 @@ async function executePendingAction() {
     addAssistantMessage(errorMessage(error));
     setComposerBusy(false);
   }
+}
+
+function actionWithCurrentPlanner(action) {
+  if (!action) {
+    return null;
+  }
+  if (!["workflow.create", "workflow.modify.draft", "workflow.modify.apply"].includes(action.operation)) {
+    return action;
+  }
+  const payload = { ...(action.payload || {}) };
+  if (state.context.planner) {
+    payload.planner = state.context.planner;
+  } else {
+    delete payload.planner;
+  }
+  return { ...action, payload };
 }
 
 async function pollTask() {

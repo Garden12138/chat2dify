@@ -54,6 +54,7 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert 'id="chat-form"' in index.text
     assert 'id="chat-input"' in index.text
     assert 'id="chat-submit"' in index.text
+    assert 'id="planner-select"' in index.text
     assert 'id="create-form"' not in index.text
     assert 'id="modify-form"' not in index.text
     assert 'id="run-form"' not in index.text
@@ -67,8 +68,10 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert "executePendingAction" in script.text
     assert "/api/assistant/plan" in script.text
     assert "/api/assistant/execute" in script.text
+    assert "/api/planner/providers" in script.text
     assert "/api/tasks/" in script.text
     assert "state.context" in script.text
+    assert "actionWithCurrentPlanner" in script.text
     assert "pendingAction" in script.text
     assert "addActionCard" in script.text
     assert "addResultMessage" in script.text
@@ -83,6 +86,7 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert styles.status_code == 200
     assert ".chat-shell" in styles.text
     assert ".chat-composer" in styles.text
+    assert ".planner-picker" in styles.text
     assert ".message-user" in styles.text
     assert ".message-card" in styles.text
     assert ".result-rows" in styles.text
@@ -118,7 +122,8 @@ def test_list_planner_providers_returns_nvidia_without_api_key(monkeypatch) -> N
     nvidia = next(item for item in data["providers"] if item["id"] == "nvidia")
     assert nvidia["configured"] is True
     assert nvidia["models"] == [
-        {"id": "deepseek-ai/deepseek-v4-flash", "label": "DeepSeek V4 Flash"}
+        {"id": "deepseek-ai/deepseek-v4-flash", "label": "DeepSeek V4 Flash"},
+        {"id": "deepseek-ai/deepseek-v4-pro", "label": "DeepSeek V4 Pro"},
     ]
     assert "nvapi-test" not in response.text
 

@@ -139,6 +139,59 @@ def test_planner_uses_nvidia_deepseek_v4_flash_payload(monkeypatch) -> None:
     assert user_payload["previous_validation_error"] == "bad plan"
 
 
+def test_planner_uses_nvidia_deepseek_v4_pro_payload(monkeypatch) -> None:
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": '{"nodes":[]}'}}]}
+
+    class FakeClient:
+        def __init__(self, *, timeout):
+            captured["timeout"] = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def post(self, url, *, json, headers):
+            captured["url"] = url
+            captured["payload"] = json
+            captured["headers"] = headers
+            return FakeResponse()
+
+        def stream(self, *_args, **_kwargs):
+            raise AssertionError("DeepSeek V4 Pro planner requests should not stream")
+
+    monkeypatch.setattr("app.agent.planner.httpx.Client", FakeClient)
+    planner = WorkflowPlanner(
+        _settings(
+            openai_api_key=None,
+            planner_provider="nvidia",
+            nvidia_api_key="nvapi-test",
+            extra_env={"NVIDIA_MODEL": "deepseek-ai/deepseek-v4-pro"},
+        )
+    )
+
+    content = planner._call_llm("生成售后工作流", app_name="售后")
+
+    assert content == '{"nodes":[]}'
+    assert captured["url"] == "https://integrate.api.nvidia.com/v1/chat/completions"
+    assert captured["headers"]["Authorization"] == "Bearer nvapi-test"
+    assert captured["payload"]["model"] == "deepseek-ai/deepseek-v4-pro"
+    assert captured["payload"]["temperature"] == 1
+    assert captured["payload"]["top_p"] == 0.95
+    assert captured["payload"]["max_tokens"] == 16384
+    assert captured["payload"]["chat_template_kwargs"] == {"thinking": False}
+    assert captured["payload"]["stream"] is False
+    assert "response_format" not in captured["payload"]
+
+
 def test_planner_uses_openrouter_nemotron_payload(monkeypatch) -> None:
     captured = {}
 
@@ -469,6 +522,16 @@ def test_planner_success_normalizes_shorthand() -> None:
     assert result.plan.nodes[0].params["variables"][0]["name"] == "question"
     assert result.plan.edges[1].source_handle == "refund"
     assert result.plan.edges[2].source_handle == "false"
+
+
+def test_planner_accepts_workflow_plan_wrapper_from_llm() -> None:
+    planner = FakePlanner([json.dumps({"WorkflowPlan": _shorthand_plan()})])
+
+    result = planner.generate("客服分流", app_name="客服分流", dsl_version="9.9.9")
+
+    assert result.used_fallback is False
+    assert result.plan.name == "客服分流"
+    assert result.plan.nodes[0].id == "start_1"
 
 
 def test_planner_accepts_understanding_nodes() -> None:

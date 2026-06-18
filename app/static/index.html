@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>chat2dify</title>
-    <link rel="stylesheet" href="/static/styles.css?v=chat-v2.0.2">
+    <link rel="stylesheet" href="/static/styles.css?v=chat-v2.0.3">
   </head>
   <body>
     <main class="chat-shell" aria-labelledby="app-title">
@@ -14,6 +14,12 @@
           <p>通过一个对话框创建、修改、测试运行 Dify 应用</p>
         </div>
         <div class="header-actions">
+          <label class="planner-picker" for="planner-select">
+            <span>Planner</span>
+            <select id="planner-select" aria-label="Planner LLM">
+              <option>Loading</option>
+            </select>
+          </label>
           <button id="refresh-health" type="button" class="secondary">Refresh</button>
           <span id="health-status" class="status-pill status-muted">Checking</span>
         </div>
@@ -33,6 +39,6 @@
       </form>
     </main>
 
-    <script src="/static/app.js?v=chat-v2.0.2" defer></script>
+    <script src="/static/app.js?v=chat-v2.0.3" defer></script>
   </body>
 </html>

@@ -10,6 +10,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DIFY_SOURCE_DIR = "../dify"
 DEFAULT_NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 DEFAULT_NVIDIA_MODEL = "deepseek-ai/deepseek-v4-flash"
+NVIDIA_DEEPSEEK_V4_PRO_MODEL = "deepseek-ai/deepseek-v4-pro"
+NVIDIA_PLANNER_MODELS = {
+    DEFAULT_NVIDIA_MODEL: {
+        "label": "DeepSeek V4 Flash",
+        "max_tokens": 8192,
+    },
+    NVIDIA_DEEPSEEK_V4_PRO_MODEL: {
+        "label": "DeepSeek V4 Pro",
+        "max_tokens": 16384,
+    },
+}
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_OPENROUTER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 
@@ -82,6 +93,9 @@ class Settings:
         if validate_dify:
             validate_dify_source_path(dify_source_path)
 
+        nvidia_model = source.get("NVIDIA_MODEL", DEFAULT_NVIDIA_MODEL).strip()
+        nvidia_max_tokens_default = str(_nvidia_model_max_tokens(nvidia_model))
+
         return cls(
             project_root=root,
             dify_source_dir=dify_source_dir,
@@ -111,7 +125,7 @@ class Settings:
             openai_model=source.get("OPENAI_MODEL", "gpt-4o-mini"),
             nvidia_api_key=_empty_to_none(source.get("NVIDIA_API_KEY")),
             nvidia_base_url=source.get("NVIDIA_BASE_URL", DEFAULT_NVIDIA_BASE_URL).rstrip("/"),
-            nvidia_model=source.get("NVIDIA_MODEL", DEFAULT_NVIDIA_MODEL),
+            nvidia_model=nvidia_model,
             nvidia_thinking=_boolean(source.get("NVIDIA_THINKING", "false"), name="NVIDIA_THINKING"),
             nvidia_reasoning_effort=_choice(
                 source.get("NVIDIA_REASONING_EFFORT", "low"),
@@ -119,7 +133,7 @@ class Settings:
                 allowed={"low", "medium", "high"},
             ),
             nvidia_max_tokens=_positive_int(
-                source.get("NVIDIA_MAX_TOKENS", "8192"),
+                source.get("NVIDIA_MAX_TOKENS", nvidia_max_tokens_default),
                 name="NVIDIA_MAX_TOKENS",
             ),
             openrouter_api_key=_empty_to_none(source.get("OPENROUTER_API_KEY")),
@@ -205,9 +219,19 @@ class Settings:
             )
         if selected_provider == "nvidia":
             selected_model = (model or self.nvidia_model).strip()
-            if selected_model != self.nvidia_model:
+            if selected_model not in NVIDIA_PLANNER_MODELS and selected_model != self.nvidia_model:
                 raise ConfigurationError(f"Unsupported NVIDIA planner model: {selected_model}")
-            return replace(self, planner_default_provider="nvidia", nvidia_model=selected_model)
+            nvidia_max_tokens = self.nvidia_max_tokens
+            if self.nvidia_model in NVIDIA_PLANNER_MODELS and selected_model in NVIDIA_PLANNER_MODELS:
+                current_default = _nvidia_model_max_tokens(self.nvidia_model)
+                if self.nvidia_max_tokens == current_default:
+                    nvidia_max_tokens = _nvidia_model_max_tokens(selected_model)
+            return replace(
+                self,
+                planner_default_provider="nvidia",
+                nvidia_model=selected_model,
+                nvidia_max_tokens=nvidia_max_tokens,
+            )
         if selected_provider == "openrouter":
             selected_model = (model or self.openrouter_model).strip()
             if selected_model != self.openrouter_model:
@@ -227,7 +251,7 @@ class Settings:
                 "id": "nvidia",
                 "label": "NVIDIA NIM",
                 "configured": bool(self.nvidia_api_key),
-                "models": [{"id": self.nvidia_model, "label": "DeepSeek V4 Flash"}],
+                "models": _nvidia_catalog_models(self.nvidia_model),
             },
             {
                 "id": "openrouter",
@@ -306,6 +330,23 @@ def _choice(value: str, *, name: str, allowed: set[str]) -> str:
         choices = ", ".join(sorted(allowed))
         raise ConfigurationError(f"{name} must be one of: {choices}.")
     return normalized
+
+
+def _nvidia_model_max_tokens(model: str) -> int:
+    entry = NVIDIA_PLANNER_MODELS.get(model)
+    if entry is None:
+        return NVIDIA_PLANNER_MODELS[DEFAULT_NVIDIA_MODEL]["max_tokens"]
+    return int(entry["max_tokens"])
+
+
+def _nvidia_catalog_models(selected_model: str) -> list[dict[str, str]]:
+    models = [
+        {"id": model, "label": str(config["label"])}
+        for model, config in NVIDIA_PLANNER_MODELS.items()
+    ]
+    if selected_model and selected_model not in NVIDIA_PLANNER_MODELS:
+        models.append({"id": selected_model, "label": selected_model})
+    return models
 
 
 def _csv_list(value: str | None) -> list[str]:

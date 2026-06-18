@@ -102,7 +102,10 @@ def test_nvidia_planner_configuration_and_catalog(tmp_path: Path) -> None:
         "id": "nvidia",
         "label": "NVIDIA NIM",
         "configured": True,
-        "models": [{"id": "deepseek-ai/deepseek-v4-flash", "label": "DeepSeek V4 Flash"}],
+        "models": [
+            {"id": "deepseek-ai/deepseek-v4-flash", "label": "DeepSeek V4 Flash"},
+            {"id": "deepseek-ai/deepseek-v4-pro", "label": "DeepSeek V4 Pro"},
+        ],
     }
     assert "nvapi-test" not in str(catalog)
 
@@ -164,6 +167,34 @@ def test_nvidia_deepseek_is_the_default_planner(tmp_path: Path) -> None:
     assert runtime.label == "NVIDIA NIM"
     assert runtime.model == "deepseek-ai/deepseek-v4-flash"
     assert runtime.timeout_seconds == 600
+
+
+def test_nvidia_deepseek_v4_pro_uses_model_default_max_tokens(tmp_path: Path) -> None:
+    settings = Settings.from_env(
+        {
+            "DIFY_SOURCE_DIR": "../dify",
+            "PLANNER_DEFAULT_PROVIDER": "nvidia",
+            "NVIDIA_API_KEY": "nvapi-test",
+            "NVIDIA_MODEL": "deepseek-ai/deepseek-v4-pro",
+        },
+        project_root=tmp_path,
+        validate_dify=False,
+    )
+
+    runtime = settings.planner_runtime()
+
+    assert runtime.provider == "nvidia"
+    assert runtime.model == "deepseek-ai/deepseek-v4-pro"
+    assert settings.nvidia_max_tokens == 16384
+
+
+def test_with_planner_accepts_nvidia_deepseek_v4_pro(tmp_path: Path) -> None:
+    settings = Settings.from_env({"DIFY_SOURCE_DIR": "../dify"}, project_root=tmp_path, validate_dify=False)
+
+    selected = settings.with_planner("nvidia", "deepseek-ai/deepseek-v4-pro")
+
+    assert selected.planner_runtime().model == "deepseek-ai/deepseek-v4-pro"
+    assert selected.nvidia_max_tokens == 16384
 
 
 def test_planner_timeout_must_be_positive(tmp_path: Path) -> None:

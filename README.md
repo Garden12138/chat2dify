@@ -181,11 +181,17 @@ PLANNER_TIMEOUT_SECONDS=600
 PLANNER_REQUEST_RETRIES=2
 NVIDIA_API_KEY=nvapi-...
 NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
+# Supported: deepseek-ai/deepseek-v4-flash, deepseek-ai/deepseek-v4-pro
 NVIDIA_MODEL=deepseek-ai/deepseek-v4-flash
 NVIDIA_THINKING=false
 NVIDIA_REASONING_EFFORT=low
 NVIDIA_MAX_TOKENS=8192
 ```
+
+When `NVIDIA_MODEL=deepseek-ai/deepseek-v4-pro`, chat2dify sends non-streaming
+NVIDIA requests with `temperature=1`, `top_p=0.95`,
+`chat_template_kwargs.thinking=false`, and defaults `NVIDIA_MAX_TOKENS` to
+`16384` unless overridden.
 
 OpenRouter can be used as the default Planner or as a fallback when NVIDIA is
 rate limited or temporarily unavailable:

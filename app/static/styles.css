@@ -27,6 +27,7 @@ body {
 }
 
 button,
+select,
 textarea {
   font: inherit;
 }
@@ -104,6 +105,32 @@ h1 {
   align-items: center;
   gap: 9px;
   flex-wrap: wrap;
+}
+
+.planner-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 780;
+}
+
+.planner-picker select {
+  max-width: 270px;
+  min-height: 38px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  padding: 7px 9px;
+}
+
+.planner-picker select:disabled {
+  color: var(--muted);
+  opacity: 0.72;
 }
 
 .status-pill {
@@ -239,6 +266,20 @@ details summary {
     align-items: flex-start;
     flex-direction: column;
     padding: 16px;
+  }
+
+  .header-actions {
+    width: 100%;
+  }
+
+  .planner-picker {
+    width: 100%;
+  }
+
+  .planner-picker select {
+    flex: 1;
+    max-width: none;
+    min-width: 0;
   }
 
   .chat-log {

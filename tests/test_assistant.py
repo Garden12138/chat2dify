@@ -359,11 +359,14 @@ def test_assistant_web_ui_assets_are_present(monkeypatch, tmp_path) -> None:
     assert 'id="chat-form"' in index.text
     assert 'id="chat-log"' in index.text
     assert 'id="chat-input"' in index.text
+    assert 'id="planner-select"' in index.text
     assert 'id="create-form"' not in index.text
     assert "/api/assistant/plan" in script.text
     assert "/api/assistant/execute" in script.text
+    assert "/api/planner/providers" in script.text
     assert "pendingAction" in script.text
     assert "executePendingAction" in script.text
+    assert "actionWithCurrentPlanner" in script.text
     assert "addActionCard" in script.text
     assert "active_app" in script.text
     assert "recent_apps" in script.text

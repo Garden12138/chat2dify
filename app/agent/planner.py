@@ -10,7 +10,7 @@ import httpx
 
 from app.agent.normalizer import normalize_plan_payload
 from app.compiler.dify import DifyDslCompiler
-from app.config import PlannerRuntime, Settings
+from app.config import NVIDIA_DEEPSEEK_V4_PRO_MODEL, PlannerRuntime, Settings
 from app.dify.client import DifyModelListItem, DifyModelListResult
 from app.dify.preflight import PreflightResult, preflight_plan
 from app.dify.runtime_models import (
@@ -701,7 +701,7 @@ def _chat_completion_payload(
         "messages": messages,
         "temperature": 0.2,
     }
-    if runtime.provider != "openrouter":
+    if runtime.provider != "openrouter" and runtime.model != NVIDIA_DEEPSEEK_V4_PRO_MODEL:
         payload["response_format"] = {"type": "json_object"}
     if runtime.provider == "nvidia":
         chat_template_kwargs: dict[str, Any] = {
@@ -709,12 +709,14 @@ def _chat_completion_payload(
         }
         if settings.nvidia_thinking:
             chat_template_kwargs["reasoning_effort"] = settings.nvidia_reasoning_effort
+        stream = runtime.model != NVIDIA_DEEPSEEK_V4_PRO_MODEL
         payload.update(
             {
+                "temperature": 1 if runtime.model == NVIDIA_DEEPSEEK_V4_PRO_MODEL else 0.2,
                 "top_p": 0.95,
                 "max_tokens": settings.nvidia_max_tokens,
                 "chat_template_kwargs": chat_template_kwargs,
-                "stream": True,
+                "stream": stream,
             }
         )
     if runtime.provider == "openrouter":
@@ -1515,8 +1517,12 @@ def _raw_plan_excerpt(raw_plan: Any, *, limit: int = 2000) -> str:
 def _extract_plan_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if "nodes" in payload and "edges" in payload:
         return payload
-    for key in ("plan", "workflow", "workflow_plan"):
+    for key in ("plan", "workflow", "workflow_plan", "WorkflowPlan", "workflowPlan"):
         nested = payload.get(key)
+        if isinstance(nested, dict) and "nodes" in nested and "edges" in nested:
+            return nested
+    if len(payload) == 1:
+        nested = next(iter(payload.values()))
         if isinstance(nested, dict) and "nodes" in nested and "edges" in nested:
             return nested
     raise ValueError("LLM response must contain a WorkflowPlan object with nodes and edges")
