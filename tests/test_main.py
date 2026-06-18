@@ -79,6 +79,8 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert "recent_apps" in script.text
     assert "configured_model_config" in script.text
     assert "prepareApplyActionFromPreview" in script.text
+    assert "clearAppScopedContext" in script.text
+    assert "switchingApp" in script.text
     assert "workflow.modify.apply" in script.text
     assert "尚未写回 Dify" in script.text
     assert "applyContextHints(text)" not in script.text

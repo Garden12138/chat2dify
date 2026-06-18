@@ -135,10 +135,9 @@ def _create_plan(
     create_message = _first_text(message, context.create_message)
     if not create_message:
         missing.append("message")
-    app_name = _extract_app_name(message) or context.app_name or _infer_app_name(message, app_mode)
+    app_name = _extract_app_name(message) or _infer_app_name(message, app_mode)
     app_description = (
         _extract_app_description(message)
-        or context.app_description
         or _infer_app_description(message, app_mode, app_name)
     )
     if app_mode and not app_name:

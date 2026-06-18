@@ -60,6 +60,29 @@ def test_assistant_create_infers_app_name_and_description_from_request() -> None
     assert "503房间天花板漏水" in result.action.payload["app_description"]
 
 
+def test_assistant_create_does_not_reuse_previous_app_name_from_context() -> None:
+    result = plan_assistant_action(
+        AssistantPlanRequest(
+            message="创建一个书法识别工作流",
+            context={
+                "app_name": "证书识别工作流",
+                "app_description": "Workflow，用于证书识别",
+                "active_app": {
+                    "app_id": "old-app",
+                    "app_mode": "workflow",
+                    "app_name": "证书识别工作流",
+                },
+            },
+        )
+    )
+
+    assert result.status == "pending_action"
+    assert result.action is not None
+    assert result.action.payload["app_name"] == "书法识别工作流"
+    assert "书法识别" in result.action.payload["app_description"]
+    assert "证书识别" not in result.action.payload["app_name"]
+
+
 def test_assistant_create_asks_when_name_and_purpose_are_too_vague() -> None:
     result = plan_assistant_action(AssistantPlanRequest(message="创建一个工作流"))
 
@@ -372,6 +395,8 @@ def test_assistant_web_ui_assets_are_present(monkeypatch, tmp_path) -> None:
     assert "recent_apps" in script.text
     assert "configured_model_config" in script.text
     assert "prepareApplyActionFromPreview" in script.text
+    assert "clearAppScopedContext" in script.text
+    assert "switchingApp" in script.text
     assert "workflow.modify.apply" in script.text
     assert "尚未写回 Dify" in script.text
     assert "applyContextHints(text)" not in script.text

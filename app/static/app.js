@@ -504,8 +504,12 @@ function rememberAppReference(reference = {}) {
     return;
   }
   const current = state.context.active_app || {};
+  const switchingApp = Boolean(reference.app_id && current.app_id && reference.app_id !== current.app_id);
+  if (switchingApp) {
+    clearAppScopedContext();
+  }
   const app = compactPayload({
-    ...current,
+    ...(switchingApp ? {} : current),
     ...reference,
   });
   state.context.active_app = app;
@@ -522,6 +526,19 @@ function rememberAppReference(reference = {}) {
   }
   if (app.expected_hash) {
     state.context.expected_hash = app.expected_hash;
+  }
+}
+
+function clearAppScopedContext() {
+  for (const key of [
+    "run_inputs",
+    "run_query",
+    "conversation_id",
+    "parent_message_id",
+    "modify_preview",
+    "expected_hash",
+  ]) {
+    delete state.context[key];
   }
 }
 
