@@ -23,6 +23,8 @@ def _settings(
     dataset_ids: str = "",
     planner_provider: str = "openai",
     nvidia_api_key: str | None = None,
+    openrouter_api_key: str | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> Settings:
     env = {
         "DIFY_SOURCE_DIR": "../dify",
@@ -36,6 +38,9 @@ def _settings(
         env["OPENAI_API_KEY"] = openai_api_key
     if nvidia_api_key:
         env["NVIDIA_API_KEY"] = nvidia_api_key
+    if openrouter_api_key:
+        env["OPENROUTER_API_KEY"] = openrouter_api_key
+    env.update(extra_env or {})
     return Settings.from_env(env, validate_dify=False)
 
 
@@ -132,6 +137,157 @@ def test_planner_uses_nvidia_deepseek_v4_flash_payload(monkeypatch) -> None:
     assert len(captured["payload"]["messages"]) == 2
     user_payload = json.loads(captured["payload"]["messages"][1]["content"])
     assert user_payload["previous_validation_error"] == "bad plan"
+
+
+def test_planner_uses_openrouter_nemotron_payload(monkeypatch) -> None:
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": '{"nodes":[]}'}}]}
+
+    class FakeClient:
+        def __init__(self, *, timeout):
+            captured["timeout"] = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def post(self, url, *, json, headers):
+            captured["url"] = url
+            captured["payload"] = json
+            captured["headers"] = headers
+            return FakeResponse()
+
+    monkeypatch.setattr("app.agent.planner.httpx.Client", FakeClient)
+    planner = WorkflowPlanner(
+        _settings(
+            openai_api_key=None,
+            planner_provider="openrouter",
+            openrouter_api_key="sk-or-test",
+        )
+    )
+
+    content = planner._call_llm("生成售后工作流", app_name="售后")
+
+    assert content == '{"nodes":[]}'
+    assert captured["url"] == "https://openrouter.ai/api/v1/chat/completions"
+    assert captured["headers"]["Authorization"] == "Bearer sk-or-test"
+    assert captured["headers"]["HTTP-Referer"] == "http://localhost:8000"
+    assert captured["headers"]["X-Title"] == "chat2dify"
+    assert captured["payload"]["model"] == "nvidia/nemotron-3-ultra-550b-a55b:free"
+    assert captured["payload"]["max_tokens"] == 8192
+    assert "response_format" not in captured["payload"]
+    assert "stream" not in captured["payload"]
+
+
+def test_planner_falls_back_to_openrouter_when_nvidia_is_rate_limited(
+    monkeypatch,
+) -> None:
+    captured = {"stream_calls": 0, "post_calls": 0, "sleeps": []}
+
+    class RateLimitedResponse:
+        status_code = 429
+        reason_phrase = "Too Many Requests"
+        is_error = True
+
+        def __init__(self, method, url):
+            self.request = httpx.Request(method, url)
+            self._read = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def read(self):
+            self._read = True
+            return b'{"status":429,"title":"Too Many Requests"}'
+
+        @property
+        def text(self):
+            if not self._read:
+                raise httpx.ResponseNotRead()
+            return '{"status":429,"title":"Too Many Requests"}'
+
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError(
+                "rate limited",
+                request=self.request,
+                response=self,
+            )
+
+    class OpenRouterResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": '{"nodes":[]}'}}]}
+
+    class FakeClient:
+        def __init__(self, *, timeout):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def stream(self, method, url, *, json, headers):
+            captured["stream_calls"] += 1
+            return RateLimitedResponse(method, url)
+
+        def post(self, url, *, json, headers):
+            captured["post_calls"] += 1
+            captured["openrouter_url"] = url
+            captured["openrouter_payload"] = json
+            return OpenRouterResponse()
+
+    monkeypatch.setattr("app.agent.planner.httpx.Client", FakeClient)
+    monkeypatch.setattr("app.agent.planner.time.sleep", captured["sleeps"].append)
+    planner = WorkflowPlanner(
+        _settings(
+            openai_api_key=None,
+            planner_provider="nvidia",
+            nvidia_api_key="nvapi-test",
+            openrouter_api_key="sk-or-test",
+            extra_env={"PLANNER_REQUEST_RETRIES": "0"},
+        )
+    )
+
+    content = planner._call_llm("生成售后工作流", app_name="售后")
+
+    assert content == '{"nodes":[]}'
+    assert captured["stream_calls"] == 1
+    assert captured["post_calls"] == 1
+    assert captured["openrouter_url"] == "https://openrouter.ai/api/v1/chat/completions"
+    assert captured["openrouter_payload"]["model"] == "nvidia/nemotron-3-ultra-550b-a55b:free"
+    assert planner._last_runtime is not None
+    assert planner._last_runtime.provider == "openrouter"
+    assert planner._last_provider_attempts == [
+        {
+            "provider": "nvidia",
+            "model": "deepseek-ai/deepseek-v4-flash",
+            "status": "unavailable",
+            "error": (
+                'Planner LLM request failed after 1 network attempts: '
+                '429 {"status":429,"title":"Too Many Requests"}'
+            ),
+        },
+        {
+            "provider": "openrouter",
+            "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+            "status": "success",
+        },
+    ]
 
 
 def test_planner_retries_transient_server_disconnect(monkeypatch) -> None:

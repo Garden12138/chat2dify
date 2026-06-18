@@ -259,7 +259,7 @@ class WorkflowAgentSelection(BaseModel):
 
 
 class WorkflowPlannerSelection(BaseModel):
-    provider: Literal["openai", "nvidia"]
+    provider: Literal["openai", "nvidia", "openrouter"]
     model: str = Field(min_length=1)
 
 

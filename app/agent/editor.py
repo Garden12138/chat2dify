@@ -8,7 +8,6 @@ from app.agent.normalizer import normalize_plan_payload
 from app.agent.planner import (
     PlannerError,
     _attempt_diagnostic,
-    _chat_completions_url,
     _empty_preflight,
     _extract_plan_payload,
     _invalid_plan_error,
@@ -16,10 +15,11 @@ from app.agent.planner import (
     _planner_agent_schemas,
     _preflight_plan,
     _planner_tool_schemas,
-    _post_chat_completion,
+    _post_chat_completion_with_fallbacks,
     _strip_json_fences,
+    _missing_planner_key_message,
 )
-from app.config import Settings
+from app.config import PlannerRuntime, Settings
 from app.dify.client import DifyModelListItem, DifyModelListResult
 from app.dify.runtime_models import (
     model_selection_payloads,
@@ -145,6 +145,7 @@ class WorkflowEditResult:
     errors: list[str] = field(default_factory=list)
     repair_actions: list[dict[str, Any]] = field(default_factory=list)
     attempt_diagnostics: list[dict[str, Any]] = field(default_factory=list)
+    provider_attempts: list[dict[str, Any]] = field(default_factory=list)
     preflight: dict[str, Any] = field(default_factory=dict)
 
     def metadata(self) -> dict[str, Any]:
@@ -159,6 +160,7 @@ class WorkflowEditResult:
             "errors": self.errors,
             "repair_actions": self.repair_actions,
             "attempt_diagnostics": self.attempt_diagnostics,
+            "provider_attempts": self.provider_attempts,
             "preflight": self.preflight,
         }
 
@@ -166,6 +168,8 @@ class WorkflowEditResult:
 class WorkflowEditPlanner:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._last_runtime: PlannerRuntime | None = None
+        self._last_provider_attempts: list[dict[str, Any]] = []
 
     def generate(
         self,
@@ -180,10 +184,16 @@ class WorkflowEditPlanner:
         trigger_selection: dict[str, Any] | None = None,
         task_context: TaskContext | None = None,
     ) -> WorkflowEditResult:
-        runtime = self.settings.planner_runtime()
-        if not runtime.api_key:
-            key_name = "NVIDIA_API_KEY" if runtime.provider == "nvidia" else "OPENAI_API_KEY"
-            raise PlannerError(f"{key_name} is required to modify an existing workflow.")
+        primary_runtime = self.settings.planner_runtime()
+        configured_runtimes = [
+            runtime
+            for runtime in self.settings.planner_runtime_candidates()
+            if runtime.api_key
+        ]
+        if not configured_runtimes:
+            raise PlannerError(
+                f"{_missing_planner_key_message(self.settings)} to modify an existing workflow."
+            )
 
         last_error = ""
         errors: list[str] = []
@@ -191,8 +201,10 @@ class WorkflowEditPlanner:
         final_raw_content = ""
         repair_actions: list[dict[str, Any]] = []
         attempt_diagnostics: list[dict[str, Any]] = []
+        provider_attempts: list[dict[str, Any]] = []
         final_issues: list[ValidationIssue] = []
         final_preflight = _empty_preflight(dsl_version)
+        active_runtime = primary_runtime
         for attempt in range(1, 3):
             if task_context is not None:
                 task_context.update(
@@ -213,6 +225,11 @@ class WorkflowEditPlanner:
             if task_context is not None:
                 call_kwargs["task_context"] = task_context
             content = self._call_llm(message, **call_kwargs)
+            active_runtime = self._last_runtime or active_runtime
+            provider_attempts.extend(
+                {**item, "semantic_attempt": attempt}
+                for item in self._last_provider_attempts
+            )
             final_raw_content = content
             try:
                 if task_context is not None:
@@ -291,12 +308,13 @@ class WorkflowEditPlanner:
                     raw_plan=raw_plan,
                     attempts=attempt,
                     repaired=attempt > 1 or normalized.changed,
-                    provider=runtime.provider,
-                    model=runtime.model,
+                    provider=active_runtime.provider,
+                    model=active_runtime.model,
                     normalizations=normalized.changes,
                     errors=errors,
                     repair_actions=repair_actions,
                     attempt_diagnostics=attempt_diagnostics,
+                    provider_attempts=provider_attempts,
                     preflight=preflight.metadata(),
                 )
             except Exception as exc:  # noqa: BLE001 - error text is intentionally fed back to the LLM.
@@ -320,10 +338,11 @@ class WorkflowEditPlanner:
                     )
                 )
         raise _invalid_plan_error(
-            runtime=runtime,
+            runtime=active_runtime,
             attempts=2,
             repair_actions=repair_actions,
             attempt_diagnostics=attempt_diagnostics,
+            provider_attempts=provider_attempts,
             issues=final_issues,
             preflight=final_preflight,
             raw_plan=final_raw_plan if final_raw_plan is not None else final_raw_content,
@@ -342,8 +361,6 @@ class WorkflowEditPlanner:
         trigger_selection: dict[str, Any] | None = None,
         task_context: TaskContext | None = None,
     ) -> str:
-        runtime = self.settings.planner_runtime()
-        url = _chat_completions_url(runtime.base_url)
         user_content = {
             "request": message,
             "current_plan": current_plan.model_dump(),
@@ -383,30 +400,12 @@ class WorkflowEditPlanner:
             {"role": "user", "content": json.dumps(user_content, ensure_ascii=False)},
         ]
 
-        payload: dict[str, Any] = {
-            "model": runtime.model,
-            "messages": messages,
-            "temperature": 0.2,
-            "response_format": {"type": "json_object"},
-        }
-        if runtime.provider == "nvidia":
-            chat_template_kwargs: dict[str, Any] = {
-                "thinking": self.settings.nvidia_thinking,
-            }
-            if self.settings.nvidia_thinking:
-                chat_template_kwargs["reasoning_effort"] = self.settings.nvidia_reasoning_effort
-            payload.update(
-                {
-                    "top_p": 0.95,
-                    "max_tokens": self.settings.nvidia_max_tokens,
-                    "chat_template_kwargs": chat_template_kwargs,
-                    "stream": True,
-                }
-            )
-        return _post_chat_completion(
-            runtime=runtime,
-            url=url,
-            payload=payload,
+        content, runtime, provider_attempts = _post_chat_completion_with_fallbacks(
+            settings=self.settings,
+            messages=messages,
             error_prefix="Workflow edit LLM",
             task_context=task_context,
         )
+        self._last_runtime = runtime
+        self._last_provider_attempts = provider_attempts
+        return content

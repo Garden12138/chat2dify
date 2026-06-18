@@ -10,6 +10,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DIFY_SOURCE_DIR = "../dify"
 DEFAULT_NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 DEFAULT_NVIDIA_MODEL = "deepseek-ai/deepseek-v4-flash"
+DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_OPENROUTER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 
 
 class ConfigurationError(ValueError):
@@ -45,6 +47,7 @@ class Settings:
     dify_default_model_name: str
     dify_default_dataset_ids: list[str]
     planner_default_provider: str
+    planner_fallback_providers: list[str]
     planner_timeout_seconds: float
     planner_request_retries: int
     openai_api_key: str | None
@@ -56,6 +59,10 @@ class Settings:
     nvidia_thinking: bool
     nvidia_reasoning_effort: str
     nvidia_max_tokens: int
+    openrouter_api_key: str | None
+    openrouter_base_url: str
+    openrouter_model: str
+    openrouter_max_tokens: int
     task_db_path: Path
     task_workers: int
 
@@ -88,6 +95,9 @@ class Settings:
             dify_default_model_name=source.get("DIFY_DEFAULT_MODEL_NAME", "gpt-4o-mini"),
             dify_default_dataset_ids=_csv_list(source.get("DIFY_DEFAULT_DATASET_IDS", "")),
             planner_default_provider=source.get("PLANNER_DEFAULT_PROVIDER", "nvidia").strip().lower(),
+            planner_fallback_providers=_csv_list(
+                source.get("PLANNER_FALLBACK_PROVIDERS", "openrouter,openai")
+            ),
             planner_timeout_seconds=_positive_float(
                 source.get("PLANNER_TIMEOUT_SECONDS", "600"),
                 name="PLANNER_TIMEOUT_SECONDS",
@@ -112,6 +122,13 @@ class Settings:
                 source.get("NVIDIA_MAX_TOKENS", "8192"),
                 name="NVIDIA_MAX_TOKENS",
             ),
+            openrouter_api_key=_empty_to_none(source.get("OPENROUTER_API_KEY")),
+            openrouter_base_url=source.get("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_BASE_URL).rstrip("/"),
+            openrouter_model=source.get("OPENROUTER_MODEL", DEFAULT_OPENROUTER_MODEL),
+            openrouter_max_tokens=_positive_int(
+                source.get("OPENROUTER_MAX_TOKENS", "8192"),
+                name="OPENROUTER_MAX_TOKENS",
+            ),
             task_db_path=resolve_path_from_project_root(
                 source.get("CHAT2DIFY_TASK_DB", "data/tasks.sqlite3"),
                 root,
@@ -131,7 +148,21 @@ class Settings:
         return self.workflow_url(app_id)
 
     def planner_runtime(self) -> PlannerRuntime:
-        provider = self.planner_default_provider
+        return self._planner_runtime_for_provider(self.planner_default_provider)
+
+    def planner_runtime_candidates(self) -> list[PlannerRuntime]:
+        providers = [self.planner_default_provider, *self.planner_fallback_providers]
+        seen: set[str] = set()
+        runtimes: list[PlannerRuntime] = []
+        for provider in providers:
+            normalized = provider.strip().lower()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            runtimes.append(self._planner_runtime_for_provider(normalized))
+        return runtimes
+
+    def _planner_runtime_for_provider(self, provider: str) -> PlannerRuntime:
         if provider == "openai":
             return PlannerRuntime(
                 provider="openai",
@@ -152,6 +183,16 @@ class Settings:
                 timeout_seconds=self.planner_timeout_seconds,
                 request_retries=self.planner_request_retries,
             )
+        if provider == "openrouter":
+            return PlannerRuntime(
+                provider="openrouter",
+                label="OpenRouter",
+                api_key=self.openrouter_api_key,
+                base_url=self.openrouter_base_url,
+                model=self.openrouter_model,
+                timeout_seconds=self.planner_timeout_seconds,
+                request_retries=self.planner_request_retries,
+            )
         raise ConfigurationError(f"Unsupported planner provider: {provider}")
 
     def with_planner(self, provider: str | None, model: str | None = None) -> "Settings":
@@ -167,6 +208,11 @@ class Settings:
             if selected_model != self.nvidia_model:
                 raise ConfigurationError(f"Unsupported NVIDIA planner model: {selected_model}")
             return replace(self, planner_default_provider="nvidia", nvidia_model=selected_model)
+        if selected_provider == "openrouter":
+            selected_model = (model or self.openrouter_model).strip()
+            if selected_model != self.openrouter_model:
+                raise ConfigurationError(f"Unsupported OpenRouter planner model: {selected_model}")
+            return replace(self, planner_default_provider="openrouter", openrouter_model=selected_model)
         raise ConfigurationError(f"Unsupported planner provider: {selected_provider}")
 
     def planner_catalog(self) -> list[dict[str, object]]:
@@ -182,6 +228,12 @@ class Settings:
                 "label": "NVIDIA NIM",
                 "configured": bool(self.nvidia_api_key),
                 "models": [{"id": self.nvidia_model, "label": "DeepSeek V4 Flash"}],
+            },
+            {
+                "id": "openrouter",
+                "label": "OpenRouter",
+                "configured": bool(self.openrouter_api_key),
+                "models": [{"id": self.openrouter_model, "label": "Nemotron 3 Ultra 550B (free)"}],
             },
         ]
 

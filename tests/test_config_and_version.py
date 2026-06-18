@@ -107,6 +107,47 @@ def test_nvidia_planner_configuration_and_catalog(tmp_path: Path) -> None:
     assert "nvapi-test" not in str(catalog)
 
 
+def test_openrouter_planner_configuration_and_fallback_chain(tmp_path: Path) -> None:
+    settings = Settings.from_env(
+        {
+            "DIFY_SOURCE_DIR": "../dify",
+            "PLANNER_DEFAULT_PROVIDER": "nvidia",
+            "PLANNER_FALLBACK_PROVIDERS": "openrouter, openai",
+            "OPENROUTER_API_KEY": "sk-or-test",
+            "OPENROUTER_MAX_TOKENS": "4096",
+        },
+        project_root=tmp_path,
+        validate_dify=False,
+    )
+
+    candidates = settings.planner_runtime_candidates()
+    catalog = settings.planner_catalog()
+    openrouter = next(item for item in catalog if item["id"] == "openrouter")
+
+    assert [runtime.provider for runtime in candidates] == [
+        "nvidia",
+        "openrouter",
+        "openai",
+    ]
+    assert candidates[1].label == "OpenRouter"
+    assert candidates[1].base_url == "https://openrouter.ai/api/v1"
+    assert candidates[1].model == "nvidia/nemotron-3-ultra-550b-a55b:free"
+    assert candidates[1].configured is True
+    assert settings.openrouter_max_tokens == 4096
+    assert openrouter == {
+        "id": "openrouter",
+        "label": "OpenRouter",
+        "configured": True,
+        "models": [
+            {
+                "id": "nvidia/nemotron-3-ultra-550b-a55b:free",
+                "label": "Nemotron 3 Ultra 550B (free)",
+            }
+        ],
+    }
+    assert "sk-or-test" not in str(catalog)
+
+
 def test_nvidia_deepseek_is_the_default_planner(tmp_path: Path) -> None:
     settings = Settings.from_env(
         {
@@ -157,6 +198,13 @@ def test_with_planner_rejects_unknown_nvidia_model(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="Unsupported NVIDIA planner model"):
         settings.with_planner("nvidia", "made-up-model")
+
+
+def test_with_planner_rejects_unknown_openrouter_model(tmp_path: Path) -> None:
+    settings = Settings.from_env({"DIFY_SOURCE_DIR": "../dify"}, project_root=tmp_path, validate_dify=False)
+
+    with pytest.raises(ValueError, match="Unsupported OpenRouter planner model"):
+        settings.with_planner("openrouter", "made-up-model")
 
 
 def test_dsl_version_is_read_from_source(tmp_path: Path) -> None:

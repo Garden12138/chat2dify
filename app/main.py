@@ -141,6 +141,10 @@ def list_planner_providers() -> dict:
     return {
         "default_provider": runtime.provider,
         "default_model": runtime.model,
+        "fallback_providers": [
+            candidate.provider
+            for candidate in settings.planner_runtime_candidates()[1:]
+        ],
         "providers": settings.planner_catalog(),
     }
 

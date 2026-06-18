@@ -290,6 +290,10 @@ class PlannerError(RuntimeError):
         super().__init__(message)
 
 
+class PlannerProviderUnavailable(PlannerError):
+    """Raised when a provider cannot serve this request after network retries."""
+
+
 @dataclass(frozen=True)
 class PlannerResult:
     plan: WorkflowPlan
@@ -304,6 +308,7 @@ class PlannerResult:
     errors: list[str] = field(default_factory=list)
     repair_actions: list[dict[str, Any]] = field(default_factory=list)
     attempt_diagnostics: list[dict[str, Any]] = field(default_factory=list)
+    provider_attempts: list[dict[str, Any]] = field(default_factory=list)
     preflight: dict[str, Any] = field(default_factory=dict)
 
     def metadata(self) -> dict[str, Any]:
@@ -318,6 +323,7 @@ class PlannerResult:
             "errors": self.errors,
             "repair_actions": self.repair_actions,
             "attempt_diagnostics": self.attempt_diagnostics,
+            "provider_attempts": self.provider_attempts,
             "preflight": self.preflight,
         }
 
@@ -325,6 +331,8 @@ class PlannerResult:
 class WorkflowPlanner:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._last_runtime: PlannerRuntime | None = None
+        self._last_provider_attempts: list[dict[str, Any]] = []
 
     def generate_plan(self, message: str, *, app_name: str | None = None) -> WorkflowPlan:
         return self.generate(message, app_name=app_name, dsl_version="0.0.0").plan
@@ -344,8 +352,13 @@ class WorkflowPlanner:
         trigger_selection: dict[str, Any] | None = None,
         task_context: TaskContext | None = None,
     ) -> PlannerResult:
-        runtime = self.settings.planner_runtime()
-        if not runtime.api_key:
+        primary_runtime = self.settings.planner_runtime()
+        configured_runtimes = [
+            runtime
+            for runtime in self.settings.planner_runtime_candidates()
+            if runtime.api_key
+        ]
+        if not configured_runtimes:
             if task_context is not None:
                 task_context.update("planning", 35, "Using the fallback workflow template.")
             fallback = fallback_plan(message, app_name=app_name, app_mode=app_mode)
@@ -393,10 +406,11 @@ class WorkflowPlanner:
             ]
             if has_errors(issues):
                 raise _invalid_plan_error(
-                    runtime=runtime,
+                    runtime=primary_runtime,
                     attempts=0,
                     repair_actions=normalized.repair_actions,
                     attempt_diagnostics=diagnostics,
+                    provider_attempts=[],
                     issues=issues,
                     preflight=preflight,
                     raw_plan=fallback_payload,
@@ -409,8 +423,8 @@ class WorkflowPlanner:
                 attempts=0,
                 used_fallback=True,
                 repaired=normalized.changed,
-                provider=runtime.provider,
-                model=runtime.model,
+                provider=primary_runtime.provider,
+                model=primary_runtime.model,
                 normalizations=normalized.changes,
                 repair_actions=normalized.repair_actions,
                 attempt_diagnostics=diagnostics,
@@ -423,8 +437,10 @@ class WorkflowPlanner:
         final_raw_content = ""
         repair_actions: list[dict[str, Any]] = []
         attempt_diagnostics: list[dict[str, Any]] = []
+        provider_attempts: list[dict[str, Any]] = []
         final_issues: list[ValidationIssue] = []
         final_preflight = _empty_preflight(dsl_version)
+        active_runtime = primary_runtime
         for attempt in range(1, 3):
             if task_context is not None:
                 task_context.update(
@@ -449,6 +465,11 @@ class WorkflowPlanner:
             if task_context is not None:
                 call_kwargs["task_context"] = task_context
             content = self._call_llm(message, **call_kwargs)
+            active_runtime = self._last_runtime or active_runtime
+            provider_attempts.extend(
+                {**item, "semantic_attempt": attempt}
+                for item in self._last_provider_attempts
+            )
             final_raw_content = content
             try:
                 if task_context is not None:
@@ -526,12 +547,13 @@ class WorkflowPlanner:
                     attempts=attempt,
                     used_fallback=False,
                     repaired=attempt > 1 or normalized.changed,
-                    provider=runtime.provider,
-                    model=runtime.model,
+                    provider=active_runtime.provider,
+                    model=active_runtime.model,
                     normalizations=normalized.changes,
                     errors=errors,
                     repair_actions=repair_actions,
                     attempt_diagnostics=attempt_diagnostics,
+                    provider_attempts=provider_attempts,
                     preflight=preflight.metadata(),
                 )
             except Exception as exc:  # noqa: BLE001 - error text is fed back to the LLM once.
@@ -555,10 +577,11 @@ class WorkflowPlanner:
                     )
                 )
         raise _invalid_plan_error(
-            runtime=runtime,
+            runtime=active_runtime,
             attempts=2,
             repair_actions=repair_actions,
             attempt_diagnostics=attempt_diagnostics,
+            provider_attempts=provider_attempts,
             issues=final_issues,
             preflight=final_preflight,
             raw_plan=final_raw_plan if final_raw_plan is not None else final_raw_content,
@@ -579,8 +602,6 @@ class WorkflowPlanner:
         task_context: TaskContext | None = None,
         app_mode: str = "workflow",
     ) -> str:
-        runtime = self.settings.planner_runtime()
-        url = _chat_completions_url(runtime.base_url)
         user_content = {
             "app_name": app_name or "Generated Workflow",
             "app_description": app_description or "",
@@ -601,33 +622,133 @@ class WorkflowPlanner:
             {"role": "user", "content": json.dumps(user_content, ensure_ascii=False)},
         ]
 
-        payload: dict[str, Any] = {
-            "model": runtime.model,
-            "messages": messages,
-            "temperature": 0.2,
-            "response_format": {"type": "json_object"},
-        }
-        if runtime.provider == "nvidia":
-            chat_template_kwargs: dict[str, Any] = {
-                "thinking": self.settings.nvidia_thinking,
-            }
-            if self.settings.nvidia_thinking:
-                chat_template_kwargs["reasoning_effort"] = self.settings.nvidia_reasoning_effort
-            payload.update(
-                {
-                    "top_p": 0.95,
-                    "max_tokens": self.settings.nvidia_max_tokens,
-                    "chat_template_kwargs": chat_template_kwargs,
-                    "stream": True,
-                }
-            )
-        return _post_chat_completion(
-            runtime=runtime,
-            url=url,
-            payload=payload,
+        content, runtime, provider_attempts = _post_chat_completion_with_fallbacks(
+            settings=self.settings,
+            messages=messages,
             error_prefix="Planner LLM",
             task_context=task_context,
         )
+        self._last_runtime = runtime
+        self._last_provider_attempts = provider_attempts
+        return content
+
+
+def _post_chat_completion_with_fallbacks(
+    *,
+    settings: Settings,
+    messages: list[dict[str, str]],
+    error_prefix: str,
+    task_context: TaskContext | None = None,
+) -> tuple[str, PlannerRuntime, list[dict[str, Any]]]:
+    runtimes = [
+        runtime
+        for runtime in settings.planner_runtime_candidates()
+        if runtime.api_key
+    ]
+    if not runtimes:
+        raise PlannerError(_missing_planner_key_message(settings))
+
+    provider_attempts: list[dict[str, Any]] = []
+    for index, runtime in enumerate(runtimes):
+        payload = _chat_completion_payload(
+            runtime=runtime,
+            messages=messages,
+            settings=settings,
+        )
+        try:
+            content = _post_chat_completion(
+                runtime=runtime,
+                url=_chat_completions_url(runtime.base_url),
+                payload=payload,
+                error_prefix=error_prefix,
+                task_context=task_context,
+            )
+            provider_attempts.append(_provider_attempt(runtime, status="success"))
+            return content, runtime, provider_attempts
+        except PlannerProviderUnavailable as exc:
+            provider_attempts.append(
+                _provider_attempt(runtime, status="unavailable", error=str(exc))
+            )
+            if index + 1 < len(runtimes) and task_context is not None:
+                next_runtime = runtimes[index + 1]
+                task_context.update(
+                    "planner-provider-fallback",
+                    None,
+                    (
+                        f"{runtime.label} is unavailable; trying "
+                        f"{next_runtime.label}."
+                    ),
+                )
+            continue
+
+    summary = "; ".join(
+        f"{item['provider']}/{item['model']}: {item.get('error', item['status'])}"
+        for item in provider_attempts
+    )
+    raise PlannerProviderUnavailable(
+        f"{error_prefix} providers unavailable after fallback attempts: {summary}"
+    )
+
+
+def _chat_completion_payload(
+    *,
+    runtime: PlannerRuntime,
+    messages: list[dict[str, str]],
+    settings: Settings,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "model": runtime.model,
+        "messages": messages,
+        "temperature": 0.2,
+    }
+    if runtime.provider != "openrouter":
+        payload["response_format"] = {"type": "json_object"}
+    if runtime.provider == "nvidia":
+        chat_template_kwargs: dict[str, Any] = {
+            "thinking": settings.nvidia_thinking,
+        }
+        if settings.nvidia_thinking:
+            chat_template_kwargs["reasoning_effort"] = settings.nvidia_reasoning_effort
+        payload.update(
+            {
+                "top_p": 0.95,
+                "max_tokens": settings.nvidia_max_tokens,
+                "chat_template_kwargs": chat_template_kwargs,
+                "stream": True,
+            }
+        )
+    if runtime.provider == "openrouter":
+        payload["max_tokens"] = settings.openrouter_max_tokens
+    return payload
+
+
+def _provider_attempt(
+    runtime: PlannerRuntime,
+    *,
+    status: str,
+    error: str | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "provider": runtime.provider,
+        "model": runtime.model,
+        "status": status,
+    }
+    if error:
+        payload["error"] = error[:1000]
+    return payload
+
+
+def _missing_planner_key_message(settings: Settings) -> str:
+    env_names = {
+        "nvidia": "NVIDIA_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "openrouter": "OPENROUTER_API_KEY",
+    }
+    names = [
+        env_names.get(runtime.provider, f"{runtime.provider.upper()}_API_KEY")
+        for runtime in settings.planner_runtime_candidates()
+    ]
+    return "At least one Planner provider API key is required: " + ", ".join(names)
 
 
 def _post_chat_completion(
@@ -643,6 +764,9 @@ def _post_chat_completion(
         "Accept": "application/json",
         "Connection": "close",
     }
+    if runtime.provider == "openrouter":
+        headers["HTTP-Referer"] = "http://localhost:8000"
+        headers["X-Title"] = "chat2dify"
     timeout = httpx.Timeout(
         connect=min(runtime.timeout_seconds, 15.0),
         read=runtime.timeout_seconds,
@@ -702,7 +826,7 @@ def _post_chat_completion(
         )
     else:
         message = str(last_error)
-    raise PlannerError(
+    raise PlannerProviderUnavailable(
         f"{error_prefix} request failed after {total_attempts} network attempts: {message}"
     ) from last_error
 
@@ -1351,6 +1475,7 @@ def _invalid_plan_error(
     attempts: int,
     repair_actions: list[dict[str, Any]],
     attempt_diagnostics: list[dict[str, Any]],
+    provider_attempts: list[dict[str, Any]],
     issues: list[ValidationIssue],
     preflight: PreflightResult,
     raw_plan: Any,
@@ -1368,6 +1493,7 @@ def _invalid_plan_error(
         "attempts": attempts,
         "repair_actions": repair_actions,
         "attempt_diagnostics": attempt_diagnostics,
+        "provider_attempts": provider_attempts,
         "validation_issues": [issue.model_dump() for issue in issues],
         "preflight": preflight.metadata(),
         "raw_plan_excerpt": _raw_plan_excerpt(raw_plan),

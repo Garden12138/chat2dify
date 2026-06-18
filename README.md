@@ -171,10 +171,12 @@ enabled `llm` model registry and verifies that these configured defaults are
 active and not deprecated. API keys stay on the server and are never returned
 to or stored by the browser.
 
-NVIDIA NIM DeepSeek V4 Flash is the default Planner:
+NVIDIA NIM DeepSeek V4 Flash is the default Planner, with OpenRouter's free
+Nemotron fallback configured as the first standby provider:
 
 ```env
 PLANNER_DEFAULT_PROVIDER=nvidia
+PLANNER_FALLBACK_PROVIDERS=openrouter,openai
 PLANNER_TIMEOUT_SECONDS=600
 PLANNER_REQUEST_RETRIES=2
 NVIDIA_API_KEY=nvapi-...
@@ -185,7 +187,19 @@ NVIDIA_REASONING_EFFORT=low
 NVIDIA_MAX_TOKENS=8192
 ```
 
-OpenAI-compatible planners remain available only through explicit selection:
+OpenRouter can be used as the default Planner or as a fallback when NVIDIA is
+rate limited or temporarily unavailable:
+
+```env
+PLANNER_DEFAULT_PROVIDER=openrouter
+OPENROUTER_API_KEY=sk-or-...
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_MODEL=nvidia/nemotron-3-ultra-550b-a55b:free
+OPENROUTER_MAX_TOKENS=8192
+```
+
+OpenAI-compatible planners remain available through explicit selection or by
+including `openai` in `PLANNER_FALLBACK_PROVIDERS`:
 
 ```env
 PLANNER_DEFAULT_PROVIDER=openai
@@ -194,14 +208,15 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 OPENAI_MODEL=gpt-4o-mini
 ```
 
-If the default planner provider has no API key, the create draft endpoint uses
-a deterministic fallback plan: `start -> llm -> end` for Workflow or
-`start -> llm -> answer` for Chatflow. Modify Preview requires a configured
-planner provider. When an LLM provider is configured, the planner performs one
-initial semantic generation. It then normalizes and deterministically repairs
-safe output aliases before validation and local Dify preflight. Only a
-remaining semantic error triggers one targeted retry, so `attempts` is never
-greater than 2.
+If the default planner provider has no API key, chat2dify tries the first
+configured provider in `PLANNER_FALLBACK_PROVIDERS`. If no planner provider is
+configured, the create draft endpoint uses a deterministic fallback plan:
+`start -> llm -> end` for Workflow or `start -> llm -> answer` for Chatflow.
+Modify Preview requires at least one configured planner provider. When an LLM
+provider is configured, the planner performs one initial semantic generation.
+It then normalizes and deterministically repairs safe output aliases before
+validation and local Dify preflight. Only a remaining semantic error triggers
+one targeted retry, so `attempts` is never greater than 2.
 
 Knowledge retrieval workflows require real Dify dataset IDs. Configure a
 comma-separated default in `.env`, or use the Web UI Knowledge panel to search
@@ -278,11 +293,15 @@ not call the selected Planner model a second time.
 response. NVIDIA NIM can take several minutes for complex structured workflow
 plans, so the default is 600 seconds. `PLANNER_REQUEST_RETRIES`
 retries transient disconnects, timeouts, rate limits, and temporary upstream
-errors without consuming an additional semantic attempt. If both semantic
-attempts fail, the API returns HTTP 502 with
+errors per provider without consuming an additional semantic attempt. If a
+provider still returns 429, 502, 503, 504, times out, or disconnects after its
+network retries, chat2dify tries the next configured fallback provider. If both
+semantic attempts fail, the API returns HTTP 502 with
 `detail.code="PLANNER_PLAN_INVALID"` plus provider/model identity, repair
 actions, attempt diagnostics, final validation issues, preflight results, and
-a truncated raw-plan excerpt. Background tasks persist the same detail object.
+a truncated raw-plan excerpt. Planner metadata also includes
+`provider_attempts` for fallback diagnostics. Background tasks persist the same
+detail object.
 NVIDIA Planner requests use streaming and default to `NVIDIA_THINKING=false`
 for lower latency and fewer hosted-endpoint disconnects. Set it to `true` and
 raise `NVIDIA_REASONING_EFFORT` only when a deployment can sustain longer

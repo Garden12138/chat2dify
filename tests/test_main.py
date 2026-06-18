@@ -252,6 +252,59 @@ def test_draft_uses_requested_nvidia_planner(monkeypatch) -> None:
     assert response.json()["planner"]["provider"] == "nvidia"
 
 
+def test_draft_uses_requested_openrouter_planner(monkeypatch) -> None:
+    seen = {}
+    _patch_runtime_model_context(monkeypatch, _test_settings())
+
+    class CapturingPlanner:
+        def __init__(self, settings):
+            runtime = settings.planner_runtime()
+            seen["provider"] = runtime.provider
+            seen["model"] = runtime.model
+
+        def generate(self, message, *, app_name=None, dsl_version, **_kwargs):
+            plan = fallback_plan(message, app_name=app_name)
+            return PlannerResult(
+                plan=plan,
+                raw_plan=plan.model_dump(),
+                mode="llm",
+                attempts=1,
+                used_fallback=False,
+                repaired=False,
+                provider="openrouter",
+                model="nvidia/nemotron-3-ultra-550b-a55b:free",
+            )
+
+    monkeypatch.setattr(
+        "app.main.load_settings",
+        lambda: _test_settings(openrouter_api_key="sk-or-test"),
+    )
+    monkeypatch.setattr(
+        "app.main.read_dify_version_info",
+        lambda _: DifyVersionInfo(source_dir="../dify", git_describe="test", app_dsl_version="9.9.9"),
+    )
+    monkeypatch.setattr("app.main.WorkflowPlanner", CapturingPlanner)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/draft",
+            json={
+                "message": "生成简单工作流",
+                "planner": {
+                    "provider": "openrouter",
+                    "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    assert seen == {
+        "provider": "openrouter",
+        "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+    }
+    assert response.json()["planner"]["provider"] == "openrouter"
+
+
 def test_draft_creates_advanced_chat_plan(monkeypatch) -> None:
     seen = {}
     _patch_runtime_model_context(monkeypatch, _test_settings())
@@ -4194,7 +4247,12 @@ def _knowledge_plan(name: str, dataset_ids: list[str]) -> object:
     )
 
 
-def _test_settings(dataset_ids: str = "", *, nvidia_api_key: str = "") -> Settings:
+def _test_settings(
+    dataset_ids: str = "",
+    *,
+    nvidia_api_key: str = "",
+    openrouter_api_key: str = "",
+) -> Settings:
     env = {
         "DIFY_SOURCE_DIR": "../dify",
         "OPENAI_API_KEY": "token",
@@ -4206,6 +4264,8 @@ def _test_settings(dataset_ids: str = "", *, nvidia_api_key: str = "") -> Settin
     }
     if nvidia_api_key:
         env["NVIDIA_API_KEY"] = nvidia_api_key
+    if openrouter_api_key:
+        env["OPENROUTER_API_KEY"] = openrouter_api_key
     return Settings.from_env(env, validate_dify=False)
 
 
