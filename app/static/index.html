@@ -275,6 +275,17 @@
             App name
             <input id="create-app-name" name="app_name" autocomplete="off" placeholder="Customer Support Flow">
           </label>
+          <div id="create-runtime-model-fields" class="compact-grid">
+            <label>
+              Runtime provider
+              <select id="create-runtime-provider"></select>
+            </label>
+            <label>
+              Runtime model
+              <select id="create-runtime-model"></select>
+            </label>
+          </div>
+          <p id="create-runtime-summary" class="field-help">Loading Dify runtime models...</p>
           <label>
             Request
             <textarea id="create-message" name="message" rows="7" required>Build a workflow that responds politely to customer complaints and summarizes the issue.</textarea>
@@ -307,6 +318,17 @@
             Expected hash
             <input id="modify-expected-hash" name="expected_hash" autocomplete="off" placeholder="Optional">
           </label>
+          <div id="modify-runtime-model-fields" class="compact-grid">
+            <label>
+              Runtime provider
+              <select id="modify-runtime-provider"></select>
+            </label>
+            <label>
+              Runtime model
+              <select id="modify-runtime-model"></select>
+            </label>
+          </div>
+          <p id="modify-runtime-summary" class="field-help">Loading Dify runtime models...</p>
           <label>
             Change request
             <textarea id="modify-message" name="message" rows="5" required>Make the final answer warmer and more concise.</textarea>

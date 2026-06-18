@@ -9,6 +9,8 @@ const SELECTED_AGENTS_KEY = "chat2dify.workbench.selectedAgents.v1";
 const AGENT_SEARCH_KEY = "chat2dify.workbench.agentSearch.v1";
 const PLANNER_PROVIDER_KEY = "chat2dify.workbench.plannerProvider.v1";
 const PLANNER_MODEL_KEY = "chat2dify.workbench.plannerModel.v1";
+const RUNTIME_MODEL_PROVIDER_KEY = "chat2dify.workbench.runtimeModelProvider.v1";
+const RUNTIME_MODEL_KEY = "chat2dify.workbench.runtimeModel.v1";
 const TRIGGER_SELECTION_KEY = "chat2dify.workbench.triggerSelection.v1";
 const ACTIVE_TASKS_KEY = "chat2dify.workbench.activeTasks.v1";
 const TERMINAL_TASKS_KEY = "chat2dify.workbench.terminalTasks.v1";
@@ -30,6 +32,13 @@ const state = {
     model: "",
     defaultProvider: "",
     defaultModel: "",
+  },
+  runtimeModels: {
+    items: [],
+    provider: "",
+    model: "",
+    loading: false,
+    error: "",
   },
   datasets: {
     items: [],
@@ -93,6 +102,9 @@ const els = {
   createTaskBar: document.querySelector("#create-task-bar"),
   createCancelTask: document.querySelector("#create-cancel-task"),
   createAppMode: document.querySelector("#create-app-mode"),
+  createRuntimeProvider: document.querySelector("#create-runtime-provider"),
+  createRuntimeModel: document.querySelector("#create-runtime-model"),
+  createRuntimeSummary: document.querySelector("#create-runtime-summary"),
   createSubmit: document.querySelector("#create-submit"),
   triggerPanel: document.querySelector("#trigger-panel"),
   modifyPanel: document.querySelector("#modify-panel"),
@@ -153,6 +165,9 @@ const els = {
   modifyTaskMessage: document.querySelector("#modify-task-message"),
   modifyTaskBar: document.querySelector("#modify-task-bar"),
   modifyCancelTask: document.querySelector("#modify-cancel-task"),
+  modifyRuntimeProvider: document.querySelector("#modify-runtime-provider"),
+  modifyRuntimeModel: document.querySelector("#modify-runtime-model"),
+  modifyRuntimeSummary: document.querySelector("#modify-runtime-summary"),
   runForm: document.querySelector("#run-form"),
   runStatus: document.querySelector("#run-status"),
   runDuration: document.querySelector("#run-duration"),
@@ -205,6 +220,8 @@ document.addEventListener("DOMContentLoaded", () => {
   state.agents.keyword = loadAgentSearchText();
   state.planner.provider = loadPlannerProvider();
   state.planner.model = loadPlannerModel();
+  state.runtimeModels.provider = loadRuntimeModelProvider();
+  state.runtimeModels.model = loadRuntimeModel();
   state.triggerSelection = loadTriggerSelection();
   state.appMode = loadAppMode();
   state.activeTasks = loadActiveTasks();
@@ -219,12 +236,14 @@ document.addEventListener("DOMContentLoaded", () => {
   bindEvents();
   renderHistory();
   renderPlannerModels();
+  renderRuntimeModels();
   renderKnowledgeDatasets();
   renderTools();
   renderTriggerForm();
   renderWorkflowTriggers([]);
   refreshHealth();
   loadPlannerProviders();
+  loadRuntimeModels();
   loadDatasets({ reset: true });
   loadTools();
   loadAgentStrategies();
@@ -251,6 +270,23 @@ function bindEvents() {
     savePlannerSelection();
     renderPlannerModels();
     markModifyPreviewDirty();
+  });
+  [els.createRuntimeProvider, els.modifyRuntimeProvider].forEach((select) => {
+    select.addEventListener("change", () => {
+      state.runtimeModels.provider = select.value;
+      state.runtimeModels.model = modelsForRuntimeProvider(state.runtimeModels.provider)[0]?.model || "";
+      saveRuntimeModelSelection();
+      renderRuntimeModels();
+      markModifyPreviewDirty();
+    });
+  });
+  [els.createRuntimeModel, els.modifyRuntimeModel].forEach((select) => {
+    select.addEventListener("change", () => {
+      state.runtimeModels.model = select.value;
+      saveRuntimeModelSelection();
+      renderRuntimeModels();
+      markModifyPreviewDirty();
+    });
   });
   els.knowledgeForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -533,6 +569,154 @@ function renderPlannerModels(errorMessage = "") {
   }
   els.plannerSummary.textContent = `${provider.label || provider.id} · ${state.planner.model}`;
   setPanelStatus(els.plannerStatus, "Configured", "ok");
+}
+
+async function loadRuntimeModels() {
+  state.runtimeModels.loading = true;
+  state.runtimeModels.error = "";
+  renderRuntimeModels();
+  try {
+    const data = await requestJson("/api/dify/models?model_type=llm");
+    const items = Array.isArray(data.data) ? data.data : [];
+    state.runtimeModels.items = items.filter((item) => (
+      item
+      && item.status === "active"
+      && item.provider_status === "active"
+      && item.mode === "chat"
+      && !item.deprecated
+    ));
+    selectAvailableRuntimeModel();
+  } catch (error) {
+    state.runtimeModels.items = [];
+    state.runtimeModels.error = error.message;
+  } finally {
+    state.runtimeModels.loading = false;
+    renderRuntimeModels();
+  }
+}
+
+function selectAvailableRuntimeModel() {
+  const items = state.runtimeModels.items;
+  let selected = items.find((item) => (
+    item.provider === state.runtimeModels.provider && item.model === state.runtimeModels.model
+  ));
+  if (!selected && state.defaultModel.provider && state.defaultModel.name) {
+    selected = items.find((item) => (
+      item.provider === state.defaultModel.provider && item.model === state.defaultModel.name
+    ));
+  }
+  if (!selected) {
+    selected = items[0];
+  }
+  state.runtimeModels.provider = selected?.provider || "";
+  state.runtimeModels.model = selected?.model || "";
+  saveRuntimeModelSelection();
+}
+
+function renderRuntimeModels() {
+  const providers = uniqueRuntimeProviders();
+  const providerSelects = [els.createRuntimeProvider, els.modifyRuntimeProvider];
+  const modelSelects = [els.createRuntimeModel, els.modifyRuntimeModel];
+  providerSelects.forEach((select) => {
+    select.replaceChildren(
+      ...providers.map((provider) => {
+        const option = document.createElement("option");
+        option.value = provider.id;
+        option.textContent = provider.label || provider.id;
+        option.selected = provider.id === state.runtimeModels.provider;
+        return option;
+      })
+    );
+    if (!providers.length) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = state.runtimeModels.loading ? "Loading models" : "No runtime model";
+      select.append(option);
+    }
+    select.disabled = state.runtimeModels.loading || !providers.length;
+  });
+
+  const models = modelsForRuntimeProvider(state.runtimeModels.provider);
+  modelSelects.forEach((select) => {
+    select.replaceChildren(
+      ...models.map((model) => {
+        const option = document.createElement("option");
+        option.value = model.model;
+        option.textContent = model.model_label || model.model;
+        option.selected = model.model === state.runtimeModels.model;
+        return option;
+      })
+    );
+    if (!models.length) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = state.runtimeModels.loading ? "Loading models" : "No runtime model";
+      select.append(option);
+    }
+    select.disabled = state.runtimeModels.loading || !models.length;
+  });
+
+  const summary = runtimeModelSummary();
+  els.createRuntimeSummary.textContent = summary;
+  els.modifyRuntimeSummary.textContent = summary;
+}
+
+function uniqueRuntimeProviders() {
+  const seen = new Set();
+  const providers = [];
+  state.runtimeModels.items.forEach((item) => {
+    if (!item.provider || seen.has(item.provider)) {
+      return;
+    }
+    seen.add(item.provider);
+    providers.push({ id: item.provider, label: item.provider_label || item.provider });
+  });
+  return providers;
+}
+
+function modelsForRuntimeProvider(provider) {
+  return state.runtimeModels.items.filter((item) => item.provider === provider);
+}
+
+function selectedRuntimeModel() {
+  return state.runtimeModels.items.find((item) => (
+    item.provider === state.runtimeModels.provider && item.model === state.runtimeModels.model
+  ));
+}
+
+function currentRuntimeModelSelections() {
+  const model = selectedRuntimeModel();
+  if (!model) {
+    return null;
+  }
+  return [{ provider: model.provider, model: model.model }];
+}
+
+function runtimeModelSummary() {
+  if (state.runtimeModels.loading) {
+    return "Loading Dify runtime models...";
+  }
+  if (state.runtimeModels.error) {
+    return state.runtimeModels.error;
+  }
+  const model = selectedRuntimeModel();
+  if (!model) {
+    return "No active chat runtime model available.";
+  }
+  return `${model.provider_label || model.provider} · ${model.model_label || model.model}`;
+}
+
+function loadRuntimeModelProvider() {
+  return localStorage.getItem(RUNTIME_MODEL_PROVIDER_KEY) || "";
+}
+
+function loadRuntimeModel() {
+  return localStorage.getItem(RUNTIME_MODEL_KEY) || "";
+}
+
+function saveRuntimeModelSelection() {
+  localStorage.setItem(RUNTIME_MODEL_PROVIDER_KEY, state.runtimeModels.provider || "");
+  localStorage.setItem(RUNTIME_MODEL_KEY, state.runtimeModels.model || "");
 }
 
 function selectedPlannerProvider() {
@@ -2220,7 +2404,7 @@ function setAppMode(value) {
   const isConversational = isChatbot || isChatflow || isAgent;
   const isConfiguredApp = isCompletion || isChatbot || isAgent;
   els.triggerPanel.classList.toggle("is-hidden", isConversational || isCompletion);
-  els.modifyPanel.classList.toggle("is-hidden", isAgent);
+  els.modifyPanel.classList.toggle("is-hidden", false);
   els.publishPanel.classList.toggle("is-hidden", isConfiguredApp);
   els.refreshWorkflowTriggers.classList.toggle("is-hidden", isConversational || isCompletion);
   els.workflowTriggerList.classList.toggle("is-hidden", isConversational || isCompletion);
@@ -2230,7 +2414,7 @@ function setAppMode(value) {
   els.runInputs.required = !isConversational || isCompletion;
   els.runChatflowQuery.required = isConversational || isCompletion;
   els.createSubmit.textContent = isAgent ? "Create agent" : isCompletion ? "Create completion" : isChatbot ? "Create chatbot" : isChatflow ? "Create chatflow" : "Create workflow";
-  els.modifyTitle.textContent = isCompletion ? "Modify 文本生成应用" : isChatbot ? "Modify 聊天助手" : isChatflow ? "Modify Chatflow Draft" : "Modify Workflow Draft";
+  els.modifyTitle.textContent = isAgent ? "Modify Agent" : isCompletion ? "Modify 文本生成应用" : isChatbot ? "Modify 聊天助手" : isChatflow ? "Modify Chatflow Draft" : "Modify Workflow Draft";
   els.publishTitle.textContent = isChatflow ? "Publish Chatflow" : "Publish & Triggers";
   els.publishSubmit.textContent = isChatflow ? "Publish chatflow" : "Publish workflow";
   els.publishHelp.textContent = isChatflow
@@ -2241,6 +2425,7 @@ function setAppMode(value) {
 async function handleCreate() {
   try {
     const appMode = normalizedAppMode(els.createAppMode.value);
+    const modelSelections = currentRuntimeModelSelections();
     const payload = {
       message: valueOf("#create-message"),
       app_name: optionalValue("#create-app-name"),
@@ -2251,6 +2436,9 @@ async function handleCreate() {
       trigger_selection: appMode === "workflow" ? currentTriggerSelection() : null,
       planner: currentPlannerSelection(),
     };
+    if (modelSelections) {
+      payload.model_selections = modelSelections;
+    }
     if (appMode !== "agent-chat") {
       ensureAgentSelectionReady(payload.message, payload.agent_selections);
     }
@@ -2268,6 +2456,7 @@ async function handleModify(path, mode) {
     return;
   }
   try {
+    const modelSelections = currentRuntimeModelSelections();
     const payload = {
       app_id: valueOf("#modify-app-id"),
       message: valueOf("#modify-message"),
@@ -2279,7 +2468,12 @@ async function handleModify(path, mode) {
       trigger_selection: state.appMode === "workflow" ? currentTriggerSelection() : null,
       planner: currentPlannerSelection(),
     };
-    ensureAgentSelectionReady(payload.message, payload.agent_selections);
+    if (modelSelections) {
+      payload.model_selections = modelSelections;
+    }
+    if (state.appMode !== "agent-chat") {
+      ensureAgentSelectionReady(payload.message, payload.agent_selections);
+    }
     const taskPath = mode === "apply"
       ? "/api/tasks/workflows/modify/apply"
       : "/api/tasks/workflows/modify/draft";
@@ -2320,6 +2514,7 @@ async function handleReviewedPreviewApply() {
       dataset_ids: state.modifyPreview.dataset_ids,
       tool_selections: state.modifyPreview.tool_selections,
       agent_selections: state.modifyPreview.agent_selections,
+      model_selections: state.modifyPreview.model_selections,
       trigger_selection: state.modifyPreview.trigger_selection,
       planner: state.modifyPreview.planner,
     };
@@ -3921,7 +4116,8 @@ function syncAppContext(data, fallbackAppId = "") {
 }
 
 function currentModifyPayload() {
-  return {
+  const modelSelections = currentRuntimeModelSelections();
+  const payload = {
     app_id: valueOf("#modify-app-id"),
     message: valueOf("#modify-message"),
     expected_hash: optionalValue("#modify-expected-hash"),
@@ -3932,6 +4128,10 @@ function currentModifyPayload() {
     trigger_selection: state.appMode === "workflow" ? currentTriggerSelection() : null,
     planner: currentPlannerSelection(),
   };
+  if (modelSelections) {
+    payload.model_selections = modelSelections;
+  }
+  return payload;
 }
 
 function storeModifyPreview(data, payload) {
@@ -3949,6 +4149,7 @@ function storeModifyPreview(data, payload) {
     dataset_ids: payload.dataset_ids || [],
     tool_selections: payload.tool_selections || [],
     agent_selections: payload.agent_selections || [],
+    model_selections: payload.model_selections || null,
     trigger_selection: payload.trigger_selection ?? null,
     planner: payload.planner || null,
   };
@@ -3968,6 +4169,7 @@ function modifyPreviewMatches(payload) {
     datasetIdsEqual(payload.dataset_ids || [], preview.dataset_ids || []) &&
     toolSelectionsEqual(payload.tool_selections || [], preview.tool_selections || []) &&
     agentSelectionsEqual(payload.agent_selections || [], preview.agent_selections || []) &&
+    modelSelectionsEqual(payload.model_selections, preview.model_selections) &&
     triggerSelectionsEqual(payload.trigger_selection, preview.trigger_selection) &&
     plannerSelectionsEqual(payload.planner, preview.planner)
   );
@@ -4399,6 +4601,10 @@ function toolSelectionsEqual(left, right) {
 
 function agentSelectionsEqual(left, right) {
   return JSON.stringify(uniqueAgents(left || [])) === JSON.stringify(uniqueAgents(right || []));
+}
+
+function modelSelectionsEqual(left, right) {
+  return JSON.stringify(left || null) === JSON.stringify(right || null);
 }
 
 function triggerSelectionsEqual(left, right) {

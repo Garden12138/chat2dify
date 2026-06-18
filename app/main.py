@@ -18,6 +18,7 @@ from app.agent.normalizer import normalize_plan_payload
 from app.agent.planner import PlannerError, WorkflowPlanner
 from app.compiler.agent import (
     agent_app_plan_payload,
+    agent_tool_configs,
     chat_app_plan_payload,
     completion_app_plan_payload,
     compile_agent_app_dsl,
@@ -1154,10 +1155,8 @@ def _modify_workflow(
     task_context: TaskContext | None = None,
 ) -> dict:
     if task_context is not None:
-        task_context.update("loading-draft", 10, "Loading the current Dify draft.")
+        task_context.update("loading-app", 10, "Loading the current Dify app.")
     settings = load_settings()
-    _ensure_agent_strategy_selection_for_request(request.message, request.agent_selections)
-    _ensure_agent_selections_configured(request.agent_selections)
     effective_settings = _settings_with_request_dataset_ids(settings, request.dataset_ids)
     effective_settings = _settings_with_request_planner(
         effective_settings,
@@ -1168,6 +1167,12 @@ def _modify_workflow(
 
     try:
         with DifyClient(settings) as client:
+            app_detail = _load_app_detail(client, request.app_id)
+            app_mode = _app_mode(app_detail)
+            is_configured_app = app_mode in {"chat", "completion", "agent-chat"}
+            if not is_configured_app:
+                _ensure_agent_strategy_selection_for_request(request.message, request.agent_selections)
+                _ensure_agent_selections_configured(request.agent_selections)
             model_catalog, runtime_models = _runtime_model_context(
                 settings,
                 request.model_selections,
@@ -1177,35 +1182,27 @@ def _modify_workflow(
                 effective_settings,
                 runtime_models,
             )
-            _ensure_agent_runtime_models(
-                request.agent_selections,
-                model_catalog,
-                runtime_models,
-            )
+            if not is_configured_app:
+                _ensure_agent_runtime_models(
+                    request.agent_selections,
+                    model_catalog,
+                    runtime_models,
+                )
             compiler = DifyDslCompiler(
                 dsl_version=version_info.app_dsl_version,
                 default_model_provider=effective_settings.dify_default_model_provider,
                 default_model_name=effective_settings.dify_default_model_name,
                 default_dataset_ids=effective_settings.dify_default_dataset_ids,
             )
-            app_detail = _load_app_detail(client, request.app_id)
-            app_mode = _app_mode(app_detail)
-            if app_mode in {"chat", "completion"}:
+            if is_configured_app:
                 return _modify_configured_app(
                     request,
                     apply=apply,
                     settings=settings,
                     app_detail=app_detail,
                     client=client,
+                    runtime_models=runtime_models,
                     task_context=task_context,
-                )
-            if app_mode == "agent-chat":
-                raise HTTPException(
-                    status_code=422,
-                    detail={
-                        "code": "AGENT_MODIFY_NOT_SUPPORTED",
-                        "message": "agent-chat apps do not have a workflow draft graph to modify in v1.",
-                    },
                 )
             _ensure_chatflow_trigger_selection(app_mode, request.trigger_selection)
             draft = client.get_draft_workflow(request.app_id)
@@ -1378,11 +1375,16 @@ def _modify_configured_app(
     settings: Settings,
     app_detail: DifyAppDetail | None,
     client: DifyClient,
+    runtime_models=None,
     task_context: TaskContext | None = None,
 ) -> dict:
     app_mode = _app_mode(app_detail)
-    label = "Completion" if app_mode == "completion" else "Chatbot"
-    mode_label = "completion" if app_mode == "completion" else "chat"
+    labels = {
+        "completion": ("Completion", "completion"),
+        "chat": ("Chatbot", "chat"),
+        "agent-chat": ("Agent", "agent-chat"),
+    }
+    label, mode_label = labels.get(app_mode, ("Chatbot", "chat"))
     if task_context is not None:
         task_context.update("loading-config", 25, f"Loaded {label} model configuration.")
     current_config = _configured_app_model_config(app_detail)
@@ -1412,6 +1414,10 @@ def _modify_configured_app(
         current_config,
         request.message,
         app_mode=mode_label,
+        model_selections=runtime_models if request.model_selections else None,
+        tool_selections=_tool_selection_payloads(request.tool_selections)
+        if request.tool_selections
+        else None,
     )
     no_op = revised_config == current_config
     response = {
@@ -2241,26 +2247,48 @@ def _revise_configured_model_config(
     message: str,
     *,
     app_mode: str,
+    model_selections=None,
+    tool_selections: list[dict] | None = None,
 ) -> tuple[dict, list[dict]]:
     revised = deepcopy(model_config)
     changes: list[dict] = []
     request_text = " ".join(str(message or "").split())
-    if not request_text:
-        return revised, changes
-    label = "文本生成应用" if app_mode == "completion" else "聊天助手"
+    label = {
+        "completion": "文本生成应用",
+        "agent-chat": "Agent",
+    }.get(app_mode, "聊天助手")
 
-    before_prompt = str(revised.get("pre_prompt") or "")
-    addition = f"Additional instruction: {request_text}"
-    revised_prompt = f"{before_prompt.rstrip()}\n\n{addition}" if before_prompt.strip() else addition
-    if revised_prompt != before_prompt:
-        revised["pre_prompt"] = revised_prompt
-        changes.append(
-            {
-                "type": "prompt_changed",
-                "target": "pre_prompt",
-                "message": f"更新{label}提示词。",
-            }
-        )
+    if request_text:
+        before_prompt = str(revised.get("pre_prompt") or "")
+        addition = f"Additional instruction: {request_text}"
+        revised_prompt = f"{before_prompt.rstrip()}\n\n{addition}" if before_prompt.strip() else addition
+        if revised_prompt != before_prompt:
+            revised["pre_prompt"] = revised_prompt
+            changes.append(
+                {
+                    "type": "prompt_changed",
+                    "target": "pre_prompt",
+                    "message": f"更新{label}提示词。",
+                }
+            )
+
+    if model_selections:
+        model = model_selections[0]
+        before_model = deepcopy(revised.get("model")) if isinstance(revised.get("model"), dict) else {}
+        next_model = deepcopy(before_model)
+        next_model["provider"] = getattr(model, "provider", None) or next_model.get("provider")
+        next_model["name"] = getattr(model, "model", None) or next_model.get("name")
+        next_model.setdefault("mode", "chat")
+        next_model.setdefault("completion_params", {"temperature": 0.7})
+        if next_model != before_model:
+            revised["model"] = next_model
+            changes.append(
+                {
+                    "type": "model_changed",
+                    "target": "model",
+                    "message": f"更新{label}运行模型。",
+                }
+            )
 
     if app_mode == "chat":
         opening = _extract_chat_opening_statement(request_text)
@@ -2284,6 +2312,56 @@ def _revise_configured_model_config(
                     "message": "更新聊天助手建议问题。",
                 }
             )
+    if app_mode == "agent-chat":
+        before_agent_mode = (
+            deepcopy(revised.get("agent_mode"))
+            if isinstance(revised.get("agent_mode"), dict)
+            else {}
+        )
+        agent_mode = deepcopy(before_agent_mode)
+        agent_mode["enabled"] = True
+        agent_mode["strategy"] = agent_mode.get("strategy") or "react"
+
+        if request_text:
+            before_agent_prompt = str(agent_mode.get("prompt") or "")
+            addition = f"Additional instruction: {request_text}"
+            revised_agent_prompt = (
+                f"{before_agent_prompt.rstrip()}\n\n{addition}"
+                if before_agent_prompt.strip()
+                else addition
+            )
+            if revised_agent_prompt != before_agent_prompt:
+                agent_mode["prompt"] = revised_agent_prompt
+                changes.append(
+                    {
+                        "type": "agent_prompt_changed",
+                        "target": "agent_mode.prompt",
+                        "message": "更新 Agent 任务提示词。",
+                    }
+                )
+
+        if tool_selections is not None:
+            tools = agent_tool_configs(tool_selections)
+            if tools != agent_mode.get("tools"):
+                agent_mode["tools"] = tools
+                changes.append(
+                    {
+                        "type": "agent_tools_changed",
+                        "target": "agent_mode.tools",
+                        "message": "更新 Agent 工具绑定。",
+                    }
+                )
+
+        if agent_mode != before_agent_mode:
+            if not any(str(change.get("target", "")).startswith("agent_mode") for change in changes):
+                changes.append(
+                    {
+                        "type": "agent_mode_changed",
+                        "target": "agent_mode",
+                        "message": "补齐 Agent 模式配置。",
+                    }
+                )
+            revised["agent_mode"] = agent_mode
     return revised, changes
 
 

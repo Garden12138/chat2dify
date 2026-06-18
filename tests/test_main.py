@@ -53,6 +53,8 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert 'id="create-form"' in index.text
     assert 'id="create-app-mode"' in index.text
     assert 'id="create-submit"' in index.text
+    assert 'id="create-runtime-provider"' in index.text
+    assert 'id="create-runtime-model"' in index.text
     assert 'id="planner-form"' in index.text
     assert 'id="planner-provider"' in index.text
     assert 'id="planner-model"' in index.text
@@ -60,6 +62,8 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert 'id="create-task-progress"' in index.text
     assert 'id="create-cancel-task"' in index.text
     assert 'id="modify-duration"' in index.text
+    assert 'id="modify-runtime-provider"' in index.text
+    assert 'id="modify-runtime-model"' in index.text
     assert 'id="modify-task-progress"' in index.text
     assert 'id="modify-cancel-task"' in index.text
     assert 'id="run-duration"' in index.text
@@ -111,8 +115,13 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert "agent-run" in script.text
     assert "setAppMode" in script.text
     assert 'state.appMode === "workflow" ? currentTriggerSelection() : null' in script.text
-    assert 'els.modifyPanel.classList.toggle("is-hidden", isAgent)' in script.text
+    assert 'els.modifyPanel.classList.toggle("is-hidden", false)' in script.text
+    assert 'els.modifyTitle.textContent = isAgent ? "Modify Agent"' in script.text
     assert 'els.publishPanel.classList.toggle("is-hidden", isConfiguredApp)' in script.text
+    assert "loadRuntimeModels" in script.text
+    assert "currentRuntimeModelSelections" in script.text
+    assert "modelSelectionsEqual" in script.text
+    assert "payload.model_selections = modelSelections" in script.text
     assert "loadPlannerProviders" in script.text
     assert "currentPlannerSelection" in script.text
     assert "formatTaskDuration" in script.text
@@ -3035,8 +3044,38 @@ def test_run_draft_agent_rejects_non_agent_app(monkeypatch) -> None:
     assert response.json()["detail"]["code"] == "APP_IS_NOT_AGENT"
 
 
-def test_agent_modify_draft_is_explicitly_not_supported(monkeypatch) -> None:
+def test_agent_modify_draft_updates_model_config_preview(monkeypatch) -> None:
     settings = _test_settings()
+    model_config = {
+        "model": {"provider": "langgenius/tongyi/tongyi", "name": "qwen-plus", "mode": "chat"},
+        "pre_prompt": "你是售后问题分析 Agent。",
+        "agent_mode": {
+            "enabled": True,
+            "strategy": "router",
+            "tools": [{"enabled": True, "provider_type": "builtin", "provider_id": "old", "tool_name": "old"}],
+            "prompt": "分析售后投诉。",
+        },
+        "updated_at": "hash-1",
+    }
+    selected_model = DifyModelListItem(
+        provider="langgenius/tongyi/tongyi",
+        provider_label="Tongyi",
+        model="qwen-max",
+        model_label="Qwen Max",
+        model_type="llm",
+        status="active",
+        provider_status="active",
+        deprecated=False,
+        features=["tool-call"],
+        mode="chat",
+    )
+    catalog = DifyModelListResult(
+        data=[selected_model],
+        count=1,
+        model_type="llm",
+        providers=[selected_model.provider],
+        features=list(selected_model.features),
+    )
 
     class FakeDifyClient:
         def __init__(self, _settings):
@@ -3054,11 +3093,118 @@ def test_agent_modify_draft_is_explicitly_not_supported(monkeypatch) -> None:
                 name="售后 Agent",
                 mode="agent-chat",
                 description="",
-                raw={},
+                raw={"model_config": model_config},
             )
 
         def get_draft_workflow(self, _app_id):
-            raise AssertionError("Agent modify should reject before loading a workflow draft.")
+            raise AssertionError("Agent modify must not load a workflow draft.")
+
+        def update_model_config(self, _app_id, _payload):
+            raise AssertionError("Preview must not write model_config.")
+
+    monkeypatch.setattr("app.main.load_settings", lambda: settings)
+    monkeypatch.setattr("app.main.read_dify_version_info", lambda _: DifyVersionInfo("../dify", "test", "9.9.9"))
+    monkeypatch.setattr("app.main.DifyClient", FakeDifyClient)
+    monkeypatch.setattr(
+        "app.main._runtime_model_context",
+        lambda _settings, _selections, client=None: (catalog, [selected_model]),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/workflows/modify/draft",
+            json={
+                "app_id": "agent-app-1",
+                "message": "调整回复风格，并使用新的工具",
+                "model_selections": [{"provider": selected_model.provider, "model": selected_model.model}],
+                "tool_selections": [
+                    {
+                        "provider_id": "langgenius/web/web",
+                        "provider_type": "builtin",
+                        "tool_name": "web_search",
+                        "plugin_unique_identifier": "langgenius-web",
+                        "tool_parameters": {"query": {"type": "mixed", "value": "{{#sys.query#}}"}},
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["app_mode"] == "agent-chat"
+    assert data["workflow_url"] == "http://dify.local/app/agent-app-1/configuration"
+    assert data["base_hash"] == "hash-1"
+    assert data["model_config"]["model"]["name"] == "qwen-max"
+    assert data["model_config"]["agent_mode"]["enabled"] is True
+    assert data["model_config"]["agent_mode"]["strategy"] == "router"
+    assert data["model_config"]["agent_mode"]["tools"] == [
+        {
+            "enabled": True,
+            "provider_type": "builtin",
+            "provider_id": "langgenius/web/web",
+            "tool_name": "web_search",
+            "tool_parameters": {"query": {"type": "mixed", "value": "{{#sys.query#}}"}},
+            "plugin_unique_identifier": "langgenius-web",
+        }
+    ]
+    assert "Additional instruction" in data["model_config"]["pre_prompt"]
+    assert "Additional instruction" in data["model_config"]["agent_mode"]["prompt"]
+    assert {change["type"] for change in data["changes"]} == {
+        "prompt_changed",
+        "model_changed",
+        "agent_prompt_changed",
+        "agent_tools_changed",
+    }
+
+
+def test_agent_modify_apply_preserves_tools_when_empty_selection(monkeypatch) -> None:
+    settings = _test_settings()
+    existing_tools = [
+        {
+            "enabled": True,
+            "provider_type": "builtin",
+            "provider_id": "langgenius/web/web",
+            "tool_name": "web_search",
+            "tool_parameters": {},
+        }
+    ]
+    model_config = {
+        "model": {"provider": "langgenius/tongyi/tongyi", "name": "qwen-plus", "mode": "chat"},
+        "pre_prompt": "你是售后问题分析 Agent。",
+        "agent_mode": {"tools": existing_tools, "prompt": "分析售后投诉。"},
+        "updated_at": "hash-1",
+    }
+    seen = {}
+
+    class FakeDifyClient:
+        def __init__(self, _settings):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get_app_detail(self, app_id):
+            raw_config = model_config
+            if seen.get("payload") is not None:
+                raw_config = {**seen["payload"], "updated_at": "hash-2"}
+            return DifyAppDetail(
+                id=app_id,
+                name="售后 Agent",
+                mode="agent-chat",
+                description="",
+                raw={"model_config": raw_config},
+            )
+
+        def get_draft_workflow(self, _app_id):
+            raise AssertionError("Agent modify must not load a workflow draft.")
+
+        def update_model_config(self, app_id, payload):
+            seen["app_id"] = app_id
+            seen["payload"] = payload
+            return {"result": "success"}
 
     monkeypatch.setattr("app.main.load_settings", lambda: settings)
     monkeypatch.setattr("app.main.read_dify_version_info", lambda _: DifyVersionInfo("../dify", "test", "9.9.9"))
@@ -3067,15 +3213,25 @@ def test_agent_modify_draft_is_explicitly_not_supported(monkeypatch) -> None:
 
     with TestClient(app) as client:
         response = client.post(
-            "/api/workflows/modify/draft",
-            json={"app_id": "agent-app-1", "message": "调整回复风格"},
+            "/api/workflows/modify/apply",
+            json={
+                "app_id": "agent-app-1",
+                "message": "把回复改得更温暖",
+                "expected_hash": "hash-1",
+                "tool_selections": [],
+            },
         )
 
-    assert response.status_code == 422
-    assert response.json()["detail"] == {
-        "code": "AGENT_MODIFY_NOT_SUPPORTED",
-        "message": "agent-chat apps do not have a workflow draft graph to modify in v1.",
-    }
+    assert response.status_code == 200
+    data = response.json()
+    assert data["app_mode"] == "agent-chat"
+    assert data["new_hash"] == "hash-2"
+    assert seen["app_id"] == "agent-app-1"
+    assert seen["payload"]["agent_mode"]["enabled"] is True
+    assert seen["payload"]["agent_mode"]["strategy"] == "react"
+    assert seen["payload"]["agent_mode"]["tools"] == existing_tools
+    assert "Additional instruction" in seen["payload"]["agent_mode"]["prompt"]
+    assert data["model_config"]["updated_at"] == "hash-2"
 
 
 def test_chatbot_modify_apply_updates_model_config(monkeypatch) -> None:

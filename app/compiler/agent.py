@@ -126,7 +126,7 @@ def agent_app_plan_payload(
         "agent_mode": {
             "enabled": True,
             "strategy": "react",
-            "tools": _agent_tools(tool_selections or []),
+        "tools": agent_tool_configs(tool_selections or []),
             "prompt": _agent_prompt(message),
         },
         "model": {
@@ -219,7 +219,7 @@ def _agent_model_config(
     model_config["agent_mode"] = {
         "enabled": True,
         "strategy": "react",
-        "tools": _agent_tools(tool_selections),
+        "tools": agent_tool_configs(tool_selections),
         "prompt": _agent_prompt(message),
     }
     return model_config
@@ -359,7 +359,7 @@ def _agent_prompt(message: str) -> str:
     )
 
 
-def _agent_tools(tool_selections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def agent_tool_configs(tool_selections: list[dict[str, Any]]) -> list[dict[str, Any]]:
     tools: list[dict[str, Any]] = []
     for item in tool_selections:
         if not isinstance(item, dict):
