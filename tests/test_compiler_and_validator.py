@@ -52,6 +52,56 @@ def test_compiler_outputs_dify_workflow_dsl() -> None:
     assert "{{#start.query#}}" in llm["data"]["prompt_template"][1]["text"]
 
 
+def test_compiler_auto_binds_llm_vision_selector_from_file_prompt_reference() -> None:
+    plan = WorkflowPlan.model_validate(
+        {
+            "name": "证书识别",
+            "description": "识别上传的证书图片。",
+            "nodes": [
+                {
+                    "id": "start",
+                    "type": "start",
+                    "params": {
+                        "variables": [
+                            {
+                                "name": "certificate_image",
+                                "type": "image",
+                                "required": True,
+                                "label": "证书图片",
+                            }
+                        ]
+                    },
+                },
+                {
+                    "id": "llm",
+                    "type": "llm",
+                    "title": "证书内容识别",
+                    "params": {
+                        "system_prompt": "识别证书图片中的关键信息。",
+                        "user_prompt": "请识别这张证书图片：{{#start.certificate_image#}}",
+                        "vision": {"enabled": False, "configs": {"variable_selector": []}},
+                    },
+                },
+                {
+                    "id": "end",
+                    "type": "end",
+                    "params": {"outputs": [{"variable": "answer", "value_selector": ["llm", "text"]}]},
+                },
+            ],
+            "edges": [
+                {"source": "start", "target": "llm"},
+                {"source": "llm", "target": "end"},
+            ],
+        }
+    )
+
+    data = yaml.safe_load(_compiler().compile(plan))
+    llm = next(node for node in data["workflow"]["graph"]["nodes"] if node["id"] == "llm")["data"]
+
+    assert llm["vision"]["enabled"] is True
+    assert llm["vision"]["configs"]["variable_selector"] == ["start", "certificate_image"]
+
+
 def test_validator_accepts_compiled_fallback_plan() -> None:
     dsl = _compiler().compile(fallback_plan("hello"))
 

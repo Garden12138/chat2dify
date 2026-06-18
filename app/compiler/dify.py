@@ -353,6 +353,12 @@ class DifyDslCompiler:
                     prompt_variables=prompt_variables,
                 )
             )
+        vision = _vision(node.params.get("vision"))
+        vision = _vision_with_prompt_file_reference(
+            vision,
+            [system_prompt, user_prompt],
+            output_types=output_types,
+        )
         data = {
             "model": {
                 "provider": provider,
@@ -363,7 +369,7 @@ class DifyDslCompiler:
             "prompt_template": prompt_template,
             "variables": [],
             "context": {"enabled": False, "variable_selector": []},
-            "vision": _vision(node.params.get("vision")),
+            "vision": vision,
             "memory": (
                 {
                     "query_prompt_template": user_prompt,
@@ -1303,6 +1309,28 @@ def _vision(value: Any) -> dict[str, Any]:
         configs.setdefault("variable_selector", [])
         return {"enabled": enabled, "configs": configs}
     return {"enabled": False, "configs": {"variable_selector": []}}
+
+
+def _vision_with_prompt_file_reference(
+    vision: dict[str, Any],
+    texts: list[Any],
+    *,
+    output_types: dict[tuple[str, str], str],
+) -> dict[str, Any]:
+    configs = vision.get("configs") if isinstance(vision.get("configs"), dict) else {}
+    selector = configs.get("variable_selector") if isinstance(configs, dict) else None
+    if isinstance(selector, list) and selector:
+        return vision
+
+    for text in texts:
+        normalized = normalize_template_refs(str(text or ""))
+        for match in DIFY_REF_PATTERN.finditer(normalized):
+            reference = (match.group(1), match.group(2))
+            if output_types.get(reference) in {"file", "array[file]"}:
+                next_configs = deepcopy(configs)
+                next_configs["variable_selector"] = [reference[0], reference[1]]
+                return {"enabled": True, "configs": next_configs}
+    return vision
 
 
 def _normalize_output(item: dict[str, Any]) -> dict[str, Any]:
