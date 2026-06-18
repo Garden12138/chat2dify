@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.language import detect_primary_language
 from app.models import AppMode
 
 
@@ -66,6 +67,7 @@ class AssistantPlanResponse(BaseModel):
     status: AssistantStatus
     intent: str
     message: str
+    language: Literal["zh", "en"] = "zh"
     missing_fields: list[str] = Field(default_factory=list)
     action: AssistantAction | None = None
 
@@ -80,6 +82,20 @@ APP_MODE_LABELS = {
     "chat": "聊天助手",
     "agent-chat": "Agent",
     "completion": "文本生成应用",
+}
+APP_MODE_LABELS_ZH = {
+    "workflow": "工作流",
+    "advanced-chat": "对话流",
+    "chat": "聊天助手",
+    "agent-chat": "智能体",
+    "completion": "文本生成应用",
+}
+APP_MODE_LABELS_EN = {
+    "workflow": "Workflow",
+    "advanced-chat": "Chatflow",
+    "chat": "Chatbot",
+    "agent-chat": "Agent",
+    "completion": "Text generation app",
 }
 
 OPERATION_TASK_META = {
@@ -97,22 +113,28 @@ OPERATION_TASK_META = {
 def plan_assistant_action(request: AssistantPlanRequest) -> AssistantPlanResponse:
     message = request.message.strip()
     context = request.context
+    language = detect_primary_language(message)
     operation_intent = _detect_operation(message)
     explicit_app_mode = _detect_app_mode(message)
 
     if operation_intent == "create":
-        return _create_plan(message, context, explicit_app_mode)
+        return _create_plan(message, context, explicit_app_mode, language)
     if operation_intent == "modify.apply":
-        return _modify_apply_plan(message, context, explicit_app_mode)
+        return _modify_apply_plan(message, context, explicit_app_mode, language)
     if operation_intent == "modify.preview":
-        return _modify_preview_plan(message, context, explicit_app_mode)
+        return _modify_preview_plan(message, context, explicit_app_mode, language)
     if operation_intent == "run":
-        return _run_plan(message, context, explicit_app_mode)
+        return _run_plan(message, context, explicit_app_mode, language)
 
     return AssistantPlanResponse(
         status="needs_input",
         intent="unknown",
-        message="Tell me whether to create, modify, or run an app.",
+        message=_text(
+            language,
+            zh="请告诉我是要创建、修改，还是测试运行应用。",
+            en="Tell me whether to create, modify, or run an app.",
+        ),
+        language=language,
         missing_fields=["operation"],
     )
 
@@ -128,6 +150,7 @@ def _create_plan(
     message: str,
     context: AssistantContext,
     app_mode: str | None,
+    language: str,
 ) -> AssistantPlanResponse:
     missing = []
     if not app_mode:
@@ -135,10 +158,10 @@ def _create_plan(
     create_message = _first_text(message, context.create_message)
     if not create_message:
         missing.append("message")
-    app_name = _extract_app_name(message) or _infer_app_name(message, app_mode)
+    app_name = _extract_app_name(message) or _infer_app_name(message, app_mode, language)
     app_description = (
         _extract_app_description(message)
-        or _infer_app_description(message, app_mode, app_name)
+        or _infer_app_description(message, app_mode, app_name, language)
     )
     if app_mode and not app_name:
         missing.append("app_name")
@@ -148,7 +171,8 @@ def _create_plan(
         return _needs_input(
             "create",
             missing,
-            "I need the app type, app name, and creation request before preparing a create action.",
+            _create_missing_message(missing, language),
+            language,
         )
 
     payload = _shared_create_modify_payload(context)
@@ -167,7 +191,12 @@ def _create_plan(
         operation=operation,
         app_mode=app_mode,
         payload=payload,
-        summary=f"Create {APP_MODE_LABELS.get(app_mode, app_mode)} after confirmation.",
+        summary=_text(
+            language,
+            zh=f"确认后创建{_app_mode_label(app_mode, language)}。",
+            en=f"Create {_app_mode_label(app_mode, language)} after confirmation.",
+        ),
+        language=language,
     )
 
 
@@ -175,6 +204,7 @@ def _modify_preview_plan(
     message: str,
     context: AssistantContext,
     explicit_app_mode: str | None,
+    language: str,
 ) -> AssistantPlanResponse:
     app_ref = _resolve_app_reference(message, context, explicit_app_mode)
     app_id = app_ref.get("app_id")
@@ -186,7 +216,16 @@ def _modify_preview_plan(
     if not modify_message:
         missing.append("message")
     if missing:
-        return _needs_input("modify.preview", missing, "I need an app ID and change request before preparing a modify preview.")
+        return _needs_input(
+            "modify.preview",
+            missing,
+            _text(
+                language,
+                zh="准备修改预览前，还需要应用 ID 和修改要求。",
+                en="I need an app ID and change request before preparing a modify preview.",
+            ),
+            language,
+        )
 
     payload = _shared_create_modify_payload(context)
     explicit_expected_hash = _extract_named_value(message, ["expected_hash", "hash", "哈希"])
@@ -204,7 +243,12 @@ def _modify_preview_plan(
         operation="workflow.modify.draft",
         app_mode=app_mode,
         payload=payload,
-        summary="Preview the requested modification after confirmation.",
+        summary=_text(
+            language,
+            zh="确认后生成修改预览。",
+            en="Preview the requested modification after confirmation.",
+        ),
+        language=language,
     )
 
 
@@ -212,6 +256,7 @@ def _modify_apply_plan(
     message: str,
     context: AssistantContext,
     explicit_app_mode: str | None,
+    language: str,
 ) -> AssistantPlanResponse:
     preview = context.modify_preview or {}
     app_ref = _resolve_app_reference(message, context, explicit_app_mode)
@@ -231,7 +276,12 @@ def _modify_apply_plan(
         return _needs_input(
             "modify.apply",
             missing,
-            "Run a modify preview first, then confirm applying that reviewed preview.",
+            _text(
+                language,
+                zh="请先生成修改预览，再确认应用该预览。",
+                en="Run a modify preview first, then confirm applying that reviewed preview.",
+            ),
+            language,
         )
 
     payload = {
@@ -256,7 +306,12 @@ def _modify_apply_plan(
         operation="workflow.modify.apply",
         app_mode=app_mode,
         payload=payload,
-        summary="Apply the reviewed modification preview after confirmation.",
+        summary=_text(
+            language,
+            zh="确认后应用已审阅的修改预览。",
+            en="Apply the reviewed modification preview after confirmation.",
+        ),
+        language=language,
     )
 
 
@@ -264,14 +319,33 @@ def _run_plan(
     message: str,
     context: AssistantContext,
     explicit_app_mode: str | None,
+    language: str,
 ) -> AssistantPlanResponse:
     app_ref = _resolve_app_reference(message, context, explicit_app_mode)
     app_id = app_ref.get("app_id")
     app_mode = app_ref.get("app_mode")
     if not app_mode:
-        return _needs_input("run", ["app_mode"], "I need the app type before preparing a run action.")
+        return _needs_input(
+            "run",
+            ["app_mode"],
+            _text(
+                language,
+                zh="测试运行前还需要应用类型。",
+                en="I need the app type before preparing a run action.",
+            ),
+            language,
+        )
     if not app_id:
-        return _needs_input("run", ["app_id"], "I need the app ID before preparing a run action.")
+        return _needs_input(
+            "run",
+            ["app_id"],
+            _text(
+                language,
+                zh="测试运行前还需要应用 ID。",
+                en="I need the app ID before preparing a run action.",
+            ),
+            language,
+        )
 
     timeout_seconds = context.timeout_seconds or 120
     extracted_inputs = _extract_json_object(message)
@@ -288,7 +362,16 @@ def _run_plan(
         else:
             inputs = None
         if inputs is None:
-            return _needs_input("run", ["inputs"], "Workflow runs need test input text or an inputs JSON object.")
+            return _needs_input(
+                "run",
+                ["inputs"],
+                _text(
+                    language,
+                    zh="工作流测试运行需要测试输入文本，或 inputs JSON 对象。",
+                    en="Workflow runs need test input text or an inputs JSON object.",
+                ),
+                language,
+            )
         payload = {
             "app_id": app_id,
             "inputs": inputs,
@@ -300,12 +383,26 @@ def _run_plan(
             operation="workflow.run.draft",
             app_mode=app_mode,
             payload=payload,
-            summary="Run the Workflow draft after confirmation.",
+            summary=_text(
+                language,
+                zh="确认后测试运行工作流草稿。",
+                en="Run the Workflow draft after confirmation.",
+            ),
+            language=language,
         )
 
     query = natural_query or context.run_query
     if not query:
-        return _needs_input("run", ["query"], f"{APP_MODE_LABELS.get(app_mode, app_mode)} runs need a query.")
+        return _needs_input(
+            "run",
+            ["query"],
+            _text(
+                language,
+                zh=f"{_app_mode_label(app_mode, language)}测试运行需要测试问题。",
+                en=f"{_app_mode_label(app_mode, language)} runs need a query.",
+            ),
+            language,
+        )
     payload = {
         "app_id": app_id,
         "query": query,
@@ -327,7 +424,12 @@ def _run_plan(
         operation=operation,
         app_mode=app_mode,
         payload=payload,
-        summary=f"Run the {APP_MODE_LABELS.get(app_mode, app_mode)} after confirmation.",
+        summary=_text(
+            language,
+            zh=f"确认后测试运行{_app_mode_label(app_mode, language)}。",
+            en=f"Run the {_app_mode_label(app_mode, language)} after confirmation.",
+        ),
+        language=language,
     )
 
 
@@ -338,12 +440,14 @@ def _pending(
     app_mode: str | None,
     payload: dict[str, Any],
     summary: str,
+    language: str,
 ) -> AssistantPlanResponse:
     panel, kind = assistant_task_meta(operation)
     return AssistantPlanResponse(
         status="pending_action",
         intent=intent,
         message=summary,
+        language="en" if language == "en" else "zh",
         action=AssistantAction(
             operation=operation,
             app_mode=app_mode,
@@ -355,11 +459,17 @@ def _pending(
     )
 
 
-def _needs_input(intent: str, missing: list[str], message: str) -> AssistantPlanResponse:
+def _needs_input(
+    intent: str,
+    missing: list[str],
+    message: str,
+    language: str,
+) -> AssistantPlanResponse:
     return AssistantPlanResponse(
         status="needs_input",
         intent=intent,
         message=message,
+        language="en" if language == "en" else "zh",
         missing_fields=missing,
     )
 
@@ -577,29 +687,78 @@ def _extract_app_description(message: str) -> str | None:
     return None
 
 
-def _infer_app_name(message: str, app_mode: str | None) -> str | None:
+def _infer_app_name(message: str, app_mode: str | None, language: str) -> str | None:
     subject = _semantic_create_subject(message)
     if not subject:
         return None
-    suffix = {
-        "workflow": "工作流",
-        "advanced-chat": "Chatflow",
-        "chat": "聊天助手",
-        "agent-chat": "Agent",
-        "completion": "文本生成",
-    }.get(app_mode or "", "应用")
+    suffix = _app_mode_label(app_mode, language)
     if suffix.lower() not in subject.lower():
-        subject = f"{subject}{suffix}"
+        subject = f"{subject} {suffix}" if language == "en" else f"{subject}{suffix}"
     return subject[:40].strip()
 
 
-def _infer_app_description(message: str, app_mode: str | None, app_name: str | None) -> str | None:
+def _infer_app_description(
+    message: str,
+    app_mode: str | None,
+    app_name: str | None,
+    language: str,
+) -> str | None:
     subject = _semantic_create_subject(message)
     if not subject and not app_name:
         return None
-    label = APP_MODE_LABELS.get(app_mode or "", "应用")
+    label = _app_mode_label(app_mode, language)
     purpose = subject or app_name or "用户需求"
+    if language == "en":
+        return _clean_sentence(f"{label} for {purpose}.", limit=120)
     return _clean_sentence(f"{label}，用于{purpose}。", limit=120)
+
+
+def _app_mode_label(app_mode: str | None, language: str) -> str:
+    labels = APP_MODE_LABELS_EN if language == "en" else APP_MODE_LABELS_ZH
+    fallback = "app" if language == "en" else "应用"
+    return labels.get(app_mode or "", fallback)
+
+
+def _text(language: str, *, zh: str, en: str) -> str:
+    return en if language == "en" else zh
+
+
+def _create_missing_message(missing: list[str], language: str) -> str:
+    missing_set = set(missing)
+    if language == "en":
+        labels = []
+        if "app_mode" in missing_set:
+            labels.append("app type")
+        if "app_name" in missing_set:
+            labels.append("app name")
+        if "app_description" in missing_set or "message" in missing_set:
+            labels.append("creation request")
+        joined = _join_labels(labels, language)
+        return (
+            f"I still need {joined} before preparing a create action."
+            if joined
+            else "I need more information before preparing a create action."
+        )
+
+    labels = []
+    if "app_mode" in missing_set:
+        labels.append("应用类型")
+    if "app_name" in missing_set:
+        labels.append("应用名称")
+    if "app_description" in missing_set or "message" in missing_set:
+        labels.append("需求描述")
+    joined = _join_labels(labels, language)
+    return f"创建前还需要{joined}。" if joined else "创建前还需要补充信息。"
+
+
+def _join_labels(labels: list[str], language: str) -> str:
+    if not labels:
+        return ""
+    if language == "en":
+        if len(labels) == 1:
+            return labels[0]
+        return f"{', '.join(labels[:-1])}, and {labels[-1]}"
+    return "、".join(labels)
 
 
 def _semantic_create_subject(message: str) -> str:
@@ -607,6 +766,7 @@ def _semantic_create_subject(message: str) -> str:
     text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
     text = re.sub(r"(?:名字叫|名称为|名称叫|命名为)\s*[^，。,.；;\n]{2,40}", "", text)
     text = re.sub(r"(?i)(?:named|called|name)\s+[A-Za-z0-9 _-]{2,40}", "", text)
+    text = re.sub(r"(?i)\b(?:a|an)\b", " ", text)
     replacements = [
         "创建",
         "生成",

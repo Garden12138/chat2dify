@@ -87,8 +87,37 @@ def test_assistant_create_asks_when_name_and_purpose_are_too_vague() -> None:
     result = plan_assistant_action(AssistantPlanRequest(message="创建一个工作流"))
 
     assert result.status == "needs_input"
+    assert result.language == "zh"
+    assert result.message == "创建前还需要应用名称、需求描述。"
+    assert "I need" not in result.message
     assert "app_name" in result.missing_fields
     assert "app_description" in result.missing_fields
+
+
+def test_assistant_create_action_uses_chinese_for_chinese_request() -> None:
+    result = plan_assistant_action(
+        AssistantPlanRequest(message="创建一个工作流\n证书识别工作流")
+    )
+
+    assert result.status == "pending_action"
+    assert result.language == "zh"
+    assert result.action is not None
+    assert result.action.summary == "确认后创建工作流。"
+    assert result.action.payload["app_name"] == "证书识别工作流"
+    assert result.action.payload["app_description"] == "工作流，用于证书识别"
+
+
+def test_assistant_create_action_uses_english_for_english_request() -> None:
+    result = plan_assistant_action(
+        AssistantPlanRequest(message="create a workflow for support tickets")
+    )
+
+    assert result.status == "pending_action"
+    assert result.language == "en"
+    assert result.action is not None
+    assert result.action.summary == "Create Workflow after confirmation."
+    assert result.action.payload["app_name"] == "support tickets Workflow"
+    assert result.action.payload["app_description"] == "Workflow for support tickets"
 
 
 def test_assistant_modify_preview_and_apply_router() -> None:
@@ -399,6 +428,11 @@ def test_assistant_web_ui_assets_are_present(monkeypatch, tmp_path) -> None:
     assert "switchingApp" in script.text
     assert "workflow.modify.apply" in script.text
     assert "尚未写回 Dify" in script.text
+    assert "primaryLanguage" in script.text
+    assert "localizedActionSummary" in script.text
+    assert "应用 ID" in script.text
+    assert "生成预览" in script.text
+    assert "任务已完成" in script.text
     assert "applyContextHints(text)" not in script.text
 
 

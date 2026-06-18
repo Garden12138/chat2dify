@@ -32,6 +32,7 @@ from app.dify.client import (
     DifyWorkflowTrigger,
 )
 from app.dify.version import DifyVersionInfo
+from app.language import LANGUAGE_RESPONSE_INSTRUCTION
 from app.main import _message_requests_agent_strategy, app
 from app.models import WorkflowPlan
 
@@ -3130,6 +3131,8 @@ def test_agent_modify_draft_updates_model_config_preview(monkeypatch) -> None:
     ]
     assert "Additional instruction" in data["model_config"]["pre_prompt"]
     assert "Additional instruction" in data["model_config"]["agent_mode"]["prompt"]
+    assert LANGUAGE_RESPONSE_INSTRUCTION in data["model_config"]["pre_prompt"]
+    assert LANGUAGE_RESPONSE_INSTRUCTION in data["model_config"]["agent_mode"]["prompt"]
     assert {change["type"] for change in data["changes"]} == {
         "prompt_changed",
         "model_changed",
@@ -3212,6 +3215,8 @@ def test_agent_modify_apply_preserves_tools_when_empty_selection(monkeypatch) ->
     assert seen["payload"]["agent_mode"]["strategy"] == "react"
     assert seen["payload"]["agent_mode"]["tools"] == existing_tools
     assert "Additional instruction" in seen["payload"]["agent_mode"]["prompt"]
+    assert LANGUAGE_RESPONSE_INSTRUCTION in seen["payload"]["pre_prompt"]
+    assert LANGUAGE_RESPONSE_INSTRUCTION in seen["payload"]["agent_mode"]["prompt"]
     assert data["model_config"]["updated_at"] == "hash-2"
 
 
@@ -3278,6 +3283,7 @@ def test_chatbot_modify_apply_updates_model_config(monkeypatch) -> None:
     assert seen["app_id"] == "chat-app-1"
     assert seen["payload"]["dataset_configs"] == model_config["dataset_configs"]
     assert "Additional instruction" in seen["payload"]["pre_prompt"]
+    assert LANGUAGE_RESPONSE_INSTRUCTION in seen["payload"]["pre_prompt"]
     assert seen["payload"]["opening_statement"] == "您好，我是售后助手。"
     assert seen["payload"]["suggested_questions"] == ["如何预约维修", "如何查询订单"]
     assert data["model_config"]["updated_at"] == "hash-2"
@@ -3345,6 +3351,7 @@ def test_completion_modify_apply_updates_model_config(monkeypatch) -> None:
     assert seen["app_id"] == "completion-app-1"
     assert seen["payload"]["dataset_configs"] == model_config["dataset_configs"]
     assert "Additional instruction" in seen["payload"]["pre_prompt"]
+    assert LANGUAGE_RESPONSE_INSTRUCTION in seen["payload"]["pre_prompt"]
     assert "opening_statement" not in seen["payload"]
     assert "suggested_questions" not in seen["payload"]
     assert data["model_config"]["updated_at"] == "hash-2"

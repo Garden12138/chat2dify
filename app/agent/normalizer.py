@@ -8,6 +8,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from app.dify.runtime_models import apply_default_runtime_models
 from app.input_variables import file_upload_settings, is_file_input_type
+from app.language import LANGUAGE_RESPONSE_INSTRUCTION, ensure_language_response_instruction
 from app.list_operator import normalize_list_comparison_operator, normalize_list_variable_selector
 from app.node_outputs import node_output_types, repair_plan_references
 
@@ -1230,7 +1231,9 @@ def _normalize_llm_params(
         raw_user = split_user
 
     result.pop("prompt", None)
-    result["system_prompt"] = normalize_template_refs(_clean_prompt(raw_system))
+    result["system_prompt"] = normalize_template_refs(
+        ensure_language_response_instruction(_clean_prompt(raw_system))
+    )
     result["user_prompt"] = normalize_template_refs(
         _clean_prompt(
             _ensure_user_prompt(
@@ -4010,7 +4013,8 @@ def _default_system_prompt(workflow_name: str) -> str:
         f"你是{subject}专员，负责根据用户输入生成专业、礼貌、可执行的回复。\n"
         "规则：先理解用户诉求，再给出清晰处理建议；不得编造订单、金额、门店或政策信息；"
         "遇到不确定信息时说明需要进一步核实。\n"
-        "输出格式：用自然中文输出，结构清楚，语气友好。\n"
+        f"{LANGUAGE_RESPONSE_INSTRUCTION}\n"
+        "输出格式：结构清楚，语气友好。\n"
         "审核标准：回复必须贴合用户输入，不推卸责任，不承诺超出权限的赔付或处理结果。"
     )
 

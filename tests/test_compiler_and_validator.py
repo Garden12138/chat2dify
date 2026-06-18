@@ -5,11 +5,17 @@ from uuid import UUID
 
 from app.agent.planner import fallback_plan
 from app.agent.normalizer import normalize_plan_payload
-from app.compiler.agent import compile_completion_app_dsl, validate_completion_app_dsl
+from app.compiler.agent import (
+    compile_agent_app_dsl,
+    compile_chat_app_dsl,
+    compile_completion_app_dsl,
+    validate_completion_app_dsl,
+)
 from app.compiler.dify import DifyDslCompiler
 from app.config import Settings
 from app.dify.graph import decompile_dify_graph
 from app.dify.knowledge_retrieval import apply_dataset_retrieval_settings
+from app.language import LANGUAGE_RESPONSE_INSTRUCTION
 from app.models import WorkflowPlan
 from app.validator import has_errors, validate_dsl, validate_plan
 
@@ -128,8 +134,50 @@ def test_completion_app_dsl_validates_as_configured_app() -> None:
     assert data["app"]["mode"] == "completion"
     assert data["model_config"]["model"]["name"] == "gpt-4o-mini"
     assert data["model_config"]["pre_prompt"]
+    assert LANGUAGE_RESPONSE_INSTRUCTION in data["model_config"]["pre_prompt"]
     assert validate_completion_app_dsl(dsl, expected_dsl_version="9.9.9") == []
     assert validate_dsl(dsl, expected_dsl_version="9.9.9") == []
+
+
+def test_agent_app_prompts_include_language_policy() -> None:
+    settings = Settings.from_env(
+        {
+            "DIFY_SOURCE_DIR": "../dify",
+            "DIFY_DEFAULT_MODEL_PROVIDER": "openai",
+            "DIFY_DEFAULT_MODEL_NAME": "gpt-4o-mini",
+        },
+        validate_dify=False,
+    )
+    dsl = compile_agent_app_dsl(
+        message="分析售后问题并给出处理建议",
+        app_name="售后 Agent",
+        dsl_version="9.9.9",
+        settings=settings,
+    )
+    data = yaml.safe_load(dsl)
+
+    assert LANGUAGE_RESPONSE_INSTRUCTION in data["model_config"]["pre_prompt"]
+    assert LANGUAGE_RESPONSE_INSTRUCTION in data["model_config"]["agent_mode"]["prompt"]
+
+
+def test_chatbot_app_prompt_includes_language_policy() -> None:
+    settings = Settings.from_env(
+        {
+            "DIFY_SOURCE_DIR": "../dify",
+            "DIFY_DEFAULT_MODEL_PROVIDER": "openai",
+            "DIFY_DEFAULT_MODEL_NAME": "gpt-4o-mini",
+        },
+        validate_dify=False,
+    )
+    dsl = compile_chat_app_dsl(
+        message="处理售后咨询",
+        app_name="售后聊天助手",
+        dsl_version="9.9.9",
+        settings=settings,
+    )
+    data = yaml.safe_load(dsl)
+
+    assert LANGUAGE_RESPONSE_INSTRUCTION in data["model_config"]["pre_prompt"]
 
 
 def test_compiler_outputs_advanced_chat_dsl_with_memory() -> None:
@@ -801,6 +849,7 @@ def test_normalizer_repairs_generic_titles_and_splits_llm_prompt() -> None:
     assert nodes["end"]["title"] == "返回售后服务结果"
     assert "你是理发门店售后服务专员" in nodes["llm"]["params"]["system_prompt"]
     assert "输出格式" in nodes["llm"]["params"]["system_prompt"]
+    assert LANGUAGE_RESPONSE_INSTRUCTION in nodes["llm"]["params"]["system_prompt"]
     assert nodes["llm"]["params"]["user_prompt"] == "请根据以下售后诉求生成回复：{{#start.query#}}"
     assert "normalized generic title" in " ".join(normalized.changes)
 
@@ -834,6 +883,7 @@ def test_normalizer_splits_mixed_single_line_llm_prompt() -> None:
 
     assert "你是理发门店售后服务专员" in llm["params"]["system_prompt"]
     assert "输出格式" in llm["params"]["system_prompt"]
+    assert LANGUAGE_RESPONSE_INSTRUCTION in llm["params"]["system_prompt"]
     assert llm["params"]["user_prompt"] == "请根据以下售后诉求生成回复：{{#start.query#}}"
 
 
@@ -856,6 +906,7 @@ def test_normalizer_adds_default_system_prompt_when_only_user_prompt_is_present(
     llm = next(node for node in normalized.payload["nodes"] if node["id"] == "llm")
 
     assert "你是理发售后服务专员" in llm["params"]["system_prompt"]
+    assert LANGUAGE_RESPONSE_INSTRUCTION in llm["params"]["system_prompt"]
     assert llm["params"]["user_prompt"] == "请处理 {{#start.query#}}"
 
 

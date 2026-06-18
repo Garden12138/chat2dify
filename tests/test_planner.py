@@ -7,12 +7,14 @@ import pytest
 from app.agent.planner import (
     CHATFLOW_SYSTEM_PROMPT,
     PlannerError,
+    SYSTEM_PROMPT,
     WorkflowPlanner,
     _validate_creation_resource_bindings,
     _read_streamed_chat_completion,
     fallback_plan,
 )
 from app.config import Settings
+from app.language import LANGUAGE_RESPONSE_INSTRUCTION
 from app.models import WorkflowPlan
 from app.tasks import TaskCancelled
 
@@ -491,6 +493,7 @@ def test_fallback_plan_uses_semantic_titles_and_split_prompts() -> None:
 
     assert titles == ["接收理发售后服务诉求", "生成理发售后服务回复", "返回理发售后服务结果"]
     assert "你是理发售后服务专员" in llm.params["system_prompt"]
+    assert LANGUAGE_RESPONSE_INSTRUCTION in llm.params["system_prompt"]
     assert "{{#start.query#}}" in llm.params["user_prompt"]
     assert "审核标准" in llm.params["system_prompt"]
     assert "审核标准" not in llm.params["user_prompt"]
@@ -498,6 +501,8 @@ def test_fallback_plan_uses_semantic_titles_and_split_prompts() -> None:
 
 def test_chatflow_prompt_is_mode_specific_and_lists_certified_nodes() -> None:
     assert 'set app_mode to "advanced-chat"' in CHATFLOW_SYSTEM_PROMPT
+    assert LANGUAGE_RESPONSE_INSTRUCTION in SYSTEM_PROMPT
+    assert LANGUAGE_RESPONSE_INSTRUCTION in CHATFLOW_SYSTEM_PROMPT
     assert "Use exactly one start node and at least one end node." not in CHATFLOW_SYSTEM_PROMPT
     assert "then end" not in CHATFLOW_SYSTEM_PROMPT
     assert "question-classifier" in CHATFLOW_SYSTEM_PROMPT

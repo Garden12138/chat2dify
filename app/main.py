@@ -56,6 +56,7 @@ from app.dify.runtime_models import (
     validate_runtime_model_bindings,
 )
 from app.dify.version import read_dify_version_info
+from app.language import ensure_language_response_instruction
 from app.models import (
     AgentRunDraftRequest,
     ChatbotRunDraftRequest,
@@ -2374,19 +2375,21 @@ def _revise_configured_model_config(
         "agent-chat": "Agent",
     }.get(app_mode, "聊天助手")
 
+    before_prompt = str(revised.get("pre_prompt") or "")
+    revised_prompt = before_prompt
     if request_text:
-        before_prompt = str(revised.get("pre_prompt") or "")
         addition = f"Additional instruction: {request_text}"
         revised_prompt = f"{before_prompt.rstrip()}\n\n{addition}" if before_prompt.strip() else addition
-        if revised_prompt != before_prompt:
-            revised["pre_prompt"] = revised_prompt
-            changes.append(
-                {
-                    "type": "prompt_changed",
-                    "target": "pre_prompt",
-                    "message": f"更新{label}提示词。",
-                }
-            )
+    revised_prompt = ensure_language_response_instruction(revised_prompt)
+    if revised_prompt != before_prompt:
+        revised["pre_prompt"] = revised_prompt
+        changes.append(
+            {
+                "type": "prompt_changed",
+                "target": "pre_prompt",
+                "message": f"更新{label}提示词。",
+            }
+        )
 
     if model_selections:
         model = model_selections[0]
@@ -2438,23 +2441,25 @@ def _revise_configured_model_config(
         agent_mode["enabled"] = True
         agent_mode["strategy"] = agent_mode.get("strategy") or "react"
 
+        before_agent_prompt = str(agent_mode.get("prompt") or "")
+        revised_agent_prompt = before_agent_prompt
         if request_text:
-            before_agent_prompt = str(agent_mode.get("prompt") or "")
             addition = f"Additional instruction: {request_text}"
             revised_agent_prompt = (
                 f"{before_agent_prompt.rstrip()}\n\n{addition}"
                 if before_agent_prompt.strip()
                 else addition
             )
-            if revised_agent_prompt != before_agent_prompt:
-                agent_mode["prompt"] = revised_agent_prompt
-                changes.append(
-                    {
-                        "type": "agent_prompt_changed",
-                        "target": "agent_mode.prompt",
-                        "message": "更新 Agent 任务提示词。",
-                    }
-                )
+        revised_agent_prompt = ensure_language_response_instruction(revised_agent_prompt)
+        if revised_agent_prompt != before_agent_prompt:
+            agent_mode["prompt"] = revised_agent_prompt
+            changes.append(
+                {
+                    "type": "agent_prompt_changed",
+                    "target": "agent_mode.prompt",
+                    "message": "更新 Agent 任务提示词。",
+                }
+            )
 
         if tool_selections is not None:
             tools = agent_tool_configs(tool_selections)

@@ -17,6 +17,7 @@ from app.dify.runtime_models import (
     model_selection_payloads,
     validate_runtime_model_bindings,
 )
+from app.language import LANGUAGE_RESPONSE_INSTRUCTION
 from app.models import ValidationIssue, WorkflowPlan
 from app.node_outputs import output_catalog
 from app.validator import has_errors
@@ -122,6 +123,7 @@ Use start params.variables, not params.inputs.
 Use llm params.system_prompt and params.user_prompt, not params.prompt.
 For every llm node:
 - system_prompt defines role, rules, output format, and review criteria.
+- system_prompt must include this language policy: 语言策略：如果用户输入主要为中文，请用中文回复；如果用户输入主要为英文，请用英文回复。
 - user_prompt contains the specific input, task, and Dify variable references.
 Keep Dify variable references in user_prompt whenever possible.
 Variable references inside text must use Dify syntax like {{#start_1.query#}}.
@@ -179,6 +181,7 @@ use ["<start_id>","sys.query"] and ["<start_id>","sys.files"]. Custom start
 inputs remain selectable as ["<start_id>","<input_name>"].
 
 Every llm node must include a business-specific system_prompt and user_prompt.
+The system_prompt must include this language policy: 语言策略：如果用户输入主要为中文，请用中文回复；如果用户输入主要为英文，请用英文回复。
 The user_prompt must include {{#sys.query#}} and any required upstream output.
 Chatflow memory is enabled by chat2dify with a 10-message window.
 
@@ -932,7 +935,8 @@ def fallback_plan(
                             f"你是{subject}专员，负责根据用户输入生成专业、礼貌、可执行的回复。\n"
                             "规则：先理解用户诉求，再给出清晰处理建议；不得编造订单、金额、门店或政策信息；"
                             "遇到不确定信息时说明需要进一步核实。\n"
-                            "输出格式：用自然中文输出，结构清楚，语气友好。\n"
+                            f"{LANGUAGE_RESPONSE_INSTRUCTION}\n"
+                            "输出格式：结构清楚，语气友好。\n"
                             "审核标准：回复必须贴合用户输入，不推卸责任，不承诺超出权限的赔付或处理结果。"
                         ),
                         "user_prompt": f"请根据以下用户输入完成“{message}”任务：\n{query_reference}",

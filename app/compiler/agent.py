@@ -6,6 +6,7 @@ import yaml
 
 from app.config import Settings
 from app.dify.client import DifyModelListItem
+from app.language import ensure_language_response_instruction
 
 
 def compile_chat_app_dsl(
@@ -338,7 +339,7 @@ def _validate_configured_app_dsl(
 
 
 def _chat_pre_prompt(message: str) -> str:
-    return (
+    return ensure_language_response_instruction(
         "You are a helpful conversational assistant. Follow the task below, ask "
         "clarifying questions when needed, and answer clearly.\n\nTask:\n"
         f"{message}"
@@ -346,7 +347,7 @@ def _chat_pre_prompt(message: str) -> str:
 
 
 def _completion_pre_prompt(message: str) -> str:
-    return (
+    return ensure_language_response_instruction(
         "You are a text generation assistant. Use the user's input as source "
         "material and follow the generation task below.\n\nTask:\n"
         f"{message}"
@@ -354,7 +355,7 @@ def _completion_pre_prompt(message: str) -> str:
 
 
 def _agent_pre_prompt(message: str) -> str:
-    return (
+    return ensure_language_response_instruction(
         "You are an autonomous assistant. Understand the user's request, plan the "
         "steps needed, use configured tools when helpful, and return a concise, "
         f"actionable answer.\n\nTask:\n{message}"
@@ -362,7 +363,7 @@ def _agent_pre_prompt(message: str) -> str:
 
 
 def _agent_prompt(message: str) -> str:
-    return (
+    return ensure_language_response_instruction(
         "Reason step by step internally. When a tool is available and relevant, "
         "use it before finalizing. Do not invent facts, IDs, prices, policies, or "
         f"tool results.\n\nPrimary task:\n{message}"
