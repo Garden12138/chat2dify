@@ -224,6 +224,18 @@ v3.0.0 提供 Dify docker compose overlay。默认假设 Dify 和 chat2dify 是�
 
 Dify web 中的内嵌入口只是抽屉和 iframe 适配层；真正的创建、修改、运行和发布仍由 `chat2dify` sidecar 执行。
 
+本仓库保存了一份 Dify web 适配层副本，位于：
+
+```text
+deploy/dify/web-adapter/
+```
+
+该目录按 Dify 的 `web/` 源码路径镜像，包含创建应用卡片入口、Workflow Header 入口、抽屉 iframe 面板和对应组件测试。应用到同级 Dify 仓库时可执行：
+
+```bash
+rsync -av deploy/dify/web-adapter/web/ ../dify/web/
+```
+
 在 `dify/docker/.env` 中补充：
 
 ```env
@@ -403,11 +415,11 @@ app/
   dify/                Dify Console API client、graph 适配和预检
   static/              v3 Dify 面板 Web UI
 deploy/dify/           Dify docker compose overlay 和 nginx 面板路由
+deploy/dify/web-adapter/
+                       Dify Console 内嵌入口适配层源码副本
 docker/                chat2dify 容器镜像
 tests/                 pytest 覆盖 create / modify / run / assistant / client
 docs/images/           README 截图
-../dify/web/app/components/chat2dify/
-                       Dify Console 抽屉面板和入口按钮适配层
 ```
 
 ## 注意事项

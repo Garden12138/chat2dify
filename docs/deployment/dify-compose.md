@@ -13,6 +13,18 @@ adapter for drawer triggers and the iframe panel. The compose overlay adds:
 - an nginx template override that routes `/chat2dify/` to the component.
 - a `chat2dify_data` volume for task state.
 
+This repository keeps a copy of the Dify web adapter under:
+
+```text
+deploy/dify/web-adapter/
+```
+
+It mirrors Dify's `web/` source layout. To copy it into a sibling Dify checkout:
+
+```bash
+rsync -av deploy/dify/web-adapter/web/ ../dify/web/
+```
+
 ## Directory Layout
 
 The default overlay expects sibling repositories:
