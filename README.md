@@ -1,16 +1,19 @@
 # chat2dify
 
-chat2dify 是一个独立的 FastAPI 组件，用自然语言对话创建、修改、测试运行和发布 Dify 应用。v3.0.0 开始，它可以作为 Dify 面板中的 `/chat2dify/` 组件随 Dify docker compose 一起启动，也可以继续独立运行。
+chat2dify 是一个独立的 FastAPI 组件，用自然语言对话创建、修改、测试运行和发布 Dify 应用。v3.0.0 开始，它可以作为 Dify Console 中的内嵌面板随 Dify docker compose 一起启动，也可以继续独立运行。
 
-它不修改 Dify 源码，而是连接本地或局域网内的 Dify Console API，把用户意图转换成可审阅的操作，再由后台任务执行。核心入口是 `POST /api/assistant/plan` 和 `POST /api/assistant/execute`。
+运行时仍然是独立 sidecar：chat2dify 连接本地或局域网内的 Dify Console API，把用户意图转换成可审阅的操作，再由后台任务执行。Dify web 只需要一个轻量适配层来放置抽屉入口和 iframe。核心入口是 `POST /api/assistant/plan` 和 `POST /api/assistant/execute`。
 
 ## 当前版本
 
 `v3.0.0` 的主要变化：
 
 - Dify 面板模式：通过 compose overlay 挂载到 Dify nginx 的 `/chat2dify/` 路径。
+- Dify Console 内嵌入口：应用创建卡片可打开 Chat2Dify 创建面板，Workflow 画布顶部可打开当前实例修改面板。
+- Dify web 构建覆盖：compose overlay 可构建带内嵌入口的 `web` 镜像，并和 `chat2dify`、`nginx` 一起启动。
 - 独立组件部署：提供 Dockerfile、Dify compose overlay 和独立任务数据卷。
 - 子路径兼容：前端静态资源和 API 请求支持 `CHAT2DIFY_PUBLIC_BASE_PATH`。
+- 嵌入上下文兼容：`embed=1` 会隐藏 chat2dify 侧边栏，`intent=create|modify` 会带入创建类型或当前 app 上下文。
 - 面板 manifest：`GET /api/panel/manifest` 暴露组件版本、挂载路径和 API 前缀。
 - 版本统一：Python 包、FastAPI 应用和健康检查统一为 `3.0.0`。
 
@@ -206,6 +209,13 @@ v3.0.0 提供 Dify docker compose overlay。默认假设 Dify 和 chat2dify 是�
 ../chat2dify
 ```
 
+集成后有两个入口层级：
+
+- Dify Console 内嵌入口：在 Studio 创建应用卡片中点击 `Chat2Dify 创建`，或进入 Workflow 画布后点击顶部 `Chat2Dify`。
+- 子路径直接入口：继续保留 `http://localhost/chat2dify/`，便于调试和独立使用。
+
+Dify web 中的内嵌入口只是抽屉和 iframe 适配层；真正的创建、修改、运行和发布仍由 `chat2dify` sidecar 执行。
+
 在 `dify/docker/.env` 中补充：
 
 ```env
@@ -221,14 +231,29 @@ CHAT2DIFY_NVIDIA_API_KEY=nvapi-...
 docker compose \
   -f docker-compose.yaml \
   -f ../../chat2dify/deploy/dify/docker-compose.chat2dify.yaml \
-  up -d --build chat2dify nginx
+  up -d --build web chat2dify nginx
 ```
 
-打开：
+打开 Dify：
+
+```text
+http://localhost/apps
+```
+
+打开 chat2dify 直接入口：
 
 ```text
 http://localhost/chat2dify/
 ```
+
+内嵌面板使用的 URL 形态：
+
+```text
+/chat2dify/?embed=1&intent=create&app_mode=workflow
+/chat2dify/?embed=1&intent=modify&app_id=<app_id>&app_mode=workflow&app_name=<name>
+```
+
+`embed=1` 会隐藏 chat2dify 自身侧边栏；`intent=create` 会把 `app_mode` 作为创建类型上下文；`intent=modify` 会把当前 app 记入对话上下文，后续可以直接说“把回复改得更专业”。
 
 详细说明见 [Dify Compose Deployment](docs/deployment/dify-compose.md)。
 
@@ -373,12 +398,15 @@ deploy/dify/           Dify docker compose overlay 和 nginx 面板路由
 docker/                chat2dify 容器镜像
 tests/                 pytest 覆盖 create / modify / run / assistant / client
 docs/images/           README 截图
+../dify/web/app/components/chat2dify/
+                       Dify Console 抽屉面板和入口按钮适配层
 ```
 
 ## 注意事项
 
-- chat2dify 是独立组件，不是 Dify 插件，也不会修改 Dify 源码。
-- Dify 面板模式通过 nginx 子路径融合；默认入口是 `/chat2dify/`。
+- chat2dify 是独立组件，不是 Dify 插件；运行时通过 sidecar 服务访问 Dify Console API。
+- Dify 内嵌模式需要 Dify web 的轻量 UI 适配层，用来放置创建入口、Workflow 入口和 iframe 面板。
+- Dify 面板模式同时支持 Console 抽屉入口和 nginx 子路径入口；默认子路径是 `/chat2dify/`。
 - 创建和修改默认只操作 Dify 草稿；发布需要显式确认。
 - 浏览器端只保存会话上下文和待确认操作，API key 保留在服务端。
 - 运行 Dify docker compose 时，优先使用 nginx 暴露的 `/console/api` 地址，而不是容器内部的 `5001`。

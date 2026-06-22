@@ -1,10 +1,14 @@
 # Dify Compose Deployment
 
-chat2dify v3.0.0 can run as an independent component beside Dify and be exposed
-inside the same nginx entry point at `/chat2dify/`.
+chat2dify v3.0.0 can run as an independent component beside Dify, be exposed
+inside the same nginx entry point at `/chat2dify/`, and be opened from embedded
+Dify Console drawer entries.
 
-This deployment keeps the Dify source tree unchanged. The compose overlay adds:
+The runtime sidecar stays independent. The Dify web app only needs a lightweight
+adapter for drawer triggers and the iframe panel. The compose overlay adds:
 
+- `web`: a local build override for a Dify web image that includes the embedded
+  chat2dify drawer entries.
 - `chat2dify`: the FastAPI component built from this repository.
 - an nginx template override that routes `/chat2dify/` to the component.
 - a `chat2dify_data` volume for task state.
@@ -54,13 +58,31 @@ From `dify/docker`:
 docker compose \
   -f docker-compose.yaml \
   -f ../../chat2dify/deploy/dify/docker-compose.chat2dify.yaml \
-  up -d --build chat2dify nginx
+  up -d --build web chat2dify nginx
 ```
 
-Open:
+Open Dify Studio:
+
+```text
+http://localhost/apps
+```
+
+Embedded entries:
+
+- `Chat2Dify 创建` in the Studio create-app card.
+- `Chat2Dify` in the Workflow canvas header.
+
+Open the direct sidecar route:
 
 ```text
 http://localhost/chat2dify/
+```
+
+The embedded drawer uses URLs like:
+
+```text
+/chat2dify/?embed=1&intent=create&app_mode=workflow
+/chat2dify/?embed=1&intent=modify&app_id=<app_id>&app_mode=workflow&app_name=<name>
 ```
 
 The component still exposes its standalone API under the mounted prefix:
@@ -75,6 +97,8 @@ POST /chat2dify/api/assistant/execute
 ## Notes
 
 - Keep `CHAT2DIFY_PUBLIC_BASE_PATH` without a trailing slash.
+- If you only need the direct `/chat2dify/` route and not Dify Console embedded
+  entries, the `web` rebuild is optional. For embedded entries, rebuild `web`.
 - The overlay mounts the Dify repository into the container at `/dify` as
   read-only so chat2dify can read the current DSL version.
 - chat2dify task state is isolated in `chat2dify_data`; it does not use Dify's
