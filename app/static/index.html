@@ -1,44 +1,67 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>chat2dify</title>
-    <link rel="stylesheet" href="/static/styles.css?v=chat-v2.0.6">
+    <link rel="stylesheet" href="/static/styles.css?v=chat-v2.0.7">
   </head>
   <body>
-    <main class="chat-shell" aria-labelledby="app-title">
-      <header class="chat-header">
-        <div>
-          <h1 id="app-title">chat2dify</h1>
-          <p>通过一个对话框创建、修改、测试运行 Dify 应用</p>
+    <div class="app-frame">
+      <aside class="app-sidebar" aria-label="chat2dify navigation">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">c2d</span>
+          <span class="brand-name">chat2dify</span>
         </div>
-        <div class="header-actions">
-          <label class="planner-picker" for="planner-select">
-            <span>Planner</span>
-            <select id="planner-select" aria-label="Planner LLM">
-              <option>Loading</option>
-            </select>
-          </label>
-          <button id="refresh-health" type="button" class="secondary">Refresh</button>
-          <span id="health-status" class="status-pill status-muted">Checking</span>
-        </div>
-      </header>
+        <nav class="side-nav" aria-label="Primary">
+          <a class="side-nav-item side-nav-item-active" href="/" aria-current="page">
+            <span class="side-nav-icon" aria-hidden="true">▣</span>
+            <span>工作台</span>
+          </a>
+          <span class="side-nav-item side-nav-item-disabled" aria-disabled="true">
+            <span class="side-nav-icon" aria-hidden="true">◇</span>
+            <span>资源</span>
+          </span>
+          <span class="side-nav-item side-nav-item-disabled" aria-disabled="true">
+            <span class="side-nav-icon" aria-hidden="true">○</span>
+            <span>状态</span>
+          </span>
+        </nav>
+      </aside>
 
-      <section id="chat-log" class="chat-log" aria-live="polite"></section>
+      <main class="chat-shell" aria-labelledby="app-title">
+        <header class="chat-header">
+          <div class="header-title">
+            <h1 id="app-title">对话工作台</h1>
+            <span class="header-subtitle">chat2dify</span>
+          </div>
+          <div class="header-actions">
+            <label class="planner-picker" for="planner-select">
+              <span>Planner</span>
+              <select id="planner-select" aria-label="Planner LLM">
+                <option>Loading</option>
+              </select>
+            </label>
+            <button id="refresh-health" type="button" class="secondary">刷新</button>
+            <span id="health-status" class="status-pill status-muted">Checking</span>
+          </div>
+        </header>
 
-      <form id="chat-form" class="chat-composer">
-        <textarea
-          id="chat-input"
-          rows="3"
-          autocomplete="off"
-          placeholder="例如：创建一个 Chatflow 售后助手，或：运行刚才那个：我要投诉订单配送太慢"
-          required
-        ></textarea>
-        <button id="chat-submit" type="submit">Send</button>
-      </form>
-    </main>
+        <section id="chat-log" class="chat-log" aria-live="polite"></section>
 
-    <script src="/static/app.js?v=chat-v2.0.6" defer></script>
+        <form id="chat-form" class="chat-composer">
+          <textarea
+            id="chat-input"
+            rows="3"
+            autocomplete="off"
+            placeholder="创建一个电脑城售后服务工作流，或：运行这个工作流，输入：电脑黑屏开不了机"
+            required
+          ></textarea>
+          <button id="chat-submit" type="submit">发送</button>
+        </form>
+      </main>
+    </div>
+
+    <script src="/static/app.js?v=chat-v2.0.7" defer></script>
   </body>
 </html>

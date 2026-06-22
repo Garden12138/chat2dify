@@ -201,9 +201,7 @@ const els = {
 
 document.addEventListener("DOMContentLoaded", () => {
   bindEvents();
-  addAssistantMessage(
-    "告诉我你想创建、修改或测试运行哪类应用。所有信息都可以直接写在这里，比如：创建一个 Agent，名字叫售后助手，帮我分析投诉。"
-  );
+  addAssistantMessage("告诉我你想创建、修改或测试运行哪类 Dify 应用。");
   refreshHeader();
 });
 

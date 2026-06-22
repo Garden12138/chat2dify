@@ -51,7 +51,7 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
 
     assert index.status_code == 200
     assert "chat2dify" in index.text
-    assert "chat-v2.0.6" in index.text
+    assert "chat-v2.0.7" in index.text
     assert index.headers["cache-control"] == "no-store"
     assert 'id="chat-log"' in index.text
     assert 'id="chat-form"' in index.text
