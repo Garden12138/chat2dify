@@ -1,0 +1,57 @@
+services:
+  chat2dify:
+    image: ${CHAT2DIFY_IMAGE:-chat2dify:3.0.0}
+    build:
+      context: ../../chat2dify
+      dockerfile: docker/Dockerfile
+    restart: always
+    environment:
+      CHAT2DIFY_PUBLIC_BASE_PATH: ${CHAT2DIFY_PUBLIC_BASE_PATH:-/chat2dify}
+      CHAT2DIFY_TASK_DB: /app/data/tasks.sqlite3
+      CHAT2DIFY_TASK_WORKERS: ${CHAT2DIFY_TASK_WORKERS:-2}
+      DIFY_SOURCE_DIR: /dify
+      DIFY_CONSOLE_API_BASE: ${CHAT2DIFY_DIFY_CONSOLE_API_BASE:-http://api:5001/console/api}
+      DIFY_CONSOLE_WEB_BASE: ${CHAT2DIFY_DIFY_CONSOLE_WEB_BASE:-http://localhost}
+      DIFY_EMAIL: ${CHAT2DIFY_DIFY_EMAIL:-}
+      DIFY_PASSWORD: ${CHAT2DIFY_DIFY_PASSWORD:-}
+      DIFY_LOGIN_LANGUAGE: ${CHAT2DIFY_DIFY_LOGIN_LANGUAGE:-en-US}
+      DIFY_DEFAULT_MODEL_PROVIDER: ${CHAT2DIFY_DEFAULT_MODEL_PROVIDER:-langgenius/openai/openai}
+      DIFY_DEFAULT_MODEL_NAME: ${CHAT2DIFY_DEFAULT_MODEL_NAME:-gpt-4o-mini}
+      DIFY_DEFAULT_DATASET_IDS: ${CHAT2DIFY_DEFAULT_DATASET_IDS:-}
+      PLANNER_DEFAULT_PROVIDER: ${CHAT2DIFY_PLANNER_DEFAULT_PROVIDER:-nvidia}
+      PLANNER_FALLBACK_PROVIDERS: ${CHAT2DIFY_PLANNER_FALLBACK_PROVIDERS:-openrouter,openai}
+      PLANNER_TIMEOUT_SECONDS: ${CHAT2DIFY_PLANNER_TIMEOUT_SECONDS:-600}
+      PLANNER_REQUEST_RETRIES: ${CHAT2DIFY_PLANNER_REQUEST_RETRIES:-2}
+      NVIDIA_API_KEY: ${CHAT2DIFY_NVIDIA_API_KEY:-}
+      NVIDIA_BASE_URL: ${CHAT2DIFY_NVIDIA_BASE_URL:-https://integrate.api.nvidia.com/v1}
+      NVIDIA_MODEL: ${CHAT2DIFY_NVIDIA_MODEL:-deepseek-ai/deepseek-v4-flash}
+      NVIDIA_THINKING: ${CHAT2DIFY_NVIDIA_THINKING:-false}
+      NVIDIA_REASONING_EFFORT: ${CHAT2DIFY_NVIDIA_REASONING_EFFORT:-low}
+      NVIDIA_MAX_TOKENS: ${CHAT2DIFY_NVIDIA_MAX_TOKENS:-8192}
+      OPENROUTER_API_KEY: ${CHAT2DIFY_OPENROUTER_API_KEY:-}
+      OPENROUTER_BASE_URL: ${CHAT2DIFY_OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      OPENROUTER_MODEL: ${CHAT2DIFY_OPENROUTER_MODEL:-nvidia/nemotron-3-ultra-550b-a55b:free}
+      OPENROUTER_MAX_TOKENS: ${CHAT2DIFY_OPENROUTER_MAX_TOKENS:-8192}
+      OPENAI_API_KEY: ${CHAT2DIFY_OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${CHAT2DIFY_OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_MODEL: ${CHAT2DIFY_OPENAI_MODEL:-gpt-4o-mini}
+    volumes:
+      - ..:/dify:ro
+      - chat2dify_data:/app/data
+    depends_on:
+      api:
+        condition: service_healthy
+        required: false
+
+  nginx:
+    volumes:
+      - ../../chat2dify/deploy/dify/nginx/default.conf.template:/etc/nginx/conf.d/default.conf.template:ro
+    environment:
+      CHAT2DIFY_PUBLIC_BASE_PATH: ${CHAT2DIFY_PUBLIC_BASE_PATH:-/chat2dify}
+    depends_on:
+      - api
+      - web
+      - chat2dify
+
+volumes:
+  chat2dify_data:

@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>chat2dify</title>
-    <link rel="stylesheet" href="/static/styles.css?v=chat-v2.0.7">
+    <link rel="stylesheet" href="static/styles.css?v=chat-v3.0.0">
   </head>
   <body>
     <div class="app-frame">
@@ -14,7 +14,7 @@
           <span class="brand-name">chat2dify</span>
         </div>
         <nav class="side-nav" aria-label="Primary">
-          <a class="side-nav-item side-nav-item-active" href="/" aria-current="page">
+          <a class="side-nav-item side-nav-item-active" href="./" aria-current="page">
             <span class="side-nav-icon" aria-hidden="true">▣</span>
             <span>工作台</span>
           </a>
@@ -62,6 +62,9 @@
       </main>
     </div>
 
-    <script src="/static/app.js?v=chat-v2.0.7" defer></script>
+    <script>
+      window.CHAT2DIFY_CONFIG = {"basePath":"","version":"3.0.0"};
+    </script>
+    <script src="static/app.js?v=chat-v3.0.0" defer></script>
   </body>
 </html>

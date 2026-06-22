@@ -3,14 +3,16 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import asdict, replace
+import json
 from pathlib import Path
 import re
 
 from fastapi import FastAPI, HTTPException, Query, Request, status
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
+from app import __version__
 from app.agent.diff import diff_plans
 from app.agent.editor import WorkflowEditPlanner
 from app.agent.explainer import explain_plan
@@ -36,7 +38,7 @@ from app.compiler.agent import (
     validate_completion_app_dsl,
 )
 from app.compiler.dify import DifyDslCompiler
-from app.config import ConfigurationError, Settings, load_settings
+from app.config import ConfigurationError, Settings, load_public_base_path, load_settings
 from app.dify.client import DifyAppDetail, DifyClient, DifyClientError, DifyConflictError
 from app.dify.graph import (
     DifyGraphAdapterError,
@@ -75,6 +77,8 @@ from app.validator import has_errors, validate_dsl, validate_plan
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+INDEX_TEMPLATE = STATIC_DIR / "index.html"
+DEFAULT_INDEX_CONFIG = '{"basePath":"","version":"3.0.0"}'
 
 
 @asynccontextmanager
@@ -89,7 +93,7 @@ async def lifespan(application: FastAPI):
         task_manager.close()
 
 
-app = FastAPI(title="chat2dify", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="chat2dify", version=__version__, lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -104,8 +108,32 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 @app.get("/", include_in_schema=False)
-def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+def index() -> HTMLResponse:
+    return HTMLResponse(_render_index_html())
+
+
+def _render_index_html() -> str:
+    config = {
+        "basePath": load_public_base_path(),
+        "version": __version__,
+    }
+    return INDEX_TEMPLATE.read_text(encoding="utf-8").replace(
+        DEFAULT_INDEX_CONFIG,
+        json.dumps(config, ensure_ascii=False),
+    )
+
+
+def _panel_descriptor(base_path: str) -> dict:
+    panel_path = base_path or ""
+    return {
+        "name": "chat2dify",
+        "version": __version__,
+        "kind": "dify-panel-component",
+        "mount_path": panel_path or "/",
+        "panel_url": f"{panel_path}/" if panel_path else "/",
+        "health_url": f"{panel_path}/health" if panel_path else "/health",
+        "api_prefix": f"{panel_path}/api" if panel_path else "/api",
+    }
 
 
 @app.get("/health")
@@ -116,8 +144,11 @@ def health() -> dict:
     except (ConfigurationError, ValueError) as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     planner_runtime = settings.planner_runtime()
+    panel = _panel_descriptor(settings.chat2dify_public_base_path)
     return {
         "status": "ok",
+        "version": __version__,
+        "component": panel,
         "configured_dataset_count": len(settings.dify_default_dataset_ids),
         "default_model": {
             "provider": settings.dify_default_model_provider,
@@ -140,6 +171,11 @@ def health() -> dict:
             },
         },
     }
+
+
+@app.get("/api/panel/manifest")
+def panel_manifest() -> dict:
+    return _panel_descriptor(load_public_base_path())
 
 
 @app.get("/api/planner/providers")

@@ -1,3 +1,6 @@
+const APP_CONFIG = window.CHAT2DIFY_CONFIG || {};
+const BASE_PATH = normalizeBasePath(APP_CONFIG.basePath || inferBasePathFromAssets());
+
 const state = {
   context: {
     timeout_seconds: 120,
@@ -1207,7 +1210,7 @@ async function requestJson(path, options = {}) {
     init.headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(compactPayload(options.body));
   }
-  const response = await fetch(path, init);
+  const response = await fetch(apiUrl(path), init);
   const contentType = response.headers.get("content-type") || "";
   const data = contentType.includes("application/json") ? await response.json() : await response.text();
   if (!response.ok) {
@@ -1216,6 +1219,39 @@ async function requestJson(path, options = {}) {
     throw error;
   }
   return data;
+}
+
+function apiUrl(path) {
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  return `${BASE_PATH}${normalizedPath}`;
+}
+
+function normalizeBasePath(value) {
+  if (!value) {
+    return "";
+  }
+  let normalized = String(value).trim();
+  if (!normalized || normalized === "/") {
+    return "";
+  }
+  if (!normalized.startsWith("/")) {
+    normalized = `/${normalized}`;
+  }
+  return normalized.replace(/\/+$/, "");
+}
+
+function inferBasePathFromAssets() {
+  const script = document.querySelector("script[src*='static/app.js']");
+  if (!script) {
+    return "";
+  }
+  const src = script.getAttribute("src") || "";
+  const url = new URL(src, window.location.href);
+  const marker = "/static/app.js";
+  if (!url.pathname.endsWith(marker)) {
+    return "";
+  }
+  return url.pathname.slice(0, -marker.length);
 }
 
 function compactPayload(value) {

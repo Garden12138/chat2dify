@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from app.config import Settings
+from app.config import Settings, load_public_base_path, normalize_public_base_path
 from app.dify.version import read_app_dsl_version
 
 
@@ -68,6 +68,32 @@ def test_background_task_settings_resolve_from_project_root(tmp_path: Path) -> N
 
     assert settings.task_db_path == (tmp_path / "runtime" / "workflow-tasks.sqlite3").resolve()
     assert settings.task_workers == 3
+
+
+def test_public_base_path_is_normalized(tmp_path: Path) -> None:
+    settings = Settings.from_env(
+        {
+            "DIFY_SOURCE_DIR": "../dify",
+            "CHAT2DIFY_PUBLIC_BASE_PATH": "chat2dify/",
+        },
+        project_root=tmp_path,
+        validate_dify=False,
+    )
+
+    assert settings.chat2dify_public_base_path == "/chat2dify"
+    assert normalize_public_base_path("/") == ""
+    assert normalize_public_base_path("/chat2dify/") == "/chat2dify"
+
+
+def test_public_base_path_is_loaded_without_validating_dify_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project_root = tmp_path / "chat2dify"
+    project_root.mkdir()
+    (project_root / ".env").write_text("CHAT2DIFY_PUBLIC_BASE_PATH=/chat2dify\n", encoding="utf-8")
+    monkeypatch.delenv("CHAT2DIFY_PUBLIC_BASE_PATH", raising=False)
+
+    assert load_public_base_path(project_root=project_root) == "/chat2dify"
 
 
 def test_nvidia_planner_configuration_and_catalog(tmp_path: Path) -> None:

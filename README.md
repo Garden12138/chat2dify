@@ -1,12 +1,20 @@
 # chat2dify
 
-chat2dify 是一个独立的 FastAPI sidecar，用自然语言对话创建、修改、测试运行和发布 Dify 应用。它不修改 Dify 源码，而是连接本地或局域网内的 Dify Console API，把用户意图转换成可审阅的操作，再由后台任务执行。
+chat2dify 是一个独立的 FastAPI 组件，用自然语言对话创建、修改、测试运行和发布 Dify 应用。v3.0.0 开始，它可以作为 Dify 面板中的 `/chat2dify/` 组件随 Dify docker compose 一起启动，也可以继续独立运行。
 
-当前 README 面向 `v2.0.0`：Web UI 已从多表单工作台升级为单一对话框，核心入口是 `POST /api/assistant/plan` 和 `POST /api/assistant/execute`。
+它不修改 Dify 源码，而是连接本地或局域网内的 Dify Console API，把用户意图转换成可审阅的操作，再由后台任务执行。核心入口是 `POST /api/assistant/plan` 和 `POST /api/assistant/execute`。
 
 ## 当前版本
 
-`v2.0.0` 的主要变化：
+`v3.0.0` 的主要变化：
+
+- Dify 面板模式：通过 compose overlay 挂载到 Dify nginx 的 `/chat2dify/` 路径。
+- 独立组件部署：提供 Dockerfile、Dify compose overlay 和独立任务数据卷。
+- 子路径兼容：前端静态资源和 API 请求支持 `CHAT2DIFY_PUBLIC_BASE_PATH`。
+- 面板 manifest：`GET /api/panel/manifest` 暴露组件版本、挂载路径和 API 前缀。
+- 版本统一：Python 包、FastAPI 应用和健康检查统一为 `3.0.0`。
+
+继承自 `v2.0.0` 的能力：
 
 - 单对话框 Web UI：创建、修改、运行、发布都从同一个输入框发起。
 - 先规划再确认：助手会生成待确认操作卡片，用户点击确认后才提交后台任务。
@@ -18,9 +26,9 @@ chat2dify 是一个独立的 FastAPI sidecar，用自然语言对话创建、修
 
 ## 截图
 
-chat2dify v2.0.0 Dify 风格对话工作台，对话中完成创建、运行、修改和应用工作流：
+chat2dify Dify 风格对话工作台，对话中完成创建、运行、修改和应用工作流：
 
-![chat2dify v2.0.0 Dify 风格对话工作台](docs/images/chat2dify-v2-chat-workbench.png)
+![chat2dify Dify 风格对话工作台](docs/images/chat2dify-v2-chat-workbench.png)
 
 通过 chat2dify 生成的 Dify 工作流，示例为“电脑城售后服务工作流”：
 
@@ -49,7 +57,7 @@ chat2dify v2.0.0 Dify 风格对话工作台，对话中完成创建、运行、�
 
 ## 系统架构图
 
-![chat2dify v2.0.0 系统架构图](docs/images/chat2dify-v2-system-architecture.svg)
+![chat2dify 系统架构图](docs/images/chat2dify-v2-system-architecture.svg)
 
 图中蓝色实线表示主要请求和执行链路，灰色虚线表示配置、本地存储和版本依赖。
 
@@ -161,6 +169,7 @@ CHAT2DIFY_TASK_WORKERS=2
 
 - `DIFY_CONSOLE_API_BASE`：Dify Console API 地址。使用 Dify docker compose 时，通常走 nginx，即 `http://127.0.0.1/console/api`。
 - `DIFY_CONSOLE_WEB_BASE`：返回给用户的 Dify 控制台链接前缀。
+- `CHAT2DIFY_PUBLIC_BASE_PATH`：浏览器访问 chat2dify 的公开子路径。独立运行留空；挂到 Dify 面板时设为 `/chat2dify`。
 - `DIFY_EMAIL` / `DIFY_PASSWORD`：用于导入应用、读取草稿、运行草稿和发布。
 - `DIFY_DEFAULT_MODEL_PROVIDER` / `DIFY_DEFAULT_MODEL_NAME`：生成到 Dify LLM 节点里的运行模型，不是 chat2dify Planner。
 - `PLANNER_*`、`NVIDIA_*`、`OPENROUTER_*`、`OPENAI_*`：chat2dify 用来生成或修改 Plan IR 的规划模型。
@@ -169,6 +178,8 @@ CHAT2DIFY_TASK_WORKERS=2
 如果没有配置任何 Planner key，创建草稿会退化为简单确定性模板；修改预览仍需要至少一个可用 Planner。
 
 ## 运行
+
+独立运行：
 
 ```bash
 uvicorn app.main:app --host 127.0.0.1 --port 8000
@@ -185,6 +196,41 @@ http://127.0.0.1:8000/
 ```bash
 curl http://127.0.0.1:8000/health
 ```
+
+## Dify 面板部署
+
+v3.0.0 提供 Dify docker compose overlay。默认假设 Dify 和 chat2dify 是同级目录：
+
+```text
+../dify
+../chat2dify
+```
+
+在 `dify/docker/.env` 中补充：
+
+```env
+CHAT2DIFY_PUBLIC_BASE_PATH=/chat2dify
+CHAT2DIFY_DIFY_EMAIL=you@example.com
+CHAT2DIFY_DIFY_PASSWORD=your-password
+CHAT2DIFY_NVIDIA_API_KEY=nvapi-...
+```
+
+从 `dify/docker` 启动：
+
+```bash
+docker compose \
+  -f docker-compose.yaml \
+  -f ../../chat2dify/deploy/dify/docker-compose.chat2dify.yaml \
+  up -d --build chat2dify nginx
+```
+
+打开：
+
+```text
+http://localhost/chat2dify/
+```
+
+详细说明见 [Dify Compose Deployment](docs/deployment/dify-compose.md)。
 
 ## Web UI 使用建议
 
@@ -215,6 +261,7 @@ Web UI 使用这些助手 API：
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
+| `GET` | `/api/panel/manifest` | 返回 Dify 面板组件元数据 |
 | `POST` | `/api/assistant/plan` | 把自然语言转成缺信息提示或待确认操作 |
 | `POST` | `/api/assistant/execute` | 提交用户已确认的操作，返回 `task_id` |
 | `GET` | `/api/tasks/{task_id}` | 查询后台任务 |
@@ -321,15 +368,18 @@ app/
   agent/               Planner、编辑器、规范化、差异和保护逻辑
   compiler/            Plan IR 到 Dify DSL 的编译
   dify/                Dify Console API client、graph 适配和预检
-  static/              v2 Web UI
+  static/              v3 Dify 面板 Web UI
+deploy/dify/           Dify docker compose overlay 和 nginx 面板路由
+docker/                chat2dify 容器镜像
 tests/                 pytest 覆盖 create / modify / run / assistant / client
 docs/images/           README 截图
 ```
 
 ## 注意事项
 
-- chat2dify 是 sidecar，不是 Dify 插件，也不会修改 Dify 源码。
+- chat2dify 是独立组件，不是 Dify 插件，也不会修改 Dify 源码。
+- Dify 面板模式通过 nginx 子路径融合；默认入口是 `/chat2dify/`。
 - 创建和修改默认只操作 Dify 草稿；发布需要显式确认。
 - 浏览器端只保存会话上下文和待确认操作，API key 保留在服务端。
 - 运行 Dify docker compose 时，优先使用 nginx 暴露的 `/console/api` 地址，而不是容器内部的 `5001`。
-- README 中的截图来自 v2.0.0 新版 Dify 风格 Web UI 和 Dify 生成结果。
+- README 中的截图来自 Dify 风格 Web UI 和 Dify 生成结果。

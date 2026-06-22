@@ -74,6 +74,7 @@ class Settings:
     openrouter_base_url: str
     openrouter_model: str
     openrouter_max_tokens: int
+    chat2dify_public_base_path: str
     task_db_path: Path
     task_workers: int
 
@@ -142,6 +143,9 @@ class Settings:
             openrouter_max_tokens=_positive_int(
                 source.get("OPENROUTER_MAX_TOKENS", "8192"),
                 name="OPENROUTER_MAX_TOKENS",
+            ),
+            chat2dify_public_base_path=normalize_public_base_path(
+                source.get("CHAT2DIFY_PUBLIC_BASE_PATH", "")
             ),
             task_db_path=resolve_path_from_project_root(
                 source.get("CHAT2DIFY_TASK_DB", "data/tasks.sqlite3"),
@@ -264,6 +268,24 @@ class Settings:
 
 def load_settings(*, validate_dify: bool = True) -> Settings:
     return Settings.from_env(validate_dify=validate_dify)
+
+
+def load_public_base_path(*, project_root: Path | None = None) -> str:
+    root = (project_root or PROJECT_ROOT).resolve()
+    return normalize_public_base_path(_load_environment(root).get("CHAT2DIFY_PUBLIC_BASE_PATH", ""))
+
+
+def normalize_public_base_path(value: str | None) -> str:
+    if not value:
+        return ""
+    normalized = value.strip()
+    if normalized in {"", "/"}:
+        return ""
+    if "://" in normalized:
+        raise ConfigurationError("CHAT2DIFY_PUBLIC_BASE_PATH must be a URL path, not a full URL.")
+    if not normalized.startswith("/"):
+        normalized = f"/{normalized}"
+    return normalized.rstrip("/")
 
 
 def resolve_path_from_project_root(raw_path: str, project_root: Path) -> Path:

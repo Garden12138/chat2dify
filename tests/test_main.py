@@ -51,7 +51,10 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
 
     assert index.status_code == 200
     assert "chat2dify" in index.text
-    assert "chat-v2.0.7" in index.text
+    assert "chat-v3.0.0" in index.text
+    assert 'href="static/styles.css?v=chat-v3.0.0"' in index.text
+    assert 'src="static/app.js?v=chat-v3.0.0"' in index.text
+    assert '"version": "3.0.0"' in index.text
     assert index.headers["cache-control"] == "no-store"
     assert 'id="chat-log"' in index.text
     assert 'id="chat-form"' in index.text
@@ -87,8 +90,10 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert "switchingApp" in script.text
     assert "workflow.modify.apply" in script.text
     assert "尚未写回 Dify" in script.text
+    assert "BASE_PATH" in script.text
+    assert "apiUrl(path)" in script.text
     assert "applyContextHints(text)" not in script.text
-    assert app.version == "2.0.0"
+    assert app.version == "3.0.0"
     assert styles.status_code == 200
     assert ".chat-shell" in styles.text
     assert ".chat-composer" in styles.text
@@ -110,11 +115,32 @@ def test_health_returns_configured_dataset_count(monkeypatch) -> None:
 
     assert response.status_code == 200
     data = response.json()
+    assert data["version"] == "3.0.0"
+    assert data["component"]["kind"] == "dify-panel-component"
+    assert data["component"]["panel_url"] == "/"
     assert data["configured_dataset_count"] == 2
     assert data["default_model"] == {"provider": "langgenius/tongyi/tongyi", "name": "qwen3.5-plus"}
     assert data["dify"]["configured_dataset_count"] == 2
     assert data["dify"]["default_model"] == {"provider": "langgenius/tongyi/tongyi", "name": "qwen3.5-plus"}
     assert data["planner"] == {"provider": "openai", "model": "gpt-4o-mini", "configured": True}
+
+
+def test_panel_manifest_uses_public_base_path(monkeypatch) -> None:
+    monkeypatch.setattr("app.main.load_public_base_path", lambda: "/chat2dify")
+
+    with TestClient(app) as client:
+        response = client.get("/api/panel/manifest")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "name": "chat2dify",
+        "version": "3.0.0",
+        "kind": "dify-panel-component",
+        "mount_path": "/chat2dify",
+        "panel_url": "/chat2dify/",
+        "health_url": "/chat2dify/health",
+        "api_prefix": "/chat2dify/api",
+    }
 
 
 def test_list_planner_providers_returns_nvidia_without_api_key(monkeypatch) -> None:
