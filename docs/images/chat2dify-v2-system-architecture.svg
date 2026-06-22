@@ -1,0 +1,161 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="980" viewBox="0 0 1600 980" role="img" aria-labelledby="title desc">
+  <title id="title">chat2dify v2.0.0 系统架构图</title>
+  <desc id="desc">展示浏览器 Web UI、chat2dify FastAPI sidecar、本地存储、Planner LLM 服务、Dify Console API 和 Dify Workspace 之间的关系。</desc>
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .panel { fill: #ffffff; stroke: #d7dee8; stroke-width: 2; }
+      .panel-title { fill: #152238; font: 700 26px -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif; }
+      .title { fill: #0f172a; font: 800 34px -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif; }
+      .subtitle { fill: #526174; font: 400 18px -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif; }
+      .box { stroke-width: 2; rx: 18; ry: 18; }
+      .blue { fill: #edf5ff; stroke: #6da7f8; }
+      .green { fill: #effaf4; stroke: #64bf8a; }
+      .amber { fill: #fff7e8; stroke: #e9a84f; }
+      .purple { fill: #f5f1ff; stroke: #9b7ee8; }
+      .gray { fill: #f2f5f8; stroke: #aeb9c6; }
+      .box-title { fill: #172033; font: 700 21px -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif; }
+      .box-text { fill: #405065; font: 400 16px -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif; }
+      .small { fill: #66758a; font: 400 14px -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif; }
+      .arrow { fill: none; stroke: #526174; stroke-width: 2.4; marker-end: url(#arrow); }
+      .arrow-strong { fill: none; stroke: #2869d9; stroke-width: 3; marker-end: url(#arrow-blue); }
+      .arrow-dashed { fill: none; stroke: #8b98aa; stroke-width: 2.2; stroke-dasharray: 8 7; marker-end: url(#arrow-gray); }
+      .label { fill: #334155; font: 600 14px -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif; }
+      .badge { fill: #e8eef7; stroke: #cfd8e6; }
+    </style>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#526174" />
+    </marker>
+    <marker id="arrow-blue" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#2869d9" />
+    </marker>
+    <marker id="arrow-gray" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#8b98aa" />
+    </marker>
+  </defs>
+
+  <rect class="bg" width="1600" height="980" />
+
+  <text class="title" x="70" y="64">chat2dify v2.0.0 系统架构</text>
+  <text class="subtitle" x="70" y="96">单对话框 Web UI 通过 FastAPI sidecar 编排 Planner、任务队列和 Dify Console API。</text>
+
+  <rect class="panel" x="50" y="135" width="310" height="470" rx="28" />
+  <text class="panel-title" x="82" y="178">浏览器</text>
+
+  <rect class="box blue" x="82" y="215" width="246" height="112" />
+  <text class="box-title" x="108" y="253">v2 Web UI</text>
+  <text class="box-text" x="108" y="282">单对话框</text>
+  <text class="box-text" x="108" y="306">确认卡片、任务轮询</text>
+
+  <rect class="box blue" x="82" y="368" width="246" height="120" />
+  <text class="box-title" x="108" y="406">会话上下文</text>
+  <text class="box-text" x="108" y="435">当前 app / app_mode</text>
+  <text class="box-text" x="108" y="459">草稿 hash、运行输入</text>
+
+  <rect class="panel" x="410" y="135" width="720" height="675" rx="28" />
+  <text class="panel-title" x="446" y="178">chat2dify FastAPI sidecar</text>
+
+  <rect class="box green" x="450" y="215" width="275" height="100" />
+  <text class="box-title" x="478" y="252">Assistant Orchestrator</text>
+  <text class="box-text" x="478" y="280">/api/assistant/plan</text>
+  <text class="box-text" x="478" y="303">/api/assistant/execute</text>
+
+  <rect class="box green" x="800" y="215" width="285" height="100" />
+  <text class="box-title" x="828" y="252">Task Manager</text>
+  <text class="box-text" x="828" y="280">后台任务、取消</text>
+  <text class="box-text" x="828" y="303">状态查询和结果持久化</text>
+
+  <rect class="box purple" x="450" y="370" width="275" height="100" />
+  <text class="box-title" x="478" y="407">Planner Runtime</text>
+  <text class="box-text" x="478" y="435">NVIDIA / OpenRouter</text>
+  <text class="box-text" x="478" y="458">OpenAI-compatible</text>
+
+  <rect class="box purple" x="800" y="370" width="285" height="100" />
+  <text class="box-title" x="828" y="407">Plan IR Pipeline</text>
+  <text class="box-text" x="828" y="435">规范化、修复、差异保护</text>
+  <text class="box-text" x="828" y="458">校验和预检</text>
+
+  <rect class="box amber" x="450" y="525" width="275" height="100" />
+  <text class="box-title" x="478" y="562">Dify DSL Compiler</text>
+  <text class="box-text" x="478" y="590">编译 DSL</text>
+  <text class="box-text" x="478" y="613">反编译 Dify 草稿</text>
+
+  <rect class="box amber" x="800" y="525" width="285" height="100" />
+  <text class="box-title" x="828" y="562">Dify Console API Client</text>
+  <text class="box-text" x="828" y="590">登录、导入、草稿</text>
+  <text class="box-text" x="828" y="613">运行、发布、触发器</text>
+
+  <rect class="box gray" x="450" y="680" width="275" height="82" />
+  <text class="box-title" x="478" y="716">静态资源服务</text>
+  <text class="box-text" x="478" y="744">/ 和 /static/*</text>
+
+  <rect class="box gray" x="800" y="680" width="285" height="82" />
+  <text class="box-title" x="828" y="716">资源选择 API</text>
+  <text class="box-text" x="828" y="744">模型、数据集、工具、Agent、Trigger</text>
+
+  <rect class="panel" x="1180" y="135" width="360" height="470" rx="28" />
+  <text class="panel-title" x="1212" y="178">外部系统</text>
+
+  <rect class="box purple" x="1215" y="215" width="290" height="98" />
+  <text class="box-title" x="1243" y="252">Planner LLM 服务</text>
+  <text class="box-text" x="1243" y="280">生成或修改 Plan IR</text>
+
+  <rect class="box amber" x="1215" y="365" width="290" height="98" />
+  <text class="box-title" x="1243" y="402">Dify Console API</text>
+  <text class="box-text" x="1243" y="430">/console/api</text>
+
+  <rect class="box amber" x="1215" y="505" width="290" height="82" />
+  <text class="box-title" x="1243" y="542">Dify Workspace</text>
+  <text class="box-text" x="1243" y="570">应用草稿、模型、数据集、插件</text>
+
+  <rect class="panel" x="50" y="660" width="310" height="250" rx="28" />
+  <text class="panel-title" x="82" y="703">本地存储</text>
+
+  <rect class="box gray" x="82" y="735" width="246" height="54" />
+  <text class="box-title" x="108" y="770">.env 配置</text>
+
+  <rect class="box gray" x="82" y="808" width="246" height="54" />
+  <text class="box-title" x="108" y="843">SQLite 任务库</text>
+
+  <rect class="box gray" x="82" y="881" width="246" height="54" />
+  <text class="box-title" x="108" y="916">Dify 源码目录</text>
+
+  <path class="arrow-strong" d="M328 260 C375 260, 390 260, 450 260" />
+  <text class="label" x="350" y="242">plan / execute</text>
+
+  <path class="arrow" d="M328 300 C430 340, 640 220, 800 260" />
+  <text class="label" x="508" y="324">tasks poll</text>
+
+  <path class="arrow" d="M205 327 L205 368" />
+  <path class="arrow" d="M725 265 L800 265" />
+  <path class="arrow" d="M942 315 L590 370" />
+  <path class="arrow" d="M588 470 L588 525" />
+  <path class="arrow" d="M725 575 L800 575" />
+  <path class="arrow" d="M942 315 L942 525" />
+  <path class="arrow" d="M942 470 L942 525" />
+  <path class="arrow" d="M942 625 L942 680" />
+  <path class="arrow" d="M725 720 L800 720" />
+
+  <path class="arrow-strong" d="M1085 575 C1135 575, 1160 412, 1215 412" />
+  <text class="label" x="1108" y="500">Dify API calls</text>
+  <path class="arrow" d="M1360 463 L1360 505" />
+  <path class="arrow-strong" d="M725 420 C920 345, 1030 250, 1215 265" />
+  <text class="label" x="930" y="315">Planner requests</text>
+
+  <path class="arrow-dashed" d="M328 762 C385 762, 400 300, 450 265" />
+  <path class="arrow-dashed" d="M328 762 C480 760, 540 482, 590 470" />
+  <path class="arrow-dashed" d="M328 762 C640 770, 780 642, 890 625" />
+  <text class="label" x="354" y="746">配置读取</text>
+
+  <path class="arrow-dashed" d="M328 835 C555 850, 700 800, 800 286" />
+  <text class="label" x="520" y="850">任务状态持久化</text>
+
+  <path class="arrow-dashed" d="M328 908 C390 890, 420 620, 450 575" />
+  <text class="label" x="344" y="904">DSL 版本读取</text>
+
+  <rect class="badge" x="1165" y="804" width="330" height="96" rx="18" />
+  <line x1="1192" y1="834" x2="1248" y2="834" class="arrow-strong" />
+  <text class="small" x="1265" y="839">主要请求和执行链路</text>
+  <line x1="1192" y1="872" x2="1248" y2="872" class="arrow-dashed" />
+  <text class="small" x="1265" y="877">配置、本地存储和版本依赖</text>
+</svg>
