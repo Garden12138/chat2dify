@@ -29,6 +29,14 @@ chat2dify 是一个独立的 FastAPI 组件，用自然语言对话创建、修�
 
 ## 截图
 
+在 Dify Studio 创建应用卡片中打开 `Chat2Dify 创建`，可直接用对话确认并创建 Dify 应用：
+
+![Chat2Dify Dify Console 创建应用面板](docs/images/chat2dify-v3-dify-create-panel.png)
+
+在具体 Workflow 画布中打开 `Chat2Dify`，可带着当前应用上下文生成修改预览：
+
+![Chat2Dify Dify Console 修改应用面板](docs/images/chat2dify-v3-dify-modify-panel.png)
+
 chat2dify Dify 风格对话工作台，对话中完成创建、运行、修改和应用工作流：
 
 ![chat2dify Dify 风格对话工作台](docs/images/chat2dify-v2-chat-workbench.png)
