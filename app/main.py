@@ -90,6 +90,16 @@ async def lifespan(application: FastAPI):
 
 
 app = FastAPI(title="chat2dify", version="2.0.0", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def prevent_web_ui_asset_cache(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 

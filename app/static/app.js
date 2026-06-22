@@ -152,6 +152,43 @@ const STATUS_LABELS = {
   },
 };
 
+const PHASE_LABELS = {
+  zh: {
+    queued: "等待执行",
+    starting: "开始执行",
+    "loading-config": "加载配置",
+    "loading-models": "加载模型配置",
+    planning: "生成规划",
+    "planner-request": "请求规划模型",
+    "planner-provider-fallback": "切换规划模型",
+    "validating-plan": "校验规划",
+    compiling: "编译 DSL",
+    importing: "导入 Dify",
+    "loading-draft": "加载草稿",
+    publishing: "发布工作流",
+    connecting: "连接 Dify",
+    "running-workflow": "运行工作流",
+    "running-chatflow": "运行对话流",
+    "running-agent": "运行智能体",
+    "running-chatbot": "运行聊天助手",
+    "running-completion": "运行文本生成应用",
+    "loading-app": "加载应用",
+    decompiling: "读取现有流程",
+    "validating-preview": "校验预览",
+    "validating-preview-config": "校验配置预览",
+    "planning-revision": "生成修改方案",
+    "validating-revision": "校验修改方案",
+    "validating-change": "校验变更",
+    "revising-config": "修改提示词配置",
+    syncing: "写回 Dify",
+    completed: "已完成",
+    failed: "失败",
+    cancelled: "已取消",
+    interrupted: "已中断",
+  },
+  en: {},
+};
+
 const els = {
   healthStatus: document.querySelector("#health-status"),
   refreshHealth: document.querySelector("#refresh-health"),
@@ -595,11 +632,16 @@ function removeTransientMessages() {
 }
 
 function renderTaskStatus(record, element) {
-  const phase = [
+  const message = taskMessageLabel(record.message);
+  if (isTerminalStatus(record.status)) {
+    element.textContent = message || statusLabel(record.status) || t("taskSubmitted");
+    return;
+  }
+  const phase = compactTaskParts([
     statusLabel(record.status),
-    statusLabel(record.phase),
-    taskMessageLabel(record.message),
-  ].filter(Boolean).join(" · ");
+    phaseLabel(record.phase),
+    message,
+  ]).join(" · ");
   element.textContent = phase || t("taskSubmitted");
 }
 
@@ -749,10 +791,14 @@ function needsInputText(data) {
   const labels = fieldLabels();
   const separator = state.language === "zh" ? "、" : ", ";
   const fields = (data.missing_fields || []).map((field) => labels[field] || field).join(separator);
-  if (!fields) {
-    return data.message || t("needsMore");
+  if (data.message) {
+    return data.message;
   }
-  return `${data.message || t("needsMore")}\n${t("stillNeeds")}：${fields}`;
+  if (!fields) {
+    return t("needsMore");
+  }
+  const colon = state.language === "zh" ? "：" : ": ";
+  return `${t("needsMore")}\n${t("stillNeeds")}${colon}${fields}`;
 }
 
 function isConfirmText(text) {
@@ -818,6 +864,14 @@ function statusLabel(status) {
   return STATUS_LABELS[language][status] || status;
 }
 
+function phaseLabel(phase) {
+  if (!phase) {
+    return "";
+  }
+  const language = state.language === "en" ? "en" : "zh";
+  return PHASE_LABELS[language][phase] || statusLabel(phase) || phase;
+}
+
 function taskMessageLabel(message) {
   if (!message) {
     return "";
@@ -825,14 +879,246 @@ function taskMessageLabel(message) {
   if (state.language !== "zh") {
     return message;
   }
-  const normalized = String(message).trim().toLowerCase();
-  if (normalized === "task completed.") {
-    return "任务已完成。";
+  return localizeTaskMessage(message) || message;
+}
+
+function localizeTaskMessage(message) {
+  const text = String(message || "").trim();
+  const normalized = text.toLowerCase();
+  const exact = {
+    "waiting for a worker.": "等待后台任务开始。",
+    "task started.": "任务已开始。",
+    "task completed.": "任务已完成。",
+    "task failed.": "任务失败。",
+    "task cancellation requested.": "任务取消请求已收到。",
+    "cancellation requested. waiting for the current operation to stop.": "已请求取消，等待当前操作停止。",
+    "service restarted before the task completed.": "服务重启，任务未完成。",
+    "loading dify and planner configuration.": "正在加载 Dify 和 Planner 配置。",
+    "using the fallback workflow template.": "正在使用备用工作流模板。",
+    "compiling the validated plan into dify dsl.": "正在把校验后的方案编译为 Dify DSL。",
+    "importing the workflow into dify.": "正在导入工作流到 Dify。",
+    "loading and validating the current dify draft.": "正在加载并校验当前 Dify 草稿。",
+    "publishing the validated workflow in dify.": "正在发布已校验的工作流。",
+    "connecting to the dify draft run stream.": "正在连接 Dify 草稿运行流。",
+    "connecting to the dify chatbot chat stream.": "正在连接 Dify 聊天助手运行流。",
+    "connecting to the dify completion stream.": "正在连接 Dify 文本生成运行流。",
+    "connecting to the dify chatflow draft stream.": "正在连接 Dify 对话流草稿运行流。",
+    "connecting to the dify agent chat stream.": "正在连接 Dify 智能体运行流。",
+    "loading the current dify app.": "正在加载当前 Dify 应用。",
+    "converted the current dify graph into plan ir.": "已将当前 Dify 图转换为 Plan IR。",
+    "validating the reviewed preview plan without replanning.": "正在校验已审阅的预览方案。",
+    "compiling, validating, and checking change risk.": "正在编译、校验并检查变更风险。",
+    "writing the reviewed draft back to dify.": "正在把已审阅的草稿写回 Dify。",
+  };
+  if (exact[normalized]) {
+    return exact[normalized];
   }
-  if (normalized === "task failed.") {
-    return "任务失败。";
+
+  let match = text.match(/^Generating workflow plan, semantic attempt (\d+)\/(\d+)\.$/);
+  if (match) {
+    return `正在生成工作流方案（第 ${match[1]}/${match[2]} 次语义尝试）。`;
   }
-  return message;
+  match = text.match(/^Generating workflow revision, semantic attempt (\d+)\/(\d+)\.$/);
+  if (match) {
+    return `正在生成工作流修改方案（第 ${match[1]}/${match[2]} 次语义尝试）。`;
+  }
+  match = text.match(/^Normalizing and validating semantic attempt (\d+)\/(\d+)\.$/);
+  if (match) {
+    return `正在规范化并校验方案（第 ${match[1]}/${match[2]} 次语义尝试）。`;
+  }
+  match = text.match(/^Normalizing and validating revision attempt (\d+)\/(\d+)\.$/);
+  if (match) {
+    return `正在规范化并校验修改方案（第 ${match[1]}/${match[2]} 次尝试）。`;
+  }
+  match = text.match(/^Calling (.+), network attempt (\d+)\/(\d+)\.$/);
+  if (match) {
+    return `正在调用 ${match[1]}（第 ${match[2]}/${match[3]} 次网络请求）。`;
+  }
+  match = text.match(/^(.+) is unavailable; trying (.+)\.$/);
+  if (match) {
+    return `${match[1]} 暂时不可用，正在尝试 ${match[2]}。`;
+  }
+  match = text.match(/^Loading Dify model configuration for (Agent|Chatbot|Completion) app\.$/);
+  if (match) {
+    return `正在加载 ${configuredAppLabel(match[1])} 的 Dify 模型配置。`;
+  }
+  match = text.match(/^Compiling (Agent|Chatbot|Completion) app configuration into Dify DSL\.$/);
+  if (match) {
+    return `正在把 ${configuredAppLabel(match[1])} 配置编译为 Dify DSL。`;
+  }
+  match = text.match(/^Loaded (Agent|Chatbot|Completion) model configuration\.$/);
+  if (match) {
+    return `已加载 ${configuredAppLabel(match[1])} 模型配置。`;
+  }
+  match = text.match(/^Using the reviewed (Agent|Chatbot|Completion) configuration preview\.$/);
+  if (match) {
+    return `正在使用已审阅的 ${configuredAppLabel(match[1])} 配置预览。`;
+  }
+  match = text.match(/^Revising (Agent|Chatbot|Completion) prompt configuration\.$/);
+  if (match) {
+    return `正在修改 ${configuredAppLabel(match[1])} 提示词配置。`;
+  }
+  match = text.match(/^Writing the (Agent|Chatbot|Completion) model configuration back to Dify\.$/);
+  if (match) {
+    return `正在把 ${configuredAppLabel(match[1])} 模型配置写回 Dify。`;
+  }
+  match = text.match(/^Dify event (.+); (\d+) nodes finished, (\d+) events received\.$/);
+  if (match) {
+    return `Dify 事件 ${difyEventLabel(match[1])}；已完成 ${match[2]} 个节点，收到 ${match[3]} 个事件。`;
+  }
+  match = text.match(/^Dify event (.+); (\d+) nodes finished, (\d+) answer chunks received\.$/);
+  if (match) {
+    return `Dify 事件 ${difyEventLabel(match[1])}；已完成 ${match[2]} 个节点，收到 ${match[3]} 段回答。`;
+  }
+  match = text.match(/^Dify event (.+); (\d+) Agent answer chunks received\.$/);
+  if (match) {
+    return `Dify 事件 ${difyEventLabel(match[1])}；收到 ${match[2]} 段智能体回答。`;
+  }
+  match = text.match(/^Dify event (.+); (\d+) Chatbot answer chunks received\.$/);
+  if (match) {
+    return `Dify 事件 ${difyEventLabel(match[1])}；收到 ${match[2]} 段聊天助手回答。`;
+  }
+  match = text.match(/^Dify event (.+); (\d+) Completion chunks received\.$/);
+  if (match) {
+    return `Dify 事件 ${difyEventLabel(match[1])}；收到 ${match[2]} 段文本生成结果。`;
+  }
+  match = text.match(/^Received (\d+) answer chunks\.$/);
+  if (match) {
+    return `收到 ${match[1]} 段回答。`;
+  }
+  return localizeErrorDetailText(text);
+}
+
+function configuredAppLabel(label) {
+  return {
+    Agent: "智能体",
+    Chatbot: "聊天助手",
+    Completion: "文本生成应用",
+  }[label] || label;
+}
+
+function difyEventLabel(eventType) {
+  return {
+    workflow_started: "工作流已开始",
+    node_started: "节点已开始",
+    node_finished: "节点已完成",
+    workflow_finished: "工作流已完成",
+    workflow_paused: "工作流已暂停",
+    message: "回答片段",
+    agent_message: "智能体回答片段",
+    error: "错误",
+  }[eventType] || eventType;
+}
+
+function localizedErrorDetail(message) {
+  if (!message) {
+    return "";
+  }
+  if (state.language !== "zh") {
+    return message;
+  }
+  return localizeErrorDetailText(message) || localizeTaskMessage(message) || message;
+}
+
+function localizeErrorDetailText(message) {
+  const text = String(message || "").trim();
+  let match = text.match(/^Planner LLM request failed after (\d+) network attempts: (.+)$/);
+  if (match) {
+    const attempts = Number(match[1]);
+    const detail = localizeProviderFailure(match[2]);
+    return attempts > 1
+      ? `规划模型请求失败（已尝试 ${attempts} 次网络请求）：${detail}`
+      : `规划模型请求失败：${detail}`;
+  }
+  match = text.match(/^Planner LLM request failed: (.+)$/);
+  if (match) {
+    return `规划模型请求失败：${localizeProviderFailure(match[1])}`;
+  }
+  match = text.match(/^Planner LLM providers unavailable after fallback attempts: (.+)$/);
+  if (match) {
+    return `所有规划模型均不可用：${match[1]}`;
+  }
+  match = text.match(/^At least one Planner provider API key is required: (.+)$/);
+  if (match) {
+    return `至少需要配置一个 Planner 服务 API Key：${match[1]}`;
+  }
+  match = text.match(/^Dify request failed: (.+)$/);
+  if (match) {
+    return `Dify 请求失败：${localizeProviderFailure(match[1])}`;
+  }
+  if (text === "DIFY_EMAIL and DIFY_PASSWORD are required to create workflows in Dify.") {
+    return "需要配置 DIFY_EMAIL 和 DIFY_PASSWORD 后才能在 Dify 中创建应用。";
+  }
+  return "";
+}
+
+function localizeProviderFailure(detail) {
+  const text = String(detail || "").trim();
+  const match = text.match(/^(\d{3})\s+(.+)$/);
+  if (match) {
+    return `${match[1]} ${localizeProviderFailureBody(match[2])}`;
+  }
+  return localizeProviderFailureBody(text);
+}
+
+function localizeProviderFailureBody(body) {
+  const text = String(body || "").trim();
+  const parsed = parseJsonObject(text);
+  const message = parsed
+    ? parsed.error || parsed.message || parsed.title || parsed.detail || ""
+    : "";
+  const known = knownProviderError(message || text);
+  if (known) {
+    return `${known}。`;
+  }
+  if (message) {
+    return message;
+  }
+  return text;
+}
+
+function parseJsonObject(text) {
+  if (!text || !text.startsWith("{")) {
+    return null;
+  }
+  try {
+    const value = JSON.parse(text);
+    return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function knownProviderError(message) {
+  const normalized = String(message || "").trim().toLowerCase();
+  return {
+    "key usage limit exceeded": "API Key 用量已超限",
+    "too many requests": "请求过于频繁",
+    unauthorized: "认证失败",
+    forbidden: "没有权限",
+    "bad request": "请求参数不合法",
+    "internal server error": "服务端错误",
+    "service unavailable": "服务暂时不可用",
+    "gateway timeout": "网关超时",
+  }[normalized] || "";
+}
+
+function compactTaskParts(parts) {
+  const seen = new Set();
+  const result = [];
+  for (const part of parts) {
+    const value = String(part || "").trim();
+    if (!value) {
+      continue;
+    }
+    const key = value.replace(/[。.]+$/, "");
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push(value);
+  }
+  return result;
 }
 
 function localizedActionSummary(action) {
@@ -884,7 +1170,7 @@ function fieldLabels() {
     operation: "操作",
     message: "需求描述",
     app_name: "应用名称",
-    app_description: "应用描述",
+    app_description: "需求描述",
   };
 }
 
@@ -899,13 +1185,17 @@ function taskFailureMessage(record) {
     if (detail.current_hash) {
       extras.push(`${state.language === "zh" ? "当前哈希" : "current"}=${detail.current_hash}`);
     }
-    return `${code}${detail.message}${extras.length ? `\n${extras.join("\n")}` : ""}`;
+    return `${code}${localizedErrorDetail(detail.message)}${extras.length ? `\n${extras.join("\n")}` : ""}`;
   }
   if (typeof detail === "string") {
-    return detail;
+    return localizedErrorDetail(detail);
   }
   if (record?.error?.type && record?.error?.detail) {
-    return `${record.error.type}: ${record.error.detail}`;
+    const detailText = localizedErrorDetail(record.error.detail);
+    if (state.language === "zh" && detailText !== record.error.detail) {
+      return detailText;
+    }
+    return `${record.error.type}: ${detailText}`;
   }
   return taskMessageLabel(record?.message) || `${state.language === "zh" ? "任务" : "Task"} ${statusLabel(record?.status || "failed")}`;
 }
@@ -956,17 +1246,17 @@ function errorMessage(error) {
 
 function errorMessageFromPayload(payload, status) {
   if (typeof payload === "string") {
-    return payload || `HTTP ${status}`;
+    return localizedErrorDetail(payload) || `HTTP ${status}`;
   }
   const detail = payload?.detail;
   if (typeof detail === "string") {
-    return detail;
+    return localizedErrorDetail(detail);
   }
   if (detail?.message) {
-    return detail.message;
+    return localizedErrorDetail(detail.message);
   }
   if (payload?.error) {
-    return payload.error;
+    return localizedErrorDetail(payload.error);
   }
   return `HTTP ${status}`;
 }
