@@ -30,6 +30,7 @@ class AssistantContext(BaseModel):
     app_description: str | None = None
     active_app: dict[str, Any] | None = None
     recent_apps: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    create_app_mode: AppMode | None = None
     create_message: str | None = None
     modify_message: str | None = None
     expected_hash: str | None = None
@@ -118,7 +119,8 @@ def plan_assistant_action(request: AssistantPlanRequest) -> AssistantPlanRespons
     explicit_app_mode = _detect_app_mode(message)
 
     if operation_intent == "create":
-        return _create_plan(message, context, explicit_app_mode, language)
+        create_app_mode = explicit_app_mode or context.create_app_mode
+        return _create_plan(message, context, create_app_mode, language)
     if operation_intent == "modify.apply":
         return _modify_apply_plan(message, context, explicit_app_mode, language)
     if operation_intent == "modify.preview":

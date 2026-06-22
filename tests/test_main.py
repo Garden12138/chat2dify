@@ -68,6 +68,9 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert 'id="knowledge-form"' not in index.text
     assert 'id="tools-form"' not in index.text
     assert 'id="agents-form"' not in index.text
+    assert "initializeFromUrl" in script.text
+    assert "create_app_mode" in script.text
+    assert "body.embedded" in styles.text
     assert 'id="trigger-form"' not in index.text
     assert script.status_code == 200
     assert script.headers["cache-control"] == "no-store"

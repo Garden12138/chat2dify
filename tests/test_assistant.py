@@ -36,6 +36,20 @@ def test_assistant_create_requires_explicit_app_mode_even_with_old_context() -> 
     assert result.missing_fields == ["app_mode"]
 
 
+def test_assistant_create_uses_embedded_create_app_mode() -> None:
+    result = plan_assistant_action(
+        AssistantPlanRequest(
+            message="创建一个处理售后投诉的应用",
+            context={"create_app_mode": "advanced-chat"},
+        )
+    )
+
+    assert result.status == "pending_action"
+    assert result.action is not None
+    assert result.action.operation == "workflow.create"
+    assert result.action.payload["app_mode"] == "advanced-chat"
+
+
 def test_assistant_create_uses_follow_up_app_mode_in_pending_draft() -> None:
     result = plan_assistant_action(
         AssistantPlanRequest(message="创建一个处理售后投诉的应用\n用 Chatflow")

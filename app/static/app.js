@@ -203,8 +203,12 @@ const els = {
 };
 
 document.addEventListener("DOMContentLoaded", () => {
+  const boot = initializeFromUrl();
   bindEvents();
-  addAssistantMessage("告诉我你想创建、修改或测试运行哪类 Dify 应用。");
+  addAssistantMessage(boot.initialMessage || "告诉我你想创建、修改或测试运行哪类 Dify 应用。");
+  if (boot.prefill) {
+    els.chatInput.value = boot.prefill;
+  }
   refreshHeader();
 });
 
@@ -312,6 +316,62 @@ function updatePlannerSelection() {
     provider: option.dataset.provider,
     model: option.dataset.model,
   };
+}
+
+function initializeFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const embedded = ["1", "true", "yes"].includes((params.get("embed") || "").toLowerCase());
+  if (embedded) {
+    document.body.classList.add("embedded");
+  }
+
+  const intent = (params.get("intent") || "").toLowerCase();
+  const appMode = normalizeAppModeParam(params.get("app_mode") || params.get("mode"));
+  const appId = cleanParam(params.get("app_id"));
+  const appName = cleanParam(params.get("app_name") || params.get("name"));
+  const prefill = cleanParam(params.get("prefill")) || "";
+
+  if (intent === "create" && appMode) {
+    state.context.create_app_mode = appMode;
+    els.chatInput.placeholder = `描述你想创建的${appModeLabel(appMode)}，例如：电脑城售后服务，先安抚用户，再给排查步骤`;
+  }
+
+  if (appId || appMode || appName) {
+    rememberAppReference({
+      app_id: appId,
+      app_mode: appMode,
+      app_name: appName,
+    });
+  }
+
+  if (intent === "modify" && (appId || appName)) {
+    return {
+      initialMessage: `已连接当前${appModeLabel(appMode) || "应用"}${appName ? `：${appName}` : ""}。你可以直接说想怎么修改，我会先生成预览，确认后再写回 Dify。`,
+      prefill,
+    };
+  }
+
+  if (intent === "create") {
+    return {
+      initialMessage: `可以直接描述你想创建的${appMode ? appModeLabel(appMode) : "Dify 应用"}。我会整理成可确认的创建操作，然后导入 Dify。`,
+      prefill,
+    };
+  }
+
+  return { initialMessage: "", prefill };
+}
+
+function cleanParam(value) {
+  const cleaned = (value || "").trim();
+  return cleaned || "";
+}
+
+function normalizeAppModeParam(value) {
+  const mode = cleanParam(value);
+  if (Object.prototype.hasOwnProperty.call(APP_MODE_LABELS.zh, mode)) {
+    return mode;
+  }
+  return "";
 }
 
 async function handleUserMessage() {

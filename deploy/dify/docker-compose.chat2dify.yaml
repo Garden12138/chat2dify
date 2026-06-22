@@ -1,4 +1,10 @@
 services:
+  web:
+    build:
+      context: ..
+      dockerfile: web/Dockerfile
+    image: ${DIFY_WEB_IMAGE:-langgenius/dify-web:1.14.2-chat2dify}
+
   chat2dify:
     image: ${CHAT2DIFY_IMAGE:-chat2dify:3.0.0}
     build:

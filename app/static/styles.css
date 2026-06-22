@@ -435,6 +435,36 @@ details summary:hover {
   min-height: 42px;
 }
 
+body.embedded {
+  background: var(--panel);
+}
+
+body.embedded .app-frame {
+  grid-template-columns: minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+body.embedded .app-sidebar {
+  display: none;
+}
+
+body.embedded .chat-shell {
+  min-height: 100vh;
+}
+
+body.embedded .chat-header {
+  min-height: 56px;
+  padding: 0 16px;
+}
+
+body.embedded .chat-log {
+  padding: 16px;
+}
+
+body.embedded .chat-composer {
+  padding: 12px;
+}
+
 @media (max-width: 920px) {
   .app-frame {
     grid-template-columns: 1fr;
