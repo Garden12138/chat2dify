@@ -1,150 +1,104 @@
 # chat2dify
 
-Generate Dify Workflows and Chatflows via Natural Language Conversation.
+chat2dify 是一个独立的 FastAPI sidecar，用自然语言对话创建、修改、测试运行和发布 Dify 应用。它不修改 Dify 源码，而是连接本地或局域网内的 Dify Console API，把用户意图转换成可审阅的操作，再由后台任务执行。
 
-## v2.0.0
+当前 README 面向 `v2.0.0`：Web UI 已从多表单工作台升级为单一对话框，核心入口是 `POST /api/assistant/plan` 和 `POST /api/assistant/execute`。
 
-The Web UI is now a single chat box backed by `POST /api/assistant/plan` and
-`POST /api/assistant/execute`. The assistant is a deterministic orchestrator
-over the existing create, modify, and draft-run task APIs: it identifies the
-requested app type and action from natural language, asks for missing details in
-the conversation, returns a pending action for review, and only submits the
-background task after explicit confirmation. It supports Workflow, Chatflow,
-Agent, Chatbot, and Completion apps without rendering the v1 manual panels.
-The v2 assistant keeps the current app in the browser-side conversation context,
-so follow-up turns such as "modify this app" or "run the Chatflow again: ..."
-can reuse the latest app ID. Workflow draft runs also accept natural-language
-test text and map it to `inputs.query` unless explicit JSON inputs are supplied.
+## 当前版本
 
-## v1.1.0
+`v2.0.0` 的主要变化：
 
-Chatflow creation now has certified support for common Dify node combinations:
-semantic and conditional routing, parameter extraction, knowledge retrieval,
-uploaded-document processing, HTTP/template/code processing, selected Tools,
-selected Agent Strategies, batch iteration, bounded loops, and top-level human
-review. Chatflow plans normalize system inputs to `sys.query` and `sys.files`,
-preserve 10-message LLM memory including container child LLMs, and require
-every response path to finish at `answer`.
+- 单对话框 Web UI：创建、修改、运行、发布都从同一个输入框发起。
+- 先规划再确认：助手会生成待确认操作卡片，用户点击确认后才提交后台任务。
+- 自动补全上下文：创建成功后会记住当前 app，后续可以直接说“运行这个工作流”或“把回复改得更专业”。
+- 中文交互优化：缺失信息、任务阶段、失败详情会优先用中文展示。
+- 后台任务持久化：创建、修改、运行、发布都通过任务队列执行，浏览器刷新后仍能查状态。
+- Dify 草稿安全写回：修改先生成预览，应用时带 hash 校验和风险保护。
+- 多应用类型：支持 Workflow、Chatflow、Chatbot、Agent、Completion。
 
-Chatflow `iteration` and `loop` containers also support certified internal
-`if-else` and `question-classifier` routing. Internal graphs must be connected
-DAGs whose complete branch set explicitly converges to one terminal processing
-node; iteration output is bound to that convergence node.
+## 截图
 
-Chatflow Plan IR now includes typed `conversation_variables` and certified
-top-level `assigner` nodes for remembering preferences, incrementing counters,
-and collecting information across turns. Existing Dify variable UUIDs are
-preserved; newly declared variables receive deterministic UUIDs.
+chat2dify v2.0.0 对话式工作台：
 
-Chatflow also supports the same reviewed modification and explicit publishing
-flow as Workflow. Existing `advanced-chat` drafts can be loaded, revised through
-Modify Preview, applied with draft hash protection, run across multiple
-conversation turns, and published without introducing Workflow triggers.
+![chat2dify v2.0.0 对话式工作台](docs/images/chat2dify-v2-chat-workbench.png)
 
-Creation and modification now share a deterministic Planner reliability
-pipeline. A unified node-output registry validates static and dynamic outputs,
-repairs only unambiguous aliases such as LLM `text`, template/iteration
-`output`, retrieval `result`, and document `text`, and rejects invented
-Classifier values. Every repaired plan is compiled to the current Dify DSL,
-validated, decompiled locally, and compared by execution signature before it
-can be returned or written to Dify.
+通过 chat2dify 生成的 Dify 工作流，示例为“电脑城售后服务工作流”：
 
-## Phase 1 MVP
+![Dify 电脑城售后服务工作流](docs/images/dify-v2-support-workflow-professional.png)
 
-This repository runs as an independent FastAPI sidecar. It does not modify Dify
-source code and targets the sibling latest Dify checkout:
+同一个 Dify 工作流修改提示词后的运行效果示例：
 
-```env
-DIFY_SOURCE_DIR=../dify
-DIFY_CONSOLE_API_BASE=http://127.0.0.1/console/api
-DIFY_CONSOLE_WEB_BASE=http://127.0.0.1
-DIFY_DEFAULT_DATASET_IDS=
-```
+![Dify 售后工作流语气修改示例](docs/images/dify-v2-support-workflow-angry-customer.png)
 
-`DIFY_SOURCE_DIR` is resolved relative to the `chat2dify` repository root. On
-startup the sidecar verifies that the directory exists and that
-`api/constants/dsl_version.py` can be read. The app DSL version is read from
-that file at runtime instead of being hardcoded.
+## 工作方式
 
-When running Dify through `../dify/docker/docker-compose.yaml`, the API service
-listens on `5001` inside the Docker network but is not published directly to the
-host. Use the nginx route instead:
-
-```env
-DIFY_CONSOLE_API_BASE=http://127.0.0.1/console/api
-DIFY_CONSOLE_WEB_BASE=http://127.0.0.1
-```
-
-The second-stage flow is:
+典型流程如下：
 
 ```text
-user request -> raw LLM plan -> normalize/repair -> validate -> local DSL round-trip preflight -> /console/api/apps/imports
+用户自然语言
+  -> /api/assistant/plan
+  -> 缺信息则继续追问
+  -> 生成待确认操作卡片
+  -> 用户确认
+  -> /api/assistant/execute
+  -> 后台任务执行 create / modify / run / publish
+  -> 返回 Dify app_id、草稿 hash、运行结果或错误详情
 ```
 
-The create API returns the imported Dify `app_id` and a console workflow URL in
-the form `/app/{app_id}/workflow`.
+对话助手本身不直接让 LLM 任意调用 Dify。它会把用户意图归类为明确操作，并构造结构化 payload。每个高风险或写入操作都需要用户确认。
 
-Chatflow creation uses the same draft/create APIs with
-`"app_mode":"advanced-chat"`. The generated graph uses
-`start -> ... -> answer`, reads the current user message from
-`{{#sys.query#}}`, reads uploaded files from `{{#sys.files#}}`, and enables a
-10-message LLM memory window. Dataset, Tool, and Agent identities must come from
-the request's `dataset_ids`, `tool_selections`, and `agent_selections`; planner
-output cannot introduce unselected resources.
+## 能做什么
 
-Draft/create responses include the unchanged Planner `raw_plan`, repaired
-`plan`, rule-based `explanation`, `planner` metadata, `dsl`, and structured
-validation issues. Planner metadata includes `repair_actions`,
-`attempt_diagnostics`, and
-`preflight: {ok, dsl_version, roundtrip_ok, issues}`.
+### 创建应用
 
-## Screenshots
-
-Web UI workbench for create, modify, and draft run:
-
-![chat2dify Web UI workbench](docs/images/webui-workbench-run.png)
-
-Dify draft workflow generated from the repair after-sales example:
-
-![Dify workflow canvas](docs/images/dify-workflow-canvas.png)
-
-The third-stage edit flow modifies an existing Dify Workflow or Chatflow draft
-in place:
+可以直接说：
 
 ```text
-app_id + edit request -> Dify draft graph -> WorkflowPlan IR -> revised WorkflowPlan IR -> validation -> /console/api/apps/{app_id}/workflows/draft
+创建一个电脑城售后服务工作流，用户描述电脑问题后，生成专业售后回复。
 ```
 
-Use `POST /api/workflows/modify/draft` to preview a modification and
-`POST /api/workflows/modify/apply` to write it back to the Dify draft. Both
-accept `app_id`, `message`, and optional `expected_hash`; apply returns the new
-Dify draft `hash`. Third-stage edits support the stabilized node set listed
-below and do not publish the app. Chatflow edits preserve `advanced-chat`,
-conversational `start`, `answer`, `sys.query`, and LLM memory semantics. Edits
-run in safe mode by default: large node deletions, start/end/answer rewrites, or
-broad edge rewiring are reported in `guard` and blocked on apply unless
-`allow_destructive=true` is sent. No-op edits return `sync.result="noop"` and
-are not written back to Dify.
+如果缺少应用名称或需求描述，助手会继续追问。确认后会调用后台创建任务，把生成的 DSL 导入 Dify。
 
-Use `GET /api/workflows/{app_id}/draft` to inspect the current Dify draft
-without calling an LLM or writing anything back. The response includes the
-current draft hash, Dify app metadata when available, the decompiled Plan IR,
-and validation diagnostics.
+### 修改草稿
 
-The fourth-stage validation flow runs an existing Dify workflow draft with
-explicit test inputs and returns a blocking summary:
+可以基于当前应用继续说：
 
 ```text
-app_id + inputs -> Dify draft run SSE -> terminal event -> run summary
+把回复改得更专业一点，先安抚用户，再给排查步骤。
 ```
 
-Use `POST /api/workflows/run/draft` with `app_id` and `inputs`. The sidecar
-does not generate test inputs, does not publish the workflow, and does not
-assume an OpenAI provider; generated workflows use the configured
-`DIFY_DEFAULT_MODEL_PROVIDER` / `DIFY_DEFAULT_MODEL_NAME` values, such as
-Tongyi/Qwen.
+修改分两步：
 
-## Setup
+1. 生成修改预览，不写回 Dify。
+2. 用户确认“应用”后，用预览中的 Plan IR 写回 Dify 草稿。
+
+默认安全模式会阻止大规模删除节点、重写入口/出口、广泛改线等高风险变更。确实需要破坏性重构时，API 可显式传 `allow_destructive=true`。
+
+### 测试运行
+
+创建或修改后，可以继续输入：
+
+```text
+运行这个工作流，输入：为什么台式机突然黑屏开不了机？
+```
+
+Workflow 会把自然语言测试文本映射到 `inputs.query`；Chatflow、Chatbot、Agent、Completion 使用各自的 draft run/chat API。
+
+### 发布和触发器
+
+普通创建和修改只更新 Dify 草稿，不会自动发布。发布必须显式执行，并带当前草稿 hash。Webhook、Schedule、Plugin Trigger 工作流需要发布后通过对应触发方式运行，不能用普通 Draft Run 代替。
+
+## 支持的应用类型
+
+| Dify 类型 | `app_mode` | 说明 |
+| --- | --- | --- |
+| Workflow | `workflow` | 普通工作流，使用 `start -> ... -> end` |
+| Chatflow | `advanced-chat` | 对话流，使用 `start -> ... -> answer`，支持多轮上下文 |
+| Chatbot | `chat` | Dify 基础聊天助手配置 |
+| Agent | `agent-chat` | Dify Agent 应用配置 |
+| Completion | `completion` | 文本生成应用配置 |
+
+## 安装
 
 ```bash
 python3 -m venv .venv
@@ -153,688 +107,223 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-The sidecar reads `.env` from the repository root and lets real environment
-variables override file values. Fill these values before using
-`/api/workflows/draft`, `/api/workflows/create`, modify, or publish, because
-runtime-model certification reads the current Dify workspace model registry:
+chat2dify 默认假设 Dify 源码仓库在当前仓库的同级目录：
 
-```env
-DIFY_EMAIL=you@example.com
-DIFY_PASSWORD=your-password
+```text
+../dify
+../chat2dify
 ```
 
-The Planner Model panel chooses the LLM used by chat2dify to generate or revise
-Plan IR. This is separate from `DIFY_DEFAULT_MODEL_PROVIDER` /
-`DIFY_DEFAULT_MODEL_NAME`, which configure LLM nodes inside the generated Dify
-workflow. Before create, modify, or publish, chat2dify now queries Dify's
-enabled `llm` model registry and verifies that these configured defaults are
-active and not deprecated. API keys stay on the server and are never returned
-to or stored by the browser.
+启动时会读取 `DIFY_SOURCE_DIR` 下的 Dify DSL 版本信息，因此该目录必须存在。
 
-NVIDIA NIM DeepSeek V4 Flash is the default Planner, with OpenRouter's free
-Nemotron fallback configured as the first standby provider:
+## 配置
+
+`.env` 从仓库根目录读取，真实环境变量会覆盖 `.env`。
+
+最小可用配置：
 
 ```env
+DIFY_SOURCE_DIR=../dify
+DIFY_CONSOLE_API_BASE=http://127.0.0.1/console/api
+DIFY_CONSOLE_WEB_BASE=http://127.0.0.1
+
+DIFY_EMAIL=you@example.com
+DIFY_PASSWORD=your-password
+DIFY_LOGIN_LANGUAGE=en-US
+
+DIFY_DEFAULT_MODEL_PROVIDER=langgenius/openai/openai
+DIFY_DEFAULT_MODEL_NAME=gpt-4o-mini
+
 PLANNER_DEFAULT_PROVIDER=nvidia
 PLANNER_FALLBACK_PROVIDERS=openrouter,openai
 PLANNER_TIMEOUT_SECONDS=600
 PLANNER_REQUEST_RETRIES=2
 NVIDIA_API_KEY=nvapi-...
-NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
-# Supported: deepseek-ai/deepseek-v4-flash, deepseek-ai/deepseek-v4-pro
 NVIDIA_MODEL=deepseek-ai/deepseek-v4-flash
 NVIDIA_THINKING=false
 NVIDIA_REASONING_EFFORT=low
 NVIDIA_MAX_TOKENS=8192
-```
 
-When `NVIDIA_MODEL=deepseek-ai/deepseek-v4-pro`, chat2dify sends non-streaming
-NVIDIA requests with `temperature=1`, `top_p=0.95`,
-`chat_template_kwargs.thinking=false`, and defaults `NVIDIA_MAX_TOKENS` to
-`16384` unless overridden.
-
-OpenRouter can be used as the default Planner or as a fallback when NVIDIA is
-rate limited or temporarily unavailable:
-
-```env
-PLANNER_DEFAULT_PROVIDER=openrouter
 OPENROUTER_API_KEY=sk-or-...
-OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_MODEL=nvidia/nemotron-3-ultra-550b-a55b:free
-OPENROUTER_MAX_TOKENS=8192
+
+CHAT2DIFY_TASK_DB=data/tasks.sqlite3
+CHAT2DIFY_TASK_WORKERS=2
 ```
 
-OpenAI-compatible planners remain available through explicit selection or by
-including `openai` in `PLANNER_FALLBACK_PROVIDERS`:
+重要配置说明：
 
-```env
-PLANNER_DEFAULT_PROVIDER=openai
-OPENAI_API_KEY=
-OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_MODEL=gpt-4o-mini
-```
+- `DIFY_CONSOLE_API_BASE`：Dify Console API 地址。使用 Dify docker compose 时，通常走 nginx，即 `http://127.0.0.1/console/api`。
+- `DIFY_CONSOLE_WEB_BASE`：返回给用户的 Dify 控制台链接前缀。
+- `DIFY_EMAIL` / `DIFY_PASSWORD`：用于导入应用、读取草稿、运行草稿和发布。
+- `DIFY_DEFAULT_MODEL_PROVIDER` / `DIFY_DEFAULT_MODEL_NAME`：生成到 Dify LLM 节点里的运行模型，不是 chat2dify Planner。
+- `PLANNER_*`、`NVIDIA_*`、`OPENROUTER_*`、`OPENAI_*`：chat2dify 用来生成或修改 Plan IR 的规划模型。
+- `DIFY_DEFAULT_DATASET_IDS`：可选，生成知识检索节点时使用的默认数据集 ID，多个 ID 用逗号分隔。
 
-If the default planner provider has no API key, chat2dify tries the first
-configured provider in `PLANNER_FALLBACK_PROVIDERS`. If no planner provider is
-configured, the create draft endpoint uses a deterministic fallback plan:
-`start -> llm -> end` for Workflow or `start -> llm -> answer` for Chatflow.
-Modify Preview requires at least one configured planner provider. When an LLM
-provider is configured, the planner performs one initial semantic generation.
-It then normalizes and deterministically repairs safe output aliases before
-validation and local Dify preflight. Only a remaining semantic error triggers
-one targeted retry, so `attempts` is never greater than 2.
+如果没有配置任何 Planner key，创建草稿会退化为简单确定性模板；修改预览仍需要至少一个可用 Planner。
 
-Knowledge retrieval workflows require real Dify dataset IDs. Configure a
-comma-separated default in `.env`, or use the Web UI Knowledge panel to search
-and select datasets from the local Dify workspace. Manual dataset IDs remain
-available as an advanced fallback, and Web UI selections override the default
-for Create and Modify requests:
-
-```env
-DIFY_DEFAULT_DATASET_IDS=dataset_id_1,dataset_id_2
-```
-
-Tool nodes require tools that are already installed and configured in Dify. Use
-the Web UI Tools panel to search and select installed builtin, API, workflow, or
-MCP tools. Only selected tools are exposed to the planner; chat2dify does not
-install plugins, edit credentials, or let the LLM guess provider IDs. The Web UI
-also lets you configure each selected tool's runtime inputs and form settings;
-those explicit bindings are sent in `tool_selections[].tool_parameters` and
-`tool_selections[].tool_configurations` and take precedence over LLM-generated
-values.
-
-Agent nodes require Agent Strategy plugins that are already installed and
-configured in Dify. Use the Web UI Agents panel to search and select strategies,
-then configure their required parameters. If a strategy parameter requires a
-Tool, bind one of the tools already selected in the Tools panel. Only selected
-agent strategies are exposed to the planner; chat2dify does not install plugins,
-edit credentials, or create Agent Roster records.
-
-## Run
+## 运行
 
 ```bash
 uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-Open the local Web UI:
+打开：
 
 ```text
 http://127.0.0.1:8000/
 ```
 
-Create, Modify Preview/Apply, Run Draft, and Publish execute as persistent
-background tasks in the Web UI. Each panel shows the current phase, elapsed
-time, progress, and a cooperative Cancel action. Active task IDs are restored
-after a browser refresh. Task records and results use SQLite by default:
+健康检查：
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+## Web UI 使用建议
+
+推荐把信息直接写完整：
+
+```text
+创建一个电脑城售后服务工作流。名称叫电脑城售后服务工作流。
+用户输入售后问题后，先安抚，再给排查步骤，最后建议联系门店或维修服务。
+```
+
+创建后继续在同一对话里操作：
+
+```text
+运行这个工作流，输入：电脑突然黑屏开不了机了
+```
+
+```text
+修改这个工作流，回复要更简洁，先问电源和显示器，再问是否听到风扇声
+```
+
+```text
+应用刚才的修改
+```
+
+## API 概览
+
+Web UI 使用这些助手 API：
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `POST` | `/api/assistant/plan` | 把自然语言转成缺信息提示或待确认操作 |
+| `POST` | `/api/assistant/execute` | 提交用户已确认的操作，返回 `task_id` |
+| `GET` | `/api/tasks/{task_id}` | 查询后台任务 |
+| `POST` | `/api/tasks/{task_id}/cancel` | 请求取消后台任务 |
+
+保留的直接工作流 API：
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `POST` | `/api/workflows/draft` | 只生成 DSL 和 Plan IR，不导入 Dify |
+| `POST` | `/api/workflows/create` | 创建并导入 Dify 应用 |
+| `GET` | `/api/workflows/{app_id}/draft` | 读取当前 Dify 草稿并反编译为 Plan IR |
+| `POST` | `/api/workflows/modify/draft` | 生成修改预览 |
+| `POST` | `/api/workflows/modify/apply` | 应用已审阅的修改 |
+| `POST` | `/api/workflows/run/draft` | 运行 Workflow 草稿 |
+| `POST` | `/api/chatflows/run/draft` | 运行 Chatflow 草稿 |
+| `POST` | `/api/chatbots/run/draft` | 运行 Chatbot 草稿 |
+| `POST` | `/api/completions/run/draft` | 运行 Completion 草稿 |
+| `POST` | `/api/agents/run/draft` | 运行 Agent 草稿 |
+| `POST` | `/api/workflows/{app_id}/publish` | 发布草稿 |
+
+后台任务 API 与主要写入/运行操作一一对应，例如：
+
+```text
+POST /api/tasks/workflows/create
+POST /api/tasks/workflows/modify/draft
+POST /api/tasks/workflows/modify/apply
+POST /api/tasks/workflows/run/draft
+POST /api/tasks/chatflows/run/draft
+POST /api/tasks/workflows/publish
+```
+
+资源选择 API：
+
+```text
+GET /api/planner/providers
+GET /api/dify/datasets
+GET /api/dify/models
+GET /api/dify/tools
+GET /api/dify/agent-strategies
+GET /api/dify/trigger-providers
+GET /api/dify/trigger-subscriptions
+```
+
+这些接口只读取 Dify 已安装、已配置的资源。chat2dify 不安装插件，不写凭据，也不允许 Planner 猜测 provider ID。
+
+## Plan IR 和节点支持
+
+Plan IR 是 chat2dify 的中间表示。Planner 只负责生成结构化计划；chat2dify 会执行规范化、修复、校验、编译、反编译和 Dify DSL 预检。
+
+当前支持的主要节点：
+
+```text
+start, llm, code, if-else, end, answer, http-request,
+template-transform, question-classifier, parameter-extractor,
+variable-aggregator, document-extractor, list-operator,
+knowledge-retrieval, human-input, iteration, loop, assigner,
+tool, agent, trigger-webhook, trigger-plugin, trigger-schedule
+```
+
+范围说明：
+
+- Workflow 使用 `end`，Chatflow 使用 `answer`。
+- Chatflow 会读取 `sys.query` 和 `sys.files`，并保留 Dify 对话记忆语义。
+- `knowledge-retrieval` 只能使用请求选择或环境变量配置的数据集 ID。
+- `tool` 只能使用 Dify 已安装并由用户选择的工具。
+- `agent` 只能使用 Dify 已安装并由用户选择的 Agent Strategy。
+- Trigger 工作流必须显式选择 Webhook、Schedule 或 Plugin Trigger 元数据。
+- 复杂旧草稿可以尽量读取和保留；超出支持范围的节点会作为外部依赖或原始结构处理，无法保证可生成新的同类节点。
+
+## 任务和错误处理
+
+后台任务存储在 SQLite：
 
 ```env
 CHAT2DIFY_TASK_DB=data/tasks.sqlite3
 CHAT2DIFY_TASK_WORKERS=2
 ```
 
-Tasks interrupted by a sidecar restart are marked `interrupted`. Completed
-records are retained for seven days, capped at 200 records. Existing blocking
-workflow API endpoints remain available for compatible scripts and curl calls.
-Cancelled, failed, and interrupted tasks cannot resume an in-flight LLM or Dify
-HTTP request. Their panel offers Retry, which starts a new task from the
-beginning using the saved request.
+任务状态包括 `queued`、`running`、`succeeded`、`failed`、`cancelled`、`interrupted`。服务重启时未完成任务会标记为 `interrupted`。完成记录默认保留 7 天，最多保留 200 条。
 
-The Planner Model panel lists only server-registered providers and disables
-providers whose API key is not configured. Create and Modify Preview send the
-selected provider/model in an optional request field:
+Planner 请求会按 provider 做网络重试和 fallback。NVIDIA 默认使用流式请求；OpenRouter 和 OpenAI-compatible provider 可作为 fallback。若最终失败，后台任务会保留结构化错误详情，Web UI 会尽量显示中文原因，例如 API Key 超限、请求过频、超时或认证失败。
 
-```json
-{
-  "planner": {
-    "provider": "nvidia",
-    "model": "deepseek-ai/deepseek-v4-flash"
-  }
-}
+## 开发
+
+运行测试：
+
+```bash
+pytest
 ```
 
-Modify Apply with a reviewed preview continues to use the preview plan and does
-not call the selected Planner model a second time.
+检查前端脚本语法：
 
-`PLANNER_TIMEOUT_SECONDS` controls how long chat2dify waits for a Planner
-response. NVIDIA NIM can take several minutes for complex structured workflow
-plans, so the default is 600 seconds. `PLANNER_REQUEST_RETRIES`
-retries transient disconnects, timeouts, rate limits, and temporary upstream
-errors per provider without consuming an additional semantic attempt. If a
-provider still returns 429, 502, 503, 504, times out, or disconnects after its
-network retries, chat2dify tries the next configured fallback provider. If both
-semantic attempts fail, the API returns HTTP 502 with
-`detail.code="PLANNER_PLAN_INVALID"` plus provider/model identity, repair
-actions, attempt diagnostics, final validation issues, preflight results, and
-a truncated raw-plan excerpt. Planner metadata also includes
-`provider_attempts` for fallback diagnostics. Background tasks persist the same
-detail object.
-NVIDIA Planner requests use streaming and default to `NVIDIA_THINKING=false`
-for lower latency and fewer hosted-endpoint disconnects. Set it to `true` and
-raise `NVIDIA_REASONING_EFFORT` only when a deployment can sustain longer
-reasoning requests.
+```bash
+node --check app/static/app.js
+```
 
-Recommended Web UI edit flow:
+项目结构：
 
 ```text
-Load draft -> Preview -> Apply reviewed preview
+app/
+  main.py              FastAPI 路由、任务入口和 Dify 操作编排
+  assistant.py         对话助手的确定性意图解析和待确认操作生成
+  agent/               Planner、编辑器、规范化、差异和保护逻辑
+  compiler/            Plan IR 到 Dify DSL 的编译
+  dify/                Dify Console API client、graph 适配和预检
+  static/              v2 Web UI
+tests/                 pytest 覆盖 create / modify / run / assistant / client
+docs/images/           README 截图
 ```
 
-The Web UI applies the exact Plan IR returned by Preview. It does not ask the
-LLM to generate a second modification during Apply.
-
-Health check:
-
-```bash
-curl http://127.0.0.1:8000/health
-```
-
-List Dify datasets for the Web UI selector:
-
-```bash
-curl 'http://127.0.0.1:8000/api/dify/datasets?keyword=售后&page=1&limit=50'
-```
-
-List active and inactive Dify runtime models with server-owned metadata:
-
-```bash
-curl 'http://127.0.0.1:8000/api/dify/models?model_type=llm&keyword=qwen&feature=tool-call'
-```
-
-The response includes provider/model identity, provider and model status,
-deprecation state, context length, mode, and capabilities such as `vision`,
-`tool-call`, `multi-tool-call`, and `stream-tool-call`.
-
-List installed Dify tools for the Web UI selector:
-
-```bash
-curl 'http://127.0.0.1:8000/api/dify/tools?keyword=search&provider_type=all'
-```
-
-List installed Dify Agent Strategies for the Web UI selector:
-
-```bash
-curl 'http://127.0.0.1:8000/api/dify/agent-strategies?keyword=react'
-```
-
-Draft a workflow without importing it:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/workflows/draft \
-  -H 'Content-Type: application/json' \
-  -d '{"message":"Summarize the user input","app_name":"Summary MVP","dataset_ids":["OPTIONAL_DATASET_ID"]}'
-```
-
-Create or draft a workflow that may use a selected Dify tool by passing the
-tool object returned by `/api/dify/tools`:
-
-```json
-{
-  "message": "先调用所选搜索工具查询信息，再由 LLM 总结并返回 answer",
-  "app_name": "Tool summary workflow",
-  "tool_selections": [
-    {
-      "provider_id": "PROVIDER_ID_FROM_DIFY",
-      "provider_type": "builtin",
-      "provider_name": "provider_name",
-      "tool_name": "tool_name",
-      "tool_label": "Tool label",
-      "parameters": [],
-      "output_schema": {},
-      "tool_parameters": {
-        "query": {"type": "mixed", "value": "{{#start.query#}}"}
-      },
-      "tool_configurations": {}
-    }
-  ]
-}
-```
-
-Create or draft a workflow that may use a selected Dify Agent Strategy by
-passing the strategy object returned by `/api/dify/agent-strategies`:
-
-```json
-{
-  "message": "用所选智能体分析客户问题并生成处理建议，最后返回 answer",
-  "app_name": "Agent support workflow",
-  "agent_selections": [
-    {
-      "agent_strategy_provider_name": "PROVIDER_FROM_DIFY",
-      "agent_strategy_name": "STRATEGY_FROM_DIFY",
-      "agent_strategy_label": "Strategy label",
-      "parameters": [],
-      "output_schema": {},
-      "agent_parameters": {
-        "query": {"type": "variable", "value": ["start", "query"]}
-      },
-      "plugin_unique_identifier": "PLUGIN_UNIQUE_IDENTIFIER_FROM_DIFY",
-      "meta": {"version": "1.0.0"}
-    }
-  ]
-}
-```
-
-Create a workflow in Dify:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/workflows/create \
-  -H 'Content-Type: application/json' \
-  -d '{"message":"Summarize the user input","app_name":"Summary MVP","dataset_ids":["OPTIONAL_DATASET_ID"]}'
-```
-
-Create or modify with an explicit runtime-model whitelist:
-
-```json
-{
-  "message": "分别使用所选模型完成分类和回复",
-  "app_mode": "advanced-chat",
-  "model_selections": [
-    {
-      "provider": "PROVIDER_FROM_DIFY",
-      "model": "PRIMARY_MODEL_FROM_DIFY"
-    },
-    {
-      "provider": "PROVIDER_FROM_DIFY",
-      "model": "SECONDARY_MODEL_FROM_DIFY"
-    }
-  ]
-}
-```
-
-The first selection is the node default. Planner output may choose among the
-whitelisted models per LLM, Question Classifier, Parameter Extractor, and Agent
-`model-selector`. Client-supplied status or capability metadata is ignored and
-reloaded from Dify. Vision-enabled nodes require `vision`; an Agent with bound
-tools requires at least one tool-call capability. Existing drafts with an
-unavailable model still load with a warning, but new bindings and publish are
-blocked until they use a runnable model.
-
-Start the same create operation as a background task:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/tasks/workflows/create \
-  -H 'Content-Type: application/json' \
-  -d '{"message":"Summarize the user input","app_name":"Summary MVP"}'
-```
-
-Poll or cancel the returned `task_id`:
-
-```bash
-curl http://127.0.0.1:8000/api/tasks/TASK_ID
-curl -X POST http://127.0.0.1:8000/api/tasks/TASK_ID/cancel
-```
-
-The corresponding background endpoints for the other Web UI operations are
-`/api/tasks/workflows/modify/draft`,
-`/api/tasks/workflows/modify/apply`, and
-`/api/tasks/workflows/run/draft`. Explicit workflow publishing uses
-`/api/tasks/workflows/publish`.
-
-Create a Chatflow:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/workflows/create \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "app_mode":"advanced-chat",
-    "app_name":"汽车售后多轮客服",
-    "message":"创建汽车售后多轮客服。识别客户问题，礼貌追问缺失信息，记住最近对话，并通过 Answer 回复。"
-  }'
-```
-
-Run the first Chatflow draft turn:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/chatflows/run/draft \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "app_id":"YOUR_CHATFLOW_APP_ID",
-    "query":"我的车刚保养完发动机抖动",
-    "inputs":{},
-    "timeout_seconds":120
-  }'
-```
-
-For the next turn, pass the `conversation_id` and `message_id` returned by the
-previous response:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/chatflows/run/draft \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "app_id":"YOUR_CHATFLOW_APP_ID",
-    "query":"我刚才说的故障是什么？",
-    "inputs":{},
-    "conversation_id":"PREVIOUS_CONVERSATION_ID",
-    "parent_message_id":"PREVIOUS_MESSAGE_ID",
-    "timeout_seconds":120
-  }'
-```
-
-The background equivalent is `POST /api/tasks/chatflows/run/draft`. Use the
-same `/api/workflows/modify/draft`, `/api/workflows/modify/apply`, and
-`/api/workflows/{app_id}/publish` endpoints for Chatflow modification and
-publishing. Chatflow modification rejects Workflow trigger selections.
-
-Create a POST Webhook workflow by selecting Webhook in the Web UI Trigger
-panel, or by passing a structured selection:
-
-```json
-{
-  "message": "接收售后请求，根据 query 生成客服回复并返回 answer",
-  "app_name": "Webhook 售后受理",
-  "trigger_selection": {
-    "type": "webhook",
-    "method": "POST",
-    "content_type": "application/json",
-    "body": [
-      {"name": "query", "type": "string", "required": true}
-    ],
-    "status_code": 200,
-    "response_body": "{\"accepted\":true}",
-    "timeout": 30
-  }
-}
-```
-
-Create a daily schedule workflow:
-
-```json
-{
-  "message": "每天汇总售后记录并返回 answer，不引用 start.query",
-  "app_name": "每日售后汇总",
-  "trigger_selection": {
-    "type": "schedule",
-    "mode": "visual",
-    "frequency": "daily",
-    "visual_config": {
-      "time": "09:00 AM",
-      "weekdays": ["mon"],
-      "on_minute": 0,
-      "monthly_days": [1]
-    },
-    "timezone": "Asia/Shanghai"
-  }
-}
-```
-
-Discover installed Plugin Trigger events and their existing subscriptions:
-
-```bash
-curl 'http://127.0.0.1:8000/api/dify/trigger-providers?keyword=github'
-curl 'http://127.0.0.1:8000/api/dify/trigger-subscriptions?provider_id=langgenius/github/github'
-```
-
-Create a Plugin Trigger workflow by selecting the provider event and an
-existing subscription in the Web UI Trigger panel, or by passing only the
-selected identifiers and constant event parameters:
-
-```json
-{
-  "message": "收到新的售后工单事件后，分析事件中的 title 和 description，生成处理建议并返回 answer",
-  "app_name": "插件事件售后分析",
-  "trigger_selection": {
-    "type": "plugin",
-    "provider_id": "INSTALLED_PROVIDER_ID",
-    "event_name": "INSTALLED_EVENT_NAME",
-    "subscription_id": "EXISTING_SUBSCRIPTION_ID",
-    "event_parameters": {
-      "scope": {"type": "constant", "value": "after-sales"}
-    }
-  }
-}
-```
-
-chat2dify resolves provider, plugin, event schema, and output schema metadata
-again from Dify before planning. It does not accept guessed plugin identifiers,
-create subscriptions, or handle Trigger Provider credentials.
-
-Create and Modify only update the Dify draft. Publishing is always explicit:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/workflows/YOUR_APP_ID/publish \
-  -H 'Content-Type: application/json' \
-  -d '{"expected_hash":"CURRENT_DRAFT_HASH","marked_name":"v1","marked_comment":"Enable trigger"}'
-
-curl http://127.0.0.1:8000/api/workflows/YOUR_APP_ID/triggers
-
-curl -X POST http://127.0.0.1:8000/api/workflows/YOUR_APP_ID/triggers/TRIGGER_ID/status \
-  -H 'Content-Type: application/json' \
-  -d '{"enabled":false}'
-
-curl 'http://127.0.0.1:8000/api/workflows/YOUR_APP_ID/triggers/webhook?node_id=WEBHOOK_NODE_ID'
-```
-
-Regular Draft Run is for workflows with a `start` entry. Trigger workflows
-must be published and invoked through the returned Webhook URL or schedule.
-
-Preview a change to an existing Dify workflow draft:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/workflows/modify/draft \
-  -H 'Content-Type: application/json' \
-  -d '{"app_id":"YOUR_APP_ID","message":"Make the final answer warmer","dataset_ids":["OPTIONAL_DATASET_ID"]}'
-```
-
-Inspect the current Dify workflow draft without modifying it:
-
-```bash
-curl http://127.0.0.1:8000/api/workflows/YOUR_APP_ID/draft
-```
-
-Apply the change to the Dify draft:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/workflows/modify/apply \
-  -H 'Content-Type: application/json' \
-  -d '{"app_id":"YOUR_APP_ID","message":"Make the final answer warmer","expected_hash":"OPTIONAL_CURRENT_HASH"}'
-```
-
-Apply a reviewed preview plan without re-running the edit planner. The `plan`
-value should be the exact `plan` object returned by `modify/draft`:
-
-```json
-{
-  "app_id": "YOUR_APP_ID",
-  "message": "Make the final answer warmer",
-  "expected_hash": "PREVIEW_BASE_HASH",
-  "dataset_ids": ["OPTIONAL_DATASET_ID"],
-  "plan": {
-    "...": "copy the full preview plan object here"
-  }
-}
-```
-
-Allow a confirmed destructive rewrite:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/workflows/modify/apply \
-  -H 'Content-Type: application/json' \
-  -d '{"app_id":"YOUR_APP_ID","message":"Rebuild this draft into a simpler workflow","allow_destructive":true}'
-```
-
-Run a Dify workflow draft with explicit inputs:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/workflows/run/draft \
-  -H 'Content-Type: application/json' \
-  -d '{"app_id":"YOUR_APP_ID","inputs":{"query":"我要投诉订单配送太慢"},"timeout_seconds":120}'
-```
-
-## Supported Nodes
-
-The current Plan IR supports these node types:
-
-```text
-start, llm, code, if-else, end, http-request, template-transform,
-question-classifier, parameter-extractor, variable-aggregator,
-document-extractor, assigner, list-operator, knowledge-retrieval,
-human-input, iteration, iteration-start, loop, loop-start, loop-end,
-tool, agent, datasource, datasource-empty, knowledge-index,
-trigger-webhook, trigger-plugin, trigger-schedule, answer
-```
-
-`answer` is only valid in `advanced-chat` mode. Workflow mode continues to use
-`end`; Chatflow requires at least one `answer`, rejects `end` and workflow
-triggers, reads the current message from `sys.query`, and requires every
-reachable response path to finish at an `answer` with no outgoing edge.
-
-New Chatflow creation is certified for:
-
-```text
-start, llm, answer, code, if-else, http-request, template-transform,
-question-classifier, parameter-extractor, variable-aggregator,
-document-extractor, list-operator, knowledge-retrieval, human-input,
-iteration, loop, assigner, tool, agent
-```
-
-New Chatflows may use `human-input` as a top-level manual review or information
-collection step. Each action branch must reach an `answer`; draft runs pause at
-that node and the human action is completed in Dify. `iteration` and `loop`
-creation supports a stable internal DAG with one internal start, no cycles, and
-optional `if-else` or `question-classifier` routing. Every declared case,
-`false`, or classifier class must have exactly one matching outgoing edge, and
-all paths must explicitly converge to one terminal processing node.
-`iteration.output_selector` references that convergence node. `loop` may use an
-internal `assigner` after convergence to copy the result into a loop variable
-used by a break condition.
-
-Chatflow conversation variables support `string`, `number`, `boolean`,
-`object`, `array[string]`, `array[number]`, `array[boolean]`, and
-`array[object]`. Top-level `assigner` nodes can update only declared
-conversation variables. Number variables support arithmetic updates, arrays
-support append/extend/removal, and scalar/object values support overwrite,
-clear, and set. Deleting, renaming, or changing a variable type is treated as
-a destructive modification and requires `allow_destructive=true`.
-
-Nested containers and container-internal `answer`, `human-input`, datasource,
-or knowledge-index nodes remain out of scope. Existing Dify drafts with more
-complex structures remain readable and editable.
-
-`question-classifier` is used for semantic routing such as complaint /
-consultation / appointment branches. `parameter-extractor` is used to extract
-structured fields such as `order_id`, `car_model`, `store`, and `issue` from
-the user input. `document-extractor` can extract text from uploaded files,
-`list-operator` can filter/sort/limit arrays, and `variable-aggregator` can
-merge fallback variables into one output. `assigner` is supported for existing
-draft compatibility but is not generated by default for new workflow requests.
-`knowledge-retrieval` retrieves context from dataset IDs selected in the Web UI
-or configured in `DIFY_DEFAULT_DATASET_IDS`; `answer` remains out of scope for
-workflow mode. `iteration` is used for explicit batch/list traversal, while
-`loop` is used for explicit retry/repeat/until or max-N-times flows.
-`iteration-start`, `loop-start`, and `loop-end` are internal Dify graph children
-generated inside their parent container, not ordinary top-level business nodes.
-`tool` can be generated when the request includes explicit `tool_selections`
-from the Web UI/API and the user asks to call a tool. String tool inputs such as
-`url`, `query`, and `text` are represented as Dify mixed text values like
-`{{#start.query#}}`; boolean, number, and select settings use Dify ToolInput
-constant/variable structures. Existing `_raw_data` tool nodes are still
-preserved as passthrough for draft compatibility. `agent` can be generated when
-the request includes explicit `agent_selections` from the Web UI/API and the
-user explicitly asks for an Agent/智能体/autonomous multi-step flow. Agent
-parameters use the same Dify `{type,value}` input structure, and Agent
-tool-selector parameters must bind tools selected in the Web UI Tools panel.
-Existing `_raw_data` agent nodes are still preserved as passthrough for old
-draft compatibility. `trigger-webhook`, `trigger-plugin`, and
-`trigger-schedule` are structured entry nodes that can be configured in the Web
-UI, generated only from an explicit `trigger_selection`, published explicitly,
-and enabled or disabled after publication. Plugin Trigger creation only uses
-Trigger Providers and subscriptions already configured in Dify; event
-parameters are constant bindings and downstream references are restricted to
-the selected event's output schema. Legacy `_raw_data` Plugin Trigger nodes
-remain passthrough-compatible. `datasource`, `datasource-empty`, and
-`knowledge-index` remain passthrough-only external dependency nodes.
-
-Example file Chatflow request:
-
-```text
-创建维修单附件总结 Chatflow。读取用户本轮上传的维修单文件，提取文本后总结车辆问题、维修建议和需要补充的信息，最后通过 Answer 回复。
-```
-
-Example routing Chatflow request:
-
-```text
-创建售后分流 Chatflow。先判断用户属于投诉、咨询还是预约，再提取订单号和门店；每个分类分支生成对应回复，并确保每条分支都通过 Answer 返回。
-```
-
-Example knowledge Chatflow request:
-
-```text
-创建修车售后知识库 Chatflow。根据用户本轮问题检索我选择的门店售后政策知识库，再结合检索资料生成客服回复并通过 Answer 返回。
-```
-
-Example selected Tool and Agent Chatflow request:
-
-```text
-创建智能售后 Chatflow。先调用我选择的搜索工具查询故障资料，再使用我选择的 Agent Strategy 做多步分析，最后由模型整理成面向客户的回复并通过 Answer 返回。
-```
-
-Example iteration Chatflow request:
-
-```text
-创建批量售后分析 Chatflow。输入 items JSON 中的 records 列表，逐条结合用户本轮要求生成处理建议，汇总后通过 Answer 回复。
-```
-
-Example classified iteration Chatflow request:
-
-```text
-创建批量售后分类 Chatflow。逐条判断 records 中的记录属于紧急投诉还是普通咨询，分别生成处理建议，再将两个分支显式汇合为每条记录的输出，最后通过 Answer 回复汇总结果。
-```
-
-Example loop Chatflow request:
-
-```text
-创建维修状态检查 Chatflow。最多循环 3 次检查处理结果，内部结果包含“已完成”时停止，最后通过 Answer 回复本轮检查结果。
-```
-
-Example conditional loop Chatflow request:
-
-```text
-创建条件重试 Chatflow。每轮判断当前状态是否需要升级处理，两个条件分支分别执行检查后汇合，并用 Assigner 将汇合结果写入 loop variable；最多循环 3 次，满足完成条件后通过 Answer 回复。
-```
-
-Example human-review Chatflow request:
-
-```text
-创建人工审核 Chatflow。先生成售后回复草稿，再由经理在 Dify 中选择通过或驳回；两个动作分支都通过 Answer 回复用户。
-```
-
-Example cross-turn memory Chatflow request:
-
-```text
-创建一个记住用户姓名的 Chatflow。首次获得姓名后保存到会话变量 preferred_name，后续轮次使用该姓名回复，并维护一个每轮递增的对话计数。
-```
-
-Example list workflow request:
-
-```text
-创建售后记录筛选工作流。输入 items 是包含 records 数组的 JSON 对象，筛选投诉类记录并取第一条，然后生成客服回复，最后返回结果。
-```
-
-Example human review workflow request:
-
-```text
-创建售后人工审核工作流。输入 query 是客户售后诉求，先生成客服回复草稿，再交给经理人工审核；经理可以选择通过或驳回，通过时返回草稿，驳回时返回人工审核意见。
-```
-
-Example selected tool workflow request:
-
-```text
-创建工具查询总结工作流。先调用我在 Web UI 勾选的搜索工具查询客户问题相关信息，再用模型总结查询结果并生成客服回复，最后返回 answer。
-```
-
-Example selected agent workflow request:
-
-```text
-创建智能体售后分析工作流。使用我在 Web UI 勾选的 Agent Strategy 对客户问题进行多步分析，必要时调用已绑定工具，最后生成处理建议并返回 answer。
-```
-
-Plugin installation, credential editing, automatic creation of data-source
-nodes, independent conversation-variable CRUD/UI, Agent Roster management, and
-embedding/rerank/speech/moderation model certification remain out of scope for
-now.
-
-## Test
-
-```bash
-python3 -m pytest
-```
+## 注意事项
+
+- chat2dify 是 sidecar，不是 Dify 插件，也不会修改 Dify 源码。
+- 创建和修改默认只操作 Dify 草稿；发布需要显式确认。
+- 浏览器端只保存会话上下文和待确认操作，API key 保留在服务端。
+- 运行 Dify docker compose 时，优先使用 nginx 暴露的 `/console/api` 地址，而不是容器内部的 `5001`。
+- README 中的截图来自 v2.0.0 当前 Web UI 和 Dify 生成结果。
