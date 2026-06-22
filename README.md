@@ -18,9 +18,9 @@ chat2dify 是一个独立的 FastAPI sidecar，用自然语言对话创建、修
 
 ## 截图
 
-chat2dify v2.0.0 对话式工作台：
+chat2dify v2.0.0 Dify 风格对话工作台，对话中完成创建、运行、修改和应用工作流：
 
-![chat2dify v2.0.0 对话式工作台](docs/images/chat2dify-v2-chat-workbench.png)
+![chat2dify v2.0.0 Dify 风格对话工作台](docs/images/chat2dify-v2-chat-workbench.png)
 
 通过 chat2dify 生成的 Dify 工作流，示例为“电脑城售后服务工作流”：
 
@@ -332,4 +332,4 @@ docs/images/           README 截图
 - 创建和修改默认只操作 Dify 草稿；发布需要显式确认。
 - 浏览器端只保存会话上下文和待确认操作，API key 保留在服务端。
 - 运行 Dify docker compose 时，优先使用 nginx 暴露的 `/console/api` 地址，而不是容器内部的 `5001`。
-- README 中的截图来自 v2.0.0 当前 Web UI 和 Dify 生成结果。
+- README 中的截图来自 v2.0.0 新版 Dify 风格 Web UI 和 Dify 生成结果。
