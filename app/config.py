@@ -23,6 +23,8 @@ NVIDIA_PLANNER_MODELS = {
 }
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_OPENROUTER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
+DEFAULT_OPENAI_COMPATIBLE_BASE_URL = "http://localhost:4000/v1"
+DEFAULT_OPENAI_COMPATIBLE_MODEL = "gpt-4o-mini"
 
 
 class ConfigurationError(ValueError):
@@ -64,6 +66,12 @@ class Settings:
     openai_api_key: str | None
     openai_base_url: str
     openai_model: str
+    openai_compatible_api_key: str | None
+    openai_compatible_base_url: str
+    openai_compatible_model: str
+    openai_compatible_label: str
+    openai_compatible_max_tokens: int
+    openai_compatible_response_format: bool
     nvidia_api_key: str | None
     nvidia_base_url: str
     nvidia_model: str
@@ -109,9 +117,11 @@ class Settings:
             dify_default_model_provider=source.get("DIFY_DEFAULT_MODEL_PROVIDER", "langgenius/openai/openai"),
             dify_default_model_name=source.get("DIFY_DEFAULT_MODEL_NAME", "gpt-4o-mini"),
             dify_default_dataset_ids=_csv_list(source.get("DIFY_DEFAULT_DATASET_IDS", "")),
-            planner_default_provider=source.get("PLANNER_DEFAULT_PROVIDER", "nvidia").strip().lower(),
+            planner_default_provider=_normalize_planner_provider(
+                source.get("PLANNER_DEFAULT_PROVIDER", "nvidia")
+            ),
             planner_fallback_providers=_csv_list(
-                source.get("PLANNER_FALLBACK_PROVIDERS", "openrouter,openai")
+                source.get("PLANNER_FALLBACK_PROVIDERS", "openrouter,openai-compatible,openai")
             ),
             planner_timeout_seconds=_positive_float(
                 source.get("PLANNER_TIMEOUT_SECONDS", "600"),
@@ -124,6 +134,27 @@ class Settings:
             openai_api_key=_empty_to_none(source.get("OPENAI_API_KEY")),
             openai_base_url=source.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
             openai_model=source.get("OPENAI_MODEL", "gpt-4o-mini"),
+            openai_compatible_api_key=_empty_to_none(source.get("OPENAI_COMPATIBLE_API_KEY")),
+            openai_compatible_base_url=(
+                source.get("OPENAI_COMPATIBLE_BASE_URL", DEFAULT_OPENAI_COMPATIBLE_BASE_URL).strip()
+                or DEFAULT_OPENAI_COMPATIBLE_BASE_URL
+            ).rstrip("/"),
+            openai_compatible_model=(
+                source.get("OPENAI_COMPATIBLE_MODEL", DEFAULT_OPENAI_COMPATIBLE_MODEL).strip()
+                or DEFAULT_OPENAI_COMPATIBLE_MODEL
+            ),
+            openai_compatible_label=source.get(
+                "OPENAI_COMPATIBLE_LABEL",
+                "OpenAI-compatible",
+            ).strip() or "OpenAI-compatible",
+            openai_compatible_max_tokens=_positive_int(
+                source.get("OPENAI_COMPATIBLE_MAX_TOKENS", "8192"),
+                name="OPENAI_COMPATIBLE_MAX_TOKENS",
+            ),
+            openai_compatible_response_format=_boolean(
+                source.get("OPENAI_COMPATIBLE_RESPONSE_FORMAT", "true"),
+                name="OPENAI_COMPATIBLE_RESPONSE_FORMAT",
+            ),
             nvidia_api_key=_empty_to_none(source.get("NVIDIA_API_KEY")),
             nvidia_base_url=source.get("NVIDIA_BASE_URL", DEFAULT_NVIDIA_BASE_URL).rstrip("/"),
             nvidia_model=nvidia_model,
@@ -166,14 +197,14 @@ class Settings:
         return self.workflow_url(app_id)
 
     def planner_runtime(self) -> PlannerRuntime:
-        return self._planner_runtime_for_provider(self.planner_default_provider)
+        return self._planner_runtime_for_provider(_normalize_planner_provider(self.planner_default_provider))
 
     def planner_runtime_candidates(self) -> list[PlannerRuntime]:
         providers = [self.planner_default_provider, *self.planner_fallback_providers]
         seen: set[str] = set()
         runtimes: list[PlannerRuntime] = []
         for provider in providers:
-            normalized = provider.strip().lower()
+            normalized = _normalize_planner_provider(provider)
             if not normalized or normalized in seen:
                 continue
             seen.add(normalized)
@@ -184,10 +215,20 @@ class Settings:
         if provider == "openai":
             return PlannerRuntime(
                 provider="openai",
-                label="OpenAI-compatible",
+                label="OpenAI",
                 api_key=self.openai_api_key,
                 base_url=self.openai_base_url,
                 model=self.openai_model,
+                timeout_seconds=self.planner_timeout_seconds,
+                request_retries=self.planner_request_retries,
+            )
+        if provider == "openai-compatible":
+            return PlannerRuntime(
+                provider="openai-compatible",
+                label=self.openai_compatible_label,
+                api_key=self.openai_compatible_api_key,
+                base_url=self.openai_compatible_base_url,
+                model=self.openai_compatible_model,
                 timeout_seconds=self.planner_timeout_seconds,
                 request_retries=self.planner_request_retries,
             )
@@ -214,12 +255,18 @@ class Settings:
         raise ConfigurationError(f"Unsupported planner provider: {provider}")
 
     def with_planner(self, provider: str | None, model: str | None = None) -> "Settings":
-        selected_provider = (provider or self.planner_default_provider).strip().lower()
+        selected_provider = _normalize_planner_provider(provider or self.planner_default_provider)
         if selected_provider == "openai":
             return replace(
                 self,
                 planner_default_provider="openai",
                 openai_model=(model or self.openai_model).strip(),
+            )
+        if selected_provider == "openai-compatible":
+            return replace(
+                self,
+                planner_default_provider="openai-compatible",
+                openai_compatible_model=(model or self.openai_compatible_model).strip(),
             )
         if selected_provider == "nvidia":
             selected_model = (model or self.nvidia_model).strip()
@@ -247,9 +294,20 @@ class Settings:
         return [
             {
                 "id": "openai",
-                "label": "OpenAI-compatible",
+                "label": "OpenAI",
                 "configured": bool(self.openai_api_key),
                 "models": [{"id": self.openai_model, "label": self.openai_model}],
+            },
+            {
+                "id": "openai-compatible",
+                "label": self.openai_compatible_label,
+                "configured": bool(self.openai_compatible_api_key),
+                "models": [
+                    {
+                        "id": self.openai_compatible_model,
+                        "label": self.openai_compatible_model,
+                    }
+                ],
             },
             {
                 "id": "nvidia",
@@ -352,6 +410,19 @@ def _choice(value: str, *, name: str, allowed: set[str]) -> str:
         choices = ", ".join(sorted(allowed))
         raise ConfigurationError(f"{name} must be one of: {choices}.")
     return normalized
+
+
+def _normalize_planner_provider(value: str | None) -> str:
+    if value is None:
+        return ""
+    normalized = value.strip().lower().replace("_", "-")
+    aliases = {
+        "openai-compatible": "openai-compatible",
+        "openai-compat": "openai-compatible",
+        "compatible-openai": "openai-compatible",
+        "compatible": "openai-compatible",
+    }
+    return aliases.get(normalized, normalized)
 
 
 def _nvidia_model_max_tokens(model: str) -> int:

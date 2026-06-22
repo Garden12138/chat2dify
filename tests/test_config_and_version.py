@@ -177,6 +177,41 @@ def test_openrouter_planner_configuration_and_fallback_chain(tmp_path: Path) -> 
     assert "sk-or-test" not in str(catalog)
 
 
+def test_openai_compatible_planner_configuration_and_catalog(tmp_path: Path) -> None:
+    settings = Settings.from_env(
+        {
+            "DIFY_SOURCE_DIR": "../dify",
+            "PLANNER_DEFAULT_PROVIDER": "openai_compatible",
+            "OPENAI_COMPATIBLE_API_KEY": "sk-compatible",
+            "OPENAI_COMPATIBLE_BASE_URL": "https://llm-gateway.example/v1",
+            "OPENAI_COMPATIBLE_MODEL": "qwen-max",
+            "OPENAI_COMPATIBLE_LABEL": "Internal LLM Gateway",
+            "OPENAI_COMPATIBLE_MAX_TOKENS": "4096",
+            "OPENAI_COMPATIBLE_RESPONSE_FORMAT": "false",
+        },
+        project_root=tmp_path,
+        validate_dify=False,
+    )
+
+    runtime = settings.planner_runtime()
+    catalog = settings.planner_catalog()
+
+    assert runtime.provider == "openai-compatible"
+    assert runtime.label == "Internal LLM Gateway"
+    assert runtime.base_url == "https://llm-gateway.example/v1"
+    assert runtime.model == "qwen-max"
+    assert runtime.configured is True
+    assert settings.openai_compatible_max_tokens == 4096
+    assert settings.openai_compatible_response_format is False
+    assert next(item for item in catalog if item["id"] == "openai-compatible") == {
+        "id": "openai-compatible",
+        "label": "Internal LLM Gateway",
+        "configured": True,
+        "models": [{"id": "qwen-max", "label": "qwen-max"}],
+    }
+    assert "sk-compatible" not in str(catalog)
+
+
 def test_nvidia_deepseek_is_the_default_planner(tmp_path: Path) -> None:
     settings = Settings.from_env(
         {
@@ -221,6 +256,19 @@ def test_with_planner_accepts_nvidia_deepseek_v4_pro(tmp_path: Path) -> None:
 
     assert selected.planner_runtime().model == "deepseek-ai/deepseek-v4-pro"
     assert selected.nvidia_max_tokens == 16384
+
+
+def test_with_planner_accepts_arbitrary_openai_compatible_model(tmp_path: Path) -> None:
+    settings = Settings.from_env(
+        {"DIFY_SOURCE_DIR": "../dify", "OPENAI_COMPATIBLE_API_KEY": "sk-compatible"},
+        project_root=tmp_path,
+        validate_dify=False,
+    )
+
+    selected = settings.with_planner("compatible_openai", "deepseek-chat")
+
+    assert selected.planner_runtime().provider == "openai-compatible"
+    assert selected.planner_runtime().model == "deepseek-chat"
 
 
 def test_planner_timeout_must_be_positive(tmp_path: Path) -> None:

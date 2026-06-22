@@ -704,7 +704,15 @@ def _chat_completion_payload(
         "messages": messages,
         "temperature": 0.2,
     }
-    if runtime.provider != "openrouter" and runtime.model != NVIDIA_DEEPSEEK_V4_PRO_MODEL:
+    use_json_response_format = (
+        runtime.provider != "openrouter"
+        and runtime.model != NVIDIA_DEEPSEEK_V4_PRO_MODEL
+        and (
+            runtime.provider != "openai-compatible"
+            or settings.openai_compatible_response_format
+        )
+    )
+    if use_json_response_format:
         payload["response_format"] = {"type": "json_object"}
     if runtime.provider == "nvidia":
         chat_template_kwargs: dict[str, Any] = {
@@ -724,6 +732,8 @@ def _chat_completion_payload(
         )
     if runtime.provider == "openrouter":
         payload["max_tokens"] = settings.openrouter_max_tokens
+    if runtime.provider == "openai-compatible":
+        payload["max_tokens"] = settings.openai_compatible_max_tokens
     return payload
 
 
@@ -747,6 +757,7 @@ def _missing_planner_key_message(settings: Settings) -> str:
     env_names = {
         "nvidia": "NVIDIA_API_KEY",
         "openai": "OPENAI_API_KEY",
+        "openai-compatible": "OPENAI_COMPATIBLE_API_KEY",
         "openrouter": "OPENROUTER_API_KEY",
     }
     names = [

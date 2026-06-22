@@ -160,7 +160,7 @@ DIFY_DEFAULT_MODEL_PROVIDER=langgenius/openai/openai
 DIFY_DEFAULT_MODEL_NAME=gpt-4o-mini
 
 PLANNER_DEFAULT_PROVIDER=nvidia
-PLANNER_FALLBACK_PROVIDERS=openrouter,openai
+PLANNER_FALLBACK_PROVIDERS=openrouter,openai-compatible,openai
 PLANNER_TIMEOUT_SECONDS=600
 PLANNER_REQUEST_RETRIES=2
 NVIDIA_API_KEY=nvapi-...
@@ -171,6 +171,13 @@ NVIDIA_MAX_TOKENS=8192
 
 OPENROUTER_API_KEY=sk-or-...
 OPENROUTER_MODEL=nvidia/nemotron-3-ultra-550b-a55b:free
+
+OPENAI_COMPATIBLE_API_KEY=sk-...
+OPENAI_COMPATIBLE_BASE_URL=https://llm-gateway.example/v1
+OPENAI_COMPATIBLE_MODEL=deepseek-chat
+OPENAI_COMPATIBLE_LABEL=OpenAI-compatible
+OPENAI_COMPATIBLE_MAX_TOKENS=8192
+OPENAI_COMPATIBLE_RESPONSE_FORMAT=true
 
 CHAT2DIFY_TASK_DB=data/tasks.sqlite3
 CHAT2DIFY_TASK_WORKERS=2
@@ -183,7 +190,9 @@ CHAT2DIFY_TASK_WORKERS=2
 - `CHAT2DIFY_PUBLIC_BASE_PATH`：浏览器访问 chat2dify 的公开子路径。独立运行留空；挂到 Dify 面板时设为 `/chat2dify`。
 - `DIFY_EMAIL` / `DIFY_PASSWORD`：用于导入应用、读取草稿、运行草稿和发布。
 - `DIFY_DEFAULT_MODEL_PROVIDER` / `DIFY_DEFAULT_MODEL_NAME`：生成到 Dify LLM 节点里的运行模型，不是 chat2dify Planner。
-- `PLANNER_*`、`NVIDIA_*`、`OPENROUTER_*`、`OPENAI_*`：chat2dify 用来生成或修改 Plan IR 的规划模型。
+- `PLANNER_*`、`NVIDIA_*`、`OPENROUTER_*`、`OPENAI_COMPATIBLE_*`、`OPENAI_*`：chat2dify 用来生成或修改 Plan IR 的规划模型。
+- `OPENAI_COMPATIBLE_*`：独立的 OpenAI Chat Completions 风格 Planner 入口，适合 OneAPI、NewAPI、LiteLLM、自建大模型网关等兼容 `/v1/chat/completions` 的服务；`PLANNER_DEFAULT_PROVIDER` 或 fallback 中使用 `openai-compatible`。
+- `OPENAI_COMPATIBLE_RESPONSE_FORMAT=false`：当兼容服务不支持 OpenAI `response_format` 参数时关闭，Planner 仍会通过提示词和校验器要求 JSON 输出。
 - `DIFY_DEFAULT_DATASET_IDS`：可选，生成知识检索节点时使用的默认数据集 ID，多个 ID 用逗号分隔。
 
 如果没有配置任何 Planner key，创建草稿会退化为简单确定性模板；修改预览仍需要至少一个可用 Planner。

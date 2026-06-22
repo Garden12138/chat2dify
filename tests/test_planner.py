@@ -242,6 +242,60 @@ def test_planner_uses_openrouter_nemotron_payload(monkeypatch) -> None:
     assert "stream" not in captured["payload"]
 
 
+def test_planner_uses_openai_compatible_payload(monkeypatch) -> None:
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": '{"nodes":[]}'}}]}
+
+    class FakeClient:
+        def __init__(self, *, timeout):
+            captured["timeout"] = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def post(self, url, *, json, headers):
+            captured["url"] = url
+            captured["payload"] = json
+            captured["headers"] = headers
+            return FakeResponse()
+
+    monkeypatch.setattr("app.agent.planner.httpx.Client", FakeClient)
+    planner = WorkflowPlanner(
+        _settings(
+            openai_api_key=None,
+            planner_provider="openai-compatible",
+            extra_env={
+                "OPENAI_COMPATIBLE_API_KEY": "sk-compatible",
+                "OPENAI_COMPATIBLE_BASE_URL": "https://llm-gateway.example/v1",
+                "OPENAI_COMPATIBLE_MODEL": "deepseek-chat",
+                "OPENAI_COMPATIBLE_MAX_TOKENS": "4096",
+                "OPENAI_COMPATIBLE_RESPONSE_FORMAT": "false",
+            },
+        )
+    )
+
+    content = planner._call_llm("生成售后工作流", app_name="售后")
+
+    assert content == '{"nodes":[]}'
+    assert captured["url"] == "https://llm-gateway.example/v1/chat/completions"
+    assert captured["headers"]["Authorization"] == "Bearer sk-compatible"
+    assert captured["headers"]["Connection"] == "close"
+    assert captured["payload"]["model"] == "deepseek-chat"
+    assert captured["payload"]["max_tokens"] == 4096
+    assert "response_format" not in captured["payload"]
+    assert "stream" not in captured["payload"]
+    assert captured["timeout"].read == 600
+
+
 def test_planner_falls_back_to_openrouter_when_nvidia_is_rate_limited(
     monkeypatch,
 ) -> None:
