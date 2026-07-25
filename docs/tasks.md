@@ -36,7 +36,7 @@ Rules:
 | Phase | Goal | Dependencies | Status |
 | --- | --- | --- | --- |
 | Phase 0 | Architecture foundation | None | `completed` |
-| Phase 1A | Existing-app modify vertical slice | Phase 0 | `pending` |
+| Phase 1A | Existing-app modify vertical slice | Phase 0 | `completed` |
 | Phase 1B | New-app create adapter | Phase 1A | `pending` |
 | Phase 2 | Canvas context and Agent Workbench | Phase 1 | `pending` |
 | Phase 3 | Draft Test, Inspect, and Repair | Phase 2 | `pending` |
@@ -218,7 +218,7 @@ exist behind a disabled-by-default feature flag without changing v3 behavior.
 
 ## 5. Phase 1A — Existing-app modify vertical slice
 
-Status: `pending`
+Status: `completed`
 
 Dependencies: Phase 0 `completed`
 
@@ -228,20 +228,20 @@ unchanged before approval.
 
 ### Tasks
 
-- [ ] **P1A-01 — Workflow Snapshot**
+- [x] **P1A-01 — Workflow Snapshot**
   - Read app detail, draft graph, features, conversation/environment
     variables, base Hash, and Dify version.
   - Decompile to `WorkflowPlan`.
   - Store the authoritative base graph separately from model context.
   - Pin a capability snapshot to the Run.
 
-- [ ] **P1A-02 — Versioned Agent Workspace**
+- [x] **P1A-02 — Versioned Agent Workspace**
   - Initialize Workspace v0 from the Snapshot.
   - Persist full Plan snapshots for MVP versions.
   - Track parent, head, validation, patch, reverse patch, and creation time.
   - Implement head lookup and pre-commit version validation.
 
-- [ ] **P1A-03 — Transactional Patch Engine**
+- [x] **P1A-03 — Transactional Patch Engine**
   - Implement `node.add`, `node.update`, `edge.add`, and `edge.remove`.
   - Generate final node IDs server-side and resolve `temp_ref`.
   - Enforce workspace-version and base-Hash preconditions.
@@ -250,31 +250,31 @@ unchanged before approval.
   - Generate a reverse patch.
   - Preserve unrelated Plan and raw graph metadata.
 
-- [ ] **P1A-04 — Read and capability tools**
+- [x] **P1A-04 — Read and capability tools**
   - Implement `workflow.inspect`.
   - Implement `capability.search`.
   - Implement `node.schema.get`.
   - Limit details and Top K results based on Context Builder requests.
 
-- [ ] **P1A-05 — Patch, validation, and diff tools**
+- [x] **P1A-05 — Patch, validation, and diff tools**
   - Implement `workflow.patch`.
   - Implement `workflow.validate` using the existing full validation chain.
   - Implement `workflow.diff` using existing diff/guard behavior.
   - Return stable, sanitized validation and risk observations.
 
-- [ ] **P1A-06 — Context Builder and Goal Plan**
+- [x] **P1A-06 — Context Builder and Goal Plan**
   - Build bounded context from goal, app summary, selection, capabilities,
     recent observations, constraints, and remaining budget.
   - Summarize old trace events rather than replaying all data to the model.
   - Persist Goal Plan revisions and step evidence.
 
-- [ ] **P1A-07 — Decision provider abstraction**
+- [x] **P1A-07 — Decision provider abstraction**
   - Normalize native tool calling and strict JSON decisions into one contract.
   - Reuse existing planner-provider fallback infrastructure where safe.
   - Add fake deterministic decision provider for tests.
   - Never expose Commit as a model-visible tool.
 
-- [ ] **P1A-08 — Builder Agent Runtime**
+- [x] **P1A-08 — Builder Agent Runtime**
   - Implement Observe/Plan/Act/Validate/Review states.
   - Enforce iteration, model-call, patch-operation, time, and same-error
     budgets.
@@ -282,14 +282,14 @@ unchanged before approval.
   - Pause durably for `ask_user` and approval.
   - Support cancellation and explicit resume.
 
-- [ ] **P1A-09 — Policy and Approval Service**
+- [x] **P1A-09 — Policy and Approval Service**
   - Authorize read/workspace tools automatically.
   - Persist approval bound to Run, Workspace version, base Hash, action,
     risk, and expiry.
   - Invalidate approval when the Workspace head changes.
   - Require separate destructive approval when Guard blocks normal apply.
 
-- [ ] **P1A-10 — Modification Commit Adapter**
+- [x] **P1A-10 — Modification Commit Adapter**
   - Accept only persisted Workspace version plus persisted approval.
   - Re-read current Dify draft immediately before commit.
   - Return `conflicted` on Hash mismatch without writing.
@@ -298,14 +298,14 @@ unchanged before approval.
   - Reuse `sync_draft_workflow` and save the new Hash/result.
   - Make duplicate Commit requests idempotent.
 
-- [ ] **P1A-11 — v4 Run APIs**
+- [x] **P1A-11 — v4 Run APIs**
   - Create Session and submit Message/Goal.
   - Read Session, Run, events, and diff.
   - Cancel, resume, resolve approval, and commit.
   - Return `202` for asynchronous Run work.
   - Provide polling fallback alongside SSE.
 
-- [ ] **P1A-12 — Modify vertical-slice tests**
+- [x] **P1A-12 — Modify vertical-slice tests**
   - Use fake Dify and decision providers.
   - Cover happy path, invalid patch, validation repair observation, no-op,
     destructive guard, approval expiry, version mismatch, Hash conflict,
@@ -318,26 +318,67 @@ unchanged before approval.
 
 ### Acceptance criteria
 
-- [ ] Agent reads the current Workflow instead of relying on prompt memory.
-- [ ] Agent changes only the relevant nodes and edges.
-- [ ] Every accepted Patch creates one persisted version and trace.
-- [ ] Invalid Patch leaves the Workspace head unchanged.
-- [ ] Review includes business Diff, technical Diff, validation, and risk.
-- [ ] Dify remains unchanged before approval.
-- [ ] Approval for version N cannot commit version N+1.
-- [ ] Current Dify Hash mismatch produces a conflict and no write.
-- [ ] Valid approval writes through the existing safe core.
-- [ ] Workflow and Chatflow behavior are both covered.
-- [ ] All Phase 1A targeted and existing tests pass.
-- [ ] `git diff --check` passes.
+- [x] Agent reads the current Workflow instead of relying on prompt memory.
+- [x] Agent changes only the relevant nodes and edges.
+- [x] Every accepted Patch creates one persisted version and trace.
+- [x] Invalid Patch leaves the Workspace head unchanged.
+- [x] Review includes business Diff, technical Diff, validation, and risk.
+- [x] Dify remains unchanged before approval.
+- [x] Approval for version N cannot commit version N+1.
+- [x] Current Dify Hash mismatch produces a conflict and no write.
+- [x] Valid approval writes through the existing safe core.
+- [x] Workflow and Chatflow behavior are both covered.
+- [x] All Phase 1A targeted and existing tests pass.
+- [x] `git diff --check` passes.
 
 ### Completion record
 
-- Started:
-- Completed:
+- Started: 2026-07-25
+- Completed: 2026-07-25
 - Tests:
+  - Dedicated Phase 1A vertical-slice tests: `12 passed`.
+  - Phase 1A plus directly affected Agent, API, Graph, Diff, Guard,
+    Preflight, and v3 main tests: `128 passed`.
+  - Full repository suite: `398 passed`.
+  - `python -m compileall -q app`: passed.
+  - `git diff --check`: passed.
+  - The dedicated/full pytest runs reported the existing upstream Starlette
+    `fastapi.testclient` deprecation warning. The full run also reported one
+    pytest assertion-rewrite warning because the local verification command
+    injected the temporary Dify-version fixture in-process; no tests failed.
 - Decisions/deviations:
+  - The authoritative existing-app Snapshot is a private Run checkpoint that
+    stores the base Graph, features, environment/conversation variables, app
+    detail, base Hash, Dify version, and pinned Phase 0 node capabilities.
+    Public Run responses and model Context exclude the raw Graph and
+    environment-variable values.
+  - Workspace versions continue to store full `WorkflowPlan` snapshots. The
+    model-visible reverse domain remains the four Phase 1A Patch operations;
+    accepted versions persist an internal deterministic snapshot-restore
+    reverse Patch so reversal is exact without exposing `node.remove` early.
+  - Existing Graph compilation now overlays preserved graph-, node-data-, and
+    edge-level metadata in addition to layout. This is required so the v4
+    Commit adapter can reuse the authoritative base Graph without dropping
+    unrelated Dify metadata.
+  - Agent Runs use a small v4 thread dispatcher backed by durable
+    `agent_runs`, Events, and Workspace checkpoints. Restart marks only active
+    work as `interrupted`; durable `waiting_user` and `waiting_approval` states
+    remain paused, and no Dify write is replayed automatically.
+  - Destructive start-input contract changes use a separate
+    `destructive_change` Approval before Commit Approval. Any Workspace Head
+    change expires both pending and already-approved records for the old
+    version.
+  - Full-suite verification used a temporary minimal Dify DSL-version fixture
+    because the checkout has no adjacent Dify source tree. The fixture changed
+    no repository files or production behavior.
 - Remaining limitations:
+  - Phase 1A supports modification of existing Workflow/Chatflow apps only.
+    New-app scaffolds/imports remain Phase 1B and were not started.
+  - The pinned capability Snapshot intentionally uses the Phase 0 MVP node
+    catalog (`llm`, `if-else`, `end`, `answer`); broader live resource
+    capabilities remain later scoped work.
+  - Canvas context, Workbench UI, Undo, and richer pause/resume UX remain
+    Phase 2. Draft Run, execution inspection, and Repair remain Phase 3.
 
 ## 6. Phase 1B — New-app create adapter
 
@@ -757,3 +798,6 @@ the plan.
 | 2026-07-25 | Planning | Implement existing-app modification before new-app creation | Validates Hash, diff, guard, approval, and conflict boundaries first | Architecture document |
 | 2026-07-25 | Phase 0 | Gate the registered v4 router and initialize its store only when `CHAT2DIFY_AGENT_V4_ENABLED` is true | Keeps v3 as the effective default path while making flag-on startup deterministic | `app/main.py`, `app/api/agent_v4.py` |
 | 2026-07-25 | Phase 0 | Keep the Phase 0 API read-only and limit it to persisted Session/Run reads plus resumable SSE | Establishes API and event primitives without starting Phase 1 Runtime or mutation behavior | `app/api/agent_v4.py` |
+| 2026-07-25 | Phase 1A | Persist the authoritative base Graph in a private Run Snapshot and expose only bounded Plan summaries/tools to the model and public Run API | Commit needs exact Graph metadata, while credentials and environment values must not cross the model/public boundary | `app/agent/snapshot.py`, `app/agent/context.py`, `app/api/agent_v4.py` |
+| 2026-07-25 | Phase 1A | Use transactional full-Plan Workspace versions with an internal snapshot-restore reverse Patch while keeping the model-visible Patch union limited to the four Phase 1A operations | Guarantees exact reversal and atomic Head movement without prematurely exposing `node.remove` or arbitrary JSON Patch | `app/agent/workspace.py`, `app/agent/store.py` |
+| 2026-07-25 | Phase 1A | Keep Commit outside the Tool Registry and require version/base-Hash-bound persisted approval, plus a separate destructive approval when Guard reports high risk | Prevents prompt injection, stale approval, and Hash races from authorizing a Dify write | `app/agent/approval.py`, `app/agent/commit.py`, `app/agent/policy.py` |

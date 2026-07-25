@@ -13,7 +13,21 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from app import __version__
+from app.agent.approval import AgentApprovalService
+from app.agent.catalog import NodeCapabilityCatalog
+from app.agent.commit import ModificationCommitService
+from app.agent.context import BuilderContextBuilder
+from app.agent.decision import OpenAICompatibleDecisionProvider
+from app.agent.policy import AgentToolPolicy
+from app.agent.registry import ToolRegistry
+from app.agent.review import WorkflowReviewService
+from app.agent.runtime import AgentRuntime
+from app.agent.service import AgentApplicationService, ThreadedRunDispatcher
+from app.agent.snapshot import WorkflowSnapshotService
 from app.agent.store import AgentStore
+from app.agent.tools import register_phase1a_tools
+from app.agent.validation import WorkflowValidationService
+from app.agent.workspace import VersionedWorkflowWorkspace
 from app.agent.diff import diff_plans
 from app.agent.editor import WorkflowEditPlanner
 from app.agent.explainer import explain_plan
@@ -86,16 +100,84 @@ DEFAULT_INDEX_CONFIG = '{"basePath":"","version":"3.0.0"}'
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     settings = load_settings()
-    read_dify_version_info(settings.dify_source_path)
+    version_info = read_dify_version_info(settings.dify_source_path)
     task_manager = TaskManager(TaskRepository(settings.task_db_path), workers=settings.task_workers)
     application.state.task_manager = task_manager
     application.state.agent_v4_enabled = settings.agent_v4_enabled
-    application.state.agent_store = (
-        AgentStore(settings.task_db_path) if settings.agent_v4_enabled else None
-    )
+    application.state.agent_store = None
+    application.state.agent_service = None
+    application.state.agent_registry = None
+    agent_service = None
+    if settings.agent_v4_enabled:
+        agent_store = AgentStore(settings.task_db_path)
+        agent_store.interrupt_active_runs()
+        compiler = DifyDslCompiler(
+            dsl_version=version_info.app_dsl_version,
+            default_model_provider=settings.dify_default_model_provider,
+            default_model_name=settings.dify_default_model_name,
+            default_dataset_ids=settings.dify_default_dataset_ids,
+        )
+        catalog = NodeCapabilityCatalog()
+        validation = WorkflowValidationService(
+            compiler=compiler,
+            expected_dsl_version=version_info.app_dsl_version,
+        )
+        workspace = VersionedWorkflowWorkspace(
+            store=agent_store,
+            validation=validation,
+            catalog=catalog,
+        )
+        review = WorkflowReviewService(store=agent_store, workspace=workspace)
+        approval = AgentApprovalService(store=agent_store)
+        registry = ToolRegistry()
+        register_phase1a_tools(
+            registry,
+            store=agent_store,
+            workspace=workspace,
+            review=review,
+        )
+        def client_factory():
+            return DifyClient(settings)
+        runtime = AgentRuntime(
+            store=agent_store,
+            snapshot=WorkflowSnapshotService(
+                client_factory=client_factory,
+                catalog=catalog,
+                dify_version=version_info,
+            ),
+            workspace=workspace,
+            review=review,
+            approval=approval,
+            registry=registry,
+            context_builder=BuilderContextBuilder(store=agent_store),
+            decision_provider=OpenAICompatibleDecisionProvider(settings),
+            policy=AgentToolPolicy(),
+        )
+        commit_service = ModificationCommitService(
+            store=agent_store,
+            workspace=workspace,
+            approval=approval,
+            validation=validation,
+            compiler=compiler,
+            client_factory=client_factory,
+        )
+        agent_service = AgentApplicationService(
+            store=agent_store,
+            dispatcher=ThreadedRunDispatcher(
+                runtime,
+                workers=settings.task_workers,
+            ),
+            approval=approval,
+            commit_service=commit_service,
+        )
+        application.state.agent_store = agent_store
+        application.state.agent_service = agent_service
+        application.state.agent_registry = registry
     try:
         yield
     finally:
+        if agent_service is not None:
+            agent_service.close()
         task_manager.close()
 
 

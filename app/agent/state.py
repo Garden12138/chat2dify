@@ -260,6 +260,15 @@ class AgentBudget(StrictModel):
     max_run_seconds: int = Field(default=600, ge=1, le=86_400)
 
 
+class AgentBudgetUsage(StrictModel):
+    iterations: int = Field(default=0, ge=0)
+    model_calls: int = Field(default=0, ge=0)
+    patch_operations: int = Field(default=0, ge=0)
+    test_runs: int = Field(default=0, ge=0)
+    same_error_retries: int = Field(default=0, ge=0)
+    latest_error_signature: str | None = Field(default=None, max_length=1_000)
+
+
 class RunConstraints(StrictModel):
     allow_draft_test: bool = False
     allow_destructive: bool = False
@@ -267,6 +276,22 @@ class RunConstraints(StrictModel):
     selected_edge_ids: list[str] = Field(default_factory=list, max_length=100)
     canvas_draft_hash: str | None = Field(default=None, max_length=512)
     dirty_state: bool = False
+
+
+class AgentWorkflowSnapshot(StrictModel):
+    app_id: str = Field(min_length=1, max_length=256)
+    app_name: str = Field(min_length=1, max_length=512)
+    app_description: str = Field(default="", max_length=8_000)
+    app_mode: Literal["workflow", "advanced-chat"]
+    base_hash: str = Field(min_length=1, max_length=512)
+    base_plan: dict[str, Any]
+    base_graph: dict[str, Any]
+    features: dict[str, Any] = Field(default_factory=dict)
+    environment_variables: list[dict[str, Any]] = Field(default_factory=list)
+    conversation_variables: list[dict[str, Any]] = Field(default_factory=list)
+    dify_version: dict[str, str] = Field(default_factory=dict)
+    capabilities: list[dict[str, Any]] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class AgentSession(StrictModel):
@@ -289,7 +314,13 @@ class AgentRun(StrictModel):
     head_version_id: str | None = Field(default=None, max_length=128)
     iteration: int = Field(default=0, ge=0)
     budget: AgentBudget = Field(default_factory=AgentBudget)
+    budget_usage: AgentBudgetUsage = Field(default_factory=AgentBudgetUsage)
     constraints: RunConstraints = Field(default_factory=RunConstraints)
+    snapshot: AgentWorkflowSnapshot | None = None
+    goal_plan: GoalPlan | None = None
+    observations: list[Observation] = Field(default_factory=list, max_length=200)
+    review: dict[str, Any] | None = None
+    commit_result: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)

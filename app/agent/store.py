@@ -11,6 +11,8 @@ from app.agent.state import (
     AgentApproval,
     AgentRun,
     AgentSession,
+    ApprovalStatus,
+    RunPhase,
     WorkspaceVersion,
     validate_run_transition,
 )
@@ -19,6 +21,10 @@ from app.agent.trace import AgentEvent, AgentEventType, redact_sensitive_data
 
 class AgentRecordNotFound(KeyError):
     """Raised when a requested v4 Agent record does not exist."""
+
+
+class AgentStoreConflict(RuntimeError):
+    code = "AGENT_STORE_CONFLICT"
 
 
 _UNSET = object()
@@ -83,7 +89,13 @@ class AgentStore:
                     head_version_id TEXT,
                     iteration INTEGER NOT NULL,
                     budget_json TEXT NOT NULL,
+                    budget_usage_json TEXT NOT NULL DEFAULT '{}',
                     constraints_json TEXT NOT NULL,
+                    snapshot_json TEXT,
+                    goal_plan_json TEXT,
+                    observations_json TEXT NOT NULL DEFAULT '[]',
+                    review_json TEXT,
+                    commit_result_json TEXT,
                     error_json TEXT,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
@@ -146,6 +158,22 @@ class AgentStore:
                     ON agent_approvals(run_id, created_at DESC);
                 """
             )
+            _ensure_column(
+                connection,
+                "agent_runs",
+                "budget_usage_json",
+                "TEXT NOT NULL DEFAULT '{}'",
+            )
+            _ensure_column(connection, "agent_runs", "snapshot_json", "TEXT")
+            _ensure_column(connection, "agent_runs", "goal_plan_json", "TEXT")
+            _ensure_column(
+                connection,
+                "agent_runs",
+                "observations_json",
+                "TEXT NOT NULL DEFAULT '[]'",
+            )
+            _ensure_column(connection, "agent_runs", "review_json", "TEXT")
+            _ensure_column(connection, "agent_runs", "commit_result_json", "TEXT")
 
     def create_session(self, session: AgentSession) -> AgentSession:
         with self._transaction() as connection:
@@ -211,9 +239,11 @@ class AgentStore:
                 """
                 INSERT INTO agent_runs (
                     id, session_id, task_id, goal, status, phase, base_hash,
-                    head_version_id, iteration, budget_json, constraints_json,
+                    head_version_id, iteration, budget_json, budget_usage_json,
+                    constraints_json, snapshot_json, goal_plan_json,
+                    observations_json, review_json, commit_result_json,
                     error_json, created_at, updated_at, finished_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run.id,
@@ -226,7 +256,23 @@ class AgentStore:
                     run.head_version_id,
                     run.iteration,
                     _json_dump(run.budget.model_dump(mode="json")),
+                    _json_dump(run.budget_usage.model_dump(mode="json")),
                     _json_dump(run.constraints.model_dump(mode="json")),
+                    _optional_json_dump(
+                        run.snapshot.model_dump(mode="json")
+                        if run.snapshot is not None
+                        else None
+                    ),
+                    _optional_json_dump(
+                        run.goal_plan.model_dump(mode="json")
+                        if run.goal_plan is not None
+                        else None
+                    ),
+                    _json_dump(
+                        [item.model_dump(mode="json") for item in run.observations]
+                    ),
+                    _optional_json_dump(run.review),
+                    _optional_json_dump(run.commit_result),
                     _json_dump(run.error) if run.error is not None else None,
                     _timestamp(run.created_at),
                     _timestamp(run.updated_at),
@@ -254,8 +300,10 @@ class AgentStore:
                 UPDATE agent_runs
                 SET task_id = ?, goal = ?, status = ?, phase = ?, base_hash = ?,
                     head_version_id = ?, iteration = ?, budget_json = ?,
-                    constraints_json = ?, error_json = ?, updated_at = ?,
-                    finished_at = ?
+                    budget_usage_json = ?, constraints_json = ?,
+                    snapshot_json = ?, goal_plan_json = ?, observations_json = ?,
+                    review_json = ?, commit_result_json = ?, error_json = ?,
+                    updated_at = ?, finished_at = ?
                 WHERE id = ?
                 """,
                 (
@@ -267,7 +315,23 @@ class AgentStore:
                     run.head_version_id,
                     run.iteration,
                     _json_dump(run.budget.model_dump(mode="json")),
+                    _json_dump(run.budget_usage.model_dump(mode="json")),
                     _json_dump(run.constraints.model_dump(mode="json")),
+                    _optional_json_dump(
+                        run.snapshot.model_dump(mode="json")
+                        if run.snapshot is not None
+                        else None
+                    ),
+                    _optional_json_dump(
+                        run.goal_plan.model_dump(mode="json")
+                        if run.goal_plan is not None
+                        else None
+                    ),
+                    _json_dump(
+                        [item.model_dump(mode="json") for item in run.observations]
+                    ),
+                    _optional_json_dump(run.review),
+                    _optional_json_dump(run.commit_result),
                     _json_dump(run.error) if run.error is not None else None,
                     _timestamp(run.updated_at),
                     _timestamp(run.finished_at),
@@ -302,6 +366,46 @@ class AgentStore:
                     (session_id, limit),
                 ).fetchall()
         return [_run_from_row(row) for row in rows]
+
+    def interrupt_active_runs(self) -> int:
+        interrupted = 0
+        with self._transaction(immediate=True) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM agent_runs
+                WHERE phase IN (?, ?, ?, ?, ?, ?, ?)
+                ORDER BY created_at ASC
+                """,
+                (
+                    RunPhase.QUEUED.value,
+                    RunPhase.OBSERVING.value,
+                    RunPhase.PLANNING.value,
+                    RunPhase.ACTING.value,
+                    RunPhase.VALIDATING.value,
+                    RunPhase.TESTING.value,
+                    RunPhase.COMMITTING.value,
+                ),
+            ).fetchall()
+            for row in rows:
+                current = _run_from_row(row)
+                updated = current.transition_to(
+                    RunPhase.INTERRUPTED,
+                    error={
+                        "code": "AGENT_RUN_INTERRUPTED",
+                        "message": "Service restarted before the Agent Run completed.",
+                    },
+                )
+                _update_run_row(connection, updated)
+                _append_event_in_connection(
+                    connection,
+                    run_id=updated.id,
+                    event_type="agent.paused",
+                    phase=updated.phase.value,
+                    message="Agent Run was interrupted by a service restart.",
+                    data={"reason": "service_restart"},
+                )
+                interrupted += 1
+        return interrupted
 
     def append_event(
         self,
@@ -379,28 +483,111 @@ class AgentStore:
 
     def create_workspace_version(self, version: WorkspaceVersion) -> WorkspaceVersion:
         with self._transaction() as connection:
-            connection.execute(
+            _insert_workspace_version(connection, version)
+        return self.get_workspace_version(version.id)
+
+    def initialize_run_workspace(
+        self,
+        run: AgentRun,
+        version: WorkspaceVersion,
+    ) -> tuple[AgentRun, WorkspaceVersion]:
+        if run.id != version.run_id:
+            raise ValueError("Workspace v0 must belong to the initialized Agent Run.")
+        if version.parent_id is not None or version.patch is not None:
+            raise ValueError("Workspace v0 cannot have a parent or Patch.")
+        if run.head_version_id != version.id:
+            raise ValueError("Initialized Agent Run head must reference Workspace v0.")
+        with self._transaction(immediate=True) as connection:
+            current_row = connection.execute(
+                "SELECT * FROM agent_runs WHERE id = ?",
+                (run.id,),
+            ).fetchone()
+            if current_row is None:
+                raise AgentRecordNotFound(run.id)
+            current = _run_from_row(current_row)
+            if current.head_version_id is not None:
+                raise AgentStoreConflict("Agent Run Workspace is already initialized.")
+            validate_run_transition(current.phase, run.phase)
+            _insert_workspace_version(connection, version)
+            _update_run_row(connection, run)
+        return self.get_run(run.id), self.get_workspace_version(version.id)
+
+    def commit_workspace_version(
+        self,
+        version: WorkspaceVersion,
+        *,
+        expected_head_id: str,
+        event_message: str,
+        event_data: dict[str, Any] | None = None,
+    ) -> tuple[AgentRun, WorkspaceVersion, AgentEvent]:
+        if version.parent_id != expected_head_id:
+            raise ValueError("Workspace version parent must match expected_head_id.")
+        with self._transaction(immediate=True) as connection:
+            run_row = connection.execute(
+                "SELECT * FROM agent_runs WHERE id = ?",
+                (version.run_id,),
+            ).fetchone()
+            if run_row is None:
+                raise AgentRecordNotFound(version.run_id)
+            run = _run_from_row(run_row)
+            if run.terminal:
+                raise AgentStoreConflict(
+                    "Terminal Agent Runs cannot create new Workspace versions."
+                )
+            if run.phase == RunPhase.COMMITTING:
+                raise AgentStoreConflict(
+                    "Workspace cannot change while a Dify Commit is in progress."
+                )
+            if run.head_version_id != expected_head_id:
+                raise AgentStoreConflict(
+                    "Workspace head changed before the Patch transaction committed."
+                )
+            if run.base_hash != version.base_hash:
+                raise AgentStoreConflict(
+                    "Workspace base Hash changed before the Patch transaction committed."
+                )
+            _insert_workspace_version(connection, version)
+            updated_run = AgentRun.model_validate(
+                {
+                    **run.model_dump(),
+                    "head_version_id": version.id,
+                    "review": None,
+                    "updated_at": version.created_at,
+                }
+            )
+            _update_run_row(connection, updated_run)
+            invalidated = connection.execute(
                 """
-                INSERT INTO agent_workspace_versions (
-                    id, run_id, parent_id, base_hash, patch_json,
-                    reverse_patch_json, snapshot_json, validation_json,
-                    test_result_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                UPDATE agent_approvals
+                SET status = ?, resolved_at = ?
+                WHERE run_id = ? AND status IN (?, ?)
                 """,
                 (
-                    version.id,
-                    version.run_id,
-                    version.parent_id,
-                    version.base_hash,
-                    _optional_json_dump(version.patch),
-                    _optional_json_dump(version.reverse_patch),
-                    _json_dump(version.snapshot),
-                    _optional_json_dump(version.validation),
-                    _optional_json_dump(version.test_result),
+                    ApprovalStatus.EXPIRED.value,
                     _timestamp(version.created_at),
+                    version.run_id,
+                    ApprovalStatus.PENDING.value,
+                    ApprovalStatus.APPROVED.value,
                 ),
             )
-        return self.get_workspace_version(version.id)
+            event = _append_event_in_connection(
+                connection,
+                run_id=version.run_id,
+                event_type="workspace.version.created",
+                phase=run.phase.value,
+                message=event_message,
+                data={
+                    "workspace_version_id": version.id,
+                    "parent_id": expected_head_id,
+                    "invalidated_approval_count": invalidated.rowcount,
+                    **(event_data or {}),
+                },
+            )
+        return (
+            self.get_run(version.run_id),
+            self.get_workspace_version(version.id),
+            event,
+        )
 
     def get_workspace_version(self, version_id: str) -> WorkspaceVersion:
         with self._reader() as connection:
@@ -454,6 +641,15 @@ class AgentStore:
                 (run_id, limit),
             ).fetchall()
         return [_workspace_version_from_row(row) for row in rows]
+
+    def get_workspace_head(self, run_id: str) -> WorkspaceVersion:
+        run = self.get_run(run_id)
+        if run.head_version_id is None:
+            raise AgentRecordNotFound(f"{run_id}:workspace-head")
+        version = self.get_workspace_version(run.head_version_id)
+        if version.run_id != run.id:
+            raise AgentStoreConflict("Workspace head does not belong to the Agent Run.")
+        return version
 
     def create_approval(self, approval: AgentApproval) -> AgentApproval:
         with self._transaction() as connection:
@@ -530,6 +726,48 @@ class AgentStore:
             ).fetchall()
         return [_approval_from_row(row) for row in rows]
 
+    def finish_commit(
+        self,
+        *,
+        run: AgentRun,
+        approval: AgentApproval,
+        event_message: str,
+        event_data: dict[str, Any],
+    ) -> tuple[AgentRun, AgentApproval, AgentEvent]:
+        if approval.status != ApprovalStatus.CONSUMED:
+            raise ValueError("A successful Commit must consume its Approval.")
+        with self._transaction(immediate=True) as connection:
+            current_run_row = connection.execute(
+                "SELECT * FROM agent_runs WHERE id = ?",
+                (run.id,),
+            ).fetchone()
+            current_approval_row = connection.execute(
+                "SELECT * FROM agent_approvals WHERE id = ?",
+                (approval.id,),
+            ).fetchone()
+            if current_run_row is None:
+                raise AgentRecordNotFound(run.id)
+            if current_approval_row is None:
+                raise AgentRecordNotFound(approval.id)
+            current_run = _run_from_row(current_run_row)
+            current_approval = _approval_from_row(current_approval_row)
+            validate_run_transition(current_run.phase, run.phase)
+            if current_approval.status != ApprovalStatus.APPROVED:
+                raise AgentStoreConflict("Commit Approval is no longer approved.")
+            if current_approval.workspace_version_id != run.head_version_id:
+                raise AgentStoreConflict("Commit Approval does not match the Workspace head.")
+            _update_run_row(connection, run)
+            _update_approval_row(connection, approval)
+            event = _append_event_in_connection(
+                connection,
+                run_id=run.id,
+                event_type="commit.completed",
+                phase=run.phase.value,
+                message=event_message,
+                data=event_data,
+            )
+        return self.get_run(run.id), self.get_approval(approval.id), event
+
 
 def _session_from_row(row: sqlite3.Row) -> AgentSession:
     return AgentSession.model_validate(
@@ -557,7 +795,13 @@ def _run_from_row(row: sqlite3.Row) -> AgentRun:
             "head_version_id": row["head_version_id"],
             "iteration": row["iteration"],
             "budget": _json_load(row["budget_json"]),
+            "budget_usage": _json_load(row["budget_usage_json"]) or {},
             "constraints": _json_load(row["constraints_json"]),
+            "snapshot": _json_load(row["snapshot_json"]),
+            "goal_plan": _json_load(row["goal_plan_json"]),
+            "observations": _json_load(row["observations_json"]) or [],
+            "review": _json_load(row["review_json"]),
+            "commit_result": _json_load(row["commit_result_json"]),
             "error": _json_load(row["error_json"]),
             "created_at": _datetime(row["created_at"]),
             "updated_at": _datetime(row["updated_at"]),
@@ -626,3 +870,156 @@ def _datetime(value: float | None) -> datetime | None:
 def _validate_limit(limit: int, *, maximum: int = 1_000) -> None:
     if limit < 1 or limit > maximum:
         raise ValueError(f"limit must be between 1 and {maximum}.")
+
+
+def _ensure_column(
+    connection: sqlite3.Connection,
+    table: str,
+    column: str,
+    declaration: str,
+) -> None:
+    columns = {
+        str(row["name"])
+        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    if column not in columns:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+
+def _insert_workspace_version(
+    connection: sqlite3.Connection,
+    version: WorkspaceVersion,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO agent_workspace_versions (
+            id, run_id, parent_id, base_hash, patch_json,
+            reverse_patch_json, snapshot_json, validation_json,
+            test_result_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            version.id,
+            version.run_id,
+            version.parent_id,
+            version.base_hash,
+            _optional_json_dump(version.patch),
+            _optional_json_dump(version.reverse_patch),
+            _json_dump(version.snapshot),
+            _optional_json_dump(version.validation),
+            _optional_json_dump(version.test_result),
+            _timestamp(version.created_at),
+        ),
+    )
+
+
+def _update_run_row(connection: sqlite3.Connection, run: AgentRun) -> None:
+    cursor = connection.execute(
+        """
+        UPDATE agent_runs
+        SET task_id = ?, goal = ?, status = ?, phase = ?, base_hash = ?,
+            head_version_id = ?, iteration = ?, budget_json = ?,
+            budget_usage_json = ?, constraints_json = ?, snapshot_json = ?,
+            goal_plan_json = ?, observations_json = ?, review_json = ?,
+            commit_result_json = ?, error_json = ?, updated_at = ?,
+            finished_at = ?
+        WHERE id = ?
+        """,
+        (
+            run.task_id,
+            run.goal,
+            run.status.value,
+            run.phase.value,
+            run.base_hash,
+            run.head_version_id,
+            run.iteration,
+            _json_dump(run.budget.model_dump(mode="json")),
+            _json_dump(run.budget_usage.model_dump(mode="json")),
+            _json_dump(run.constraints.model_dump(mode="json")),
+            _optional_json_dump(
+                run.snapshot.model_dump(mode="json")
+                if run.snapshot is not None
+                else None
+            ),
+            _optional_json_dump(
+                run.goal_plan.model_dump(mode="json")
+                if run.goal_plan is not None
+                else None
+            ),
+            _json_dump([item.model_dump(mode="json") for item in run.observations]),
+            _optional_json_dump(run.review),
+            _optional_json_dump(run.commit_result),
+            _optional_json_dump(run.error),
+            _timestamp(run.updated_at),
+            _timestamp(run.finished_at),
+            run.id,
+        ),
+    )
+    if cursor.rowcount == 0:
+        raise AgentRecordNotFound(run.id)
+
+
+def _update_approval_row(
+    connection: sqlite3.Connection,
+    approval: AgentApproval,
+) -> None:
+    cursor = connection.execute(
+        """
+        UPDATE agent_approvals
+        SET workspace_version_id = ?, action = ?, scope_json = ?,
+            status = ?, expires_at = ?, resolved_at = ?
+        WHERE id = ?
+        """,
+        (
+            approval.workspace_version_id,
+            approval.action,
+            _json_dump(approval.scope),
+            approval.status.value,
+            _timestamp(approval.expires_at),
+            _timestamp(approval.resolved_at),
+            approval.id,
+        ),
+    )
+    if cursor.rowcount == 0:
+        raise AgentRecordNotFound(approval.id)
+
+
+def _append_event_in_connection(
+    connection: sqlite3.Connection,
+    *,
+    run_id: str,
+    event_type: AgentEventType,
+    phase: str,
+    message: str,
+    data: dict[str, Any] | None = None,
+) -> AgentEvent:
+    row = connection.execute(
+        "SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM agent_events WHERE run_id = ?",
+        (run_id,),
+    ).fetchone()
+    event = AgentEvent(
+        seq=int(row["next_seq"]),
+        run_id=run_id,
+        type=event_type,
+        phase=phase,
+        message=message,
+        data=redact_sensitive_data(data or {}),
+    )
+    payload = redact_sensitive_data(event.model_dump(mode="json"))
+    persisted = AgentEvent.model_validate(payload)
+    connection.execute(
+        """
+        INSERT INTO agent_events (
+            id, run_id, seq, event_type, payload_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            persisted.id,
+            persisted.run_id,
+            persisted.seq,
+            persisted.type,
+            _json_dump(persisted.model_dump(mode="json")),
+            _timestamp(persisted.timestamp),
+        ),
+    )
+    return persisted

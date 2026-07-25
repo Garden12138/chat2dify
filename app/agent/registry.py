@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import perf_counter
 from typing import Any, Callable, Literal, Protocol, TypeVar
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from app.agent.trace import redact_sensitive_data
 
 
 class ToolSpec(BaseModel):
@@ -32,6 +35,9 @@ class ToolResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     call_id: str = Field(default_factory=lambda: str(uuid4()))
+    tool_name: str | None = None
+    tool_version: str | None = None
+    duration_ms: int = Field(default=0, ge=0)
     ok: bool
     observation: dict[str, Any] = Field(default_factory=dict)
     error: ToolError | None = None
@@ -52,6 +58,21 @@ class ToolExecutionContext(BaseModel):
 
 InputModelT = TypeVar("InputModelT", bound=BaseModel)
 OutputModelT = TypeVar("OutputModelT", bound=BaseModel)
+
+
+class ToolPublicError(RuntimeError):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        details: list[dict[str, Any]] | None = None,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = details or []
+        self.retryable = retryable
 
 
 @dataclass(frozen=True)
@@ -100,6 +121,13 @@ class ToolRegistry:
     def specs(self) -> list[ToolSpec]:
         return [self._tools[name].spec for name in sorted(self._tools)]
 
+    def visible_specs(self) -> list[ToolSpec]:
+        return [
+            spec
+            for spec in self.specs()
+            if spec.side_effect != "dify_write"
+        ]
+
     def get(self, name: str) -> RegisteredTool | None:
         return self._tools.get(name)
 
@@ -112,6 +140,7 @@ class ToolRegistry:
         run_id: str | None = None,
         call_id: str | None = None,
     ) -> ToolResult:
+        started = perf_counter()
         resolved_call_id = call_id or str(uuid4())
         registered = self._tools.get(name)
         if registered is None:
@@ -119,6 +148,7 @@ class ToolRegistry:
                 resolved_call_id,
                 code="TOOL_UNKNOWN",
                 message=f"Unknown tool: {name}",
+                duration_ms=_duration_ms(started),
             )
         try:
             arguments = registered.input_model.model_validate(payload)
@@ -128,6 +158,9 @@ class ToolRegistry:
                 code="TOOL_INPUT_INVALID",
                 message=f"Input validation failed for tool {name}.",
                 details=exc.errors(include_url=False, include_input=False),
+                tool_name=name,
+                tool_version=registered.spec.version,
+                duration_ms=_duration_ms(started),
             )
         context = ToolExecutionContext(
             session_id=session_id,
@@ -136,12 +169,26 @@ class ToolRegistry:
         )
         try:
             raw_output = registered.executor(arguments, context)
+        except ToolPublicError as exc:
+            return _tool_failure(
+                resolved_call_id,
+                code=exc.code,
+                message=str(exc),
+                details=redact_sensitive_data(exc.details),
+                retryable=exc.retryable,
+                tool_name=name,
+                tool_version=registered.spec.version,
+                duration_ms=_duration_ms(started),
+            )
         except Exception as exc:  # noqa: BLE001 - registry returns a stable public failure.
             return _tool_failure(
                 resolved_call_id,
                 code="TOOL_EXECUTION_FAILED",
                 message=f"Tool {name} failed with {exc.__class__.__name__}.",
                 retryable=True,
+                tool_name=name,
+                tool_version=registered.spec.version,
+                duration_ms=_duration_ms(started),
             )
         try:
             output = registered.output_model.model_validate(raw_output)
@@ -151,11 +198,23 @@ class ToolRegistry:
                 code="TOOL_OUTPUT_INVALID",
                 message=f"Output validation failed for tool {name}.",
                 details=exc.errors(include_url=False, include_input=False),
+                tool_name=name,
+                tool_version=registered.spec.version,
+                duration_ms=_duration_ms(started),
             )
+        observation = redact_sensitive_data(output.model_dump(mode="json"))
         return ToolResult(
             call_id=resolved_call_id,
+            tool_name=name,
+            tool_version=registered.spec.version,
+            duration_ms=_duration_ms(started),
             ok=True,
-            observation=output.model_dump(mode="json"),
+            observation=observation,
+            workspace_version=(
+                str(observation["workspace_version"])
+                if observation.get("workspace_version")
+                else None
+            ),
         )
 
 
@@ -166,9 +225,15 @@ def _tool_failure(
     message: str,
     details: list[dict[str, Any]] | None = None,
     retryable: bool = False,
+    tool_name: str | None = None,
+    tool_version: str | None = None,
+    duration_ms: int = 0,
 ) -> ToolResult:
     return ToolResult(
         call_id=call_id,
+        tool_name=tool_name,
+        tool_version=tool_version,
+        duration_ms=duration_ms,
         ok=False,
         error=ToolError(
             code=code,
@@ -177,3 +242,7 @@ def _tool_failure(
             retryable=retryable,
         ),
     )
+
+
+def _duration_ms(started: float) -> int:
+    return max(0, round((perf_counter() - started) * 1_000))

@@ -81,7 +81,9 @@ def redact_sensitive_data(value: Any) -> Any:
         return [redact_sensitive_data(item) for item in value]
     if isinstance(value, str):
         return _BEARER_PATTERN.sub(f"Bearer {REDACTED}", value)
-    return value
+    if value is None or isinstance(value, (int, float, bool)):
+        return value
+    return str(value)
 
 
 def public_event_payload(event: AgentEvent) -> dict[str, Any]:

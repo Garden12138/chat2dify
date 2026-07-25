@@ -525,6 +525,9 @@ def _canonical_prompt_text(item: dict[str, Any], jinja_variables: dict[str, list
 
 
 def _merge_existing_layout(graph: dict[str, Any], base_graph: dict[str, Any]) -> None:
+    for key, value in base_graph.items():
+        if key not in {"nodes", "edges"}:
+            graph[key] = deepcopy(value)
     base_nodes = {
         str(node.get("id")): node
         for node in base_graph.get("nodes", [])
@@ -538,6 +541,18 @@ def _merge_existing_layout(graph: dict[str, Any], base_graph: dict[str, Any]) ->
         node_id = str(node.get("id", ""))
         base_node = base_nodes.get(node_id)
         if base_node:
+            compiled_data = deepcopy(node.get("data") or {})
+            preserved = deepcopy(base_node)
+            preserved.update(deepcopy(node))
+            base_data = (
+                deepcopy(base_node.get("data"))
+                if isinstance(base_node.get("data"), dict)
+                else {}
+            )
+            base_data.update(compiled_data)
+            preserved["data"] = base_data
+            node.clear()
+            node.update(preserved)
             for key in LAYOUT_KEYS:
                 if key in base_node:
                     node[key] = deepcopy(base_node[key])
@@ -549,7 +564,38 @@ def _merge_existing_layout(graph: dict[str, Any], base_graph: dict[str, Any]) ->
             node["positionAbsolute"] = deepcopy(node["position"])
         if isinstance(node.get("position"), dict):
             positions[node_id] = {"x": float(node["position"].get("x", 0)), "y": float(node["position"].get("y", 0))}
+    _merge_existing_edge_metadata(graph, base_graph)
     _repair_overlapping_top_level_layout(graph)
+
+
+def _merge_existing_edge_metadata(
+    graph: dict[str, Any],
+    base_graph: dict[str, Any],
+) -> None:
+    base_edges = {
+        _raw_edge_key(edge): edge
+        for edge in base_graph.get("edges", [])
+        if isinstance(edge, dict)
+    }
+    for edge in graph.get("edges", []):
+        if not isinstance(edge, dict):
+            continue
+        base_edge = base_edges.get(_raw_edge_key(edge))
+        if base_edge is None:
+            continue
+        preserved = deepcopy(base_edge)
+        preserved.update(deepcopy(edge))
+        edge.clear()
+        edge.update(preserved)
+
+
+def _raw_edge_key(edge: dict[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        str(edge.get("source") or ""),
+        str(edge.get("sourceHandle") or edge.get("source_handle") or "source"),
+        str(edge.get("target") or ""),
+        str(edge.get("targetHandle") or edge.get("target_handle") or "target"),
+    )
 
 
 def _repair_overlapping_top_level_layout(graph: dict[str, Any]) -> None:

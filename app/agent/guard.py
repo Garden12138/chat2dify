@@ -78,6 +78,28 @@ def guard_plan_change(before: WorkflowPlan, after: WorkflowPlan, changes: list[d
                 details={"before": sorted(start_before), "after": sorted(start_after)},
             )
         )
+    start_contract_changes = [
+        {
+            "target": node_id,
+            "before": _start_input_contract(before_nodes[node_id].params),
+            "after": _start_input_contract(after_nodes[node_id].params),
+        }
+        for node_id in sorted(start_before & start_after)
+        if _start_input_contract(before_nodes[node_id].params)
+        != _start_input_contract(after_nodes[node_id].params)
+    ]
+    if start_contract_changes:
+        issues.append(
+            ChangeGuardIssue(
+                code="PLAN_CHANGE_START_CONTRACT_CHANGED",
+                message="修改改变了 start 节点输入参数，可能破坏调用方输入契约。",
+                severity="error",
+                suggestion="确认输入契约迁移后，使用独立的破坏性修改审批。",
+                details={
+                    "changes": start_contract_changes
+                },
+            )
+        )
 
     removed_terminal_ids = [
         node_id
@@ -214,3 +236,18 @@ def guard_plan_change(before: WorkflowPlan, after: WorkflowPlan, changes: list[d
     medium_risk = any(issue.severity == "warning" for issue in issues)
     risk: RiskLevel = "high" if high_risk else "medium" if medium_risk else "low"
     return ChangeGuardResult(ok=not high_risk, risk=risk, no_op=False, issues=issues)
+
+
+def _start_input_contract(params: dict[str, Any]) -> list[tuple[str, str, bool]]:
+    variables = params.get("variables")
+    if not isinstance(variables, list):
+        return []
+    return [
+        (
+            str(item.get("name") or ""),
+            str(item.get("type") or "paragraph"),
+            bool(item.get("required", True)),
+        )
+        for item in variables
+        if isinstance(item, dict)
+    ]
