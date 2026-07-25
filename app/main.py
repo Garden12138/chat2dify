@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from app import __version__
+from app.agent.store import AgentStore
 from app.agent.diff import diff_plans
 from app.agent.editor import WorkflowEditPlanner
 from app.agent.explainer import explain_plan
@@ -25,6 +26,7 @@ from app.assistant import (
     assistant_task_meta,
     plan_assistant_action,
 )
+from app.api.agent_v4 import router as agent_v4_router
 from app.compiler.agent import (
     agent_app_plan_payload,
     agent_tool_configs,
@@ -87,6 +89,10 @@ async def lifespan(application: FastAPI):
     read_dify_version_info(settings.dify_source_path)
     task_manager = TaskManager(TaskRepository(settings.task_db_path), workers=settings.task_workers)
     application.state.task_manager = task_manager
+    application.state.agent_v4_enabled = settings.agent_v4_enabled
+    application.state.agent_store = (
+        AgentStore(settings.task_db_path) if settings.agent_v4_enabled else None
+    )
     try:
         yield
     finally:
@@ -94,6 +100,7 @@ async def lifespan(application: FastAPI):
 
 
 app = FastAPI(title="chat2dify", version=__version__, lifespan=lifespan)
+app.include_router(agent_v4_router)
 
 
 @app.middleware("http")
@@ -158,6 +165,9 @@ def health() -> dict:
             "provider": planner_runtime.provider,
             "model": planner_runtime.model,
             "configured": planner_runtime.configured,
+        },
+        "features": {
+            "agent_v4": settings.agent_v4_enabled,
         },
         "dify": {
             "source_dir": settings.dify_source_dir,

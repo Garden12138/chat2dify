@@ -70,6 +70,55 @@ def test_background_task_settings_resolve_from_project_root(tmp_path: Path) -> N
     assert settings.task_workers == 3
 
 
+@pytest.mark.parametrize("value", ["true", "TRUE", "1", "yes", "on"])
+def test_agent_v4_feature_flag_true_values(tmp_path: Path, value: str) -> None:
+    settings = Settings.from_env(
+        {
+            "DIFY_SOURCE_DIR": "../dify",
+            "CHAT2DIFY_AGENT_V4_ENABLED": value,
+        },
+        project_root=tmp_path,
+        validate_dify=False,
+    )
+
+    assert settings.agent_v4_enabled is True
+
+
+@pytest.mark.parametrize("value", ["false", "FALSE", "0", "no", "off"])
+def test_agent_v4_feature_flag_defaults_off_and_parses_false(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    default_settings = Settings.from_env(
+        {"DIFY_SOURCE_DIR": "../dify"},
+        project_root=tmp_path,
+        validate_dify=False,
+    )
+    settings = Settings.from_env(
+        {
+            "DIFY_SOURCE_DIR": "../dify",
+            "CHAT2DIFY_AGENT_V4_ENABLED": value,
+        },
+        project_root=tmp_path,
+        validate_dify=False,
+    )
+
+    assert default_settings.agent_v4_enabled is False
+    assert settings.agent_v4_enabled is False
+
+
+def test_agent_v4_feature_flag_rejects_invalid_values(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="CHAT2DIFY_AGENT_V4_ENABLED must be true or false"):
+        Settings.from_env(
+            {
+                "DIFY_SOURCE_DIR": "../dify",
+                "CHAT2DIFY_AGENT_V4_ENABLED": "sometimes",
+            },
+            project_root=tmp_path,
+            validate_dify=False,
+        )
+
+
 def test_public_base_path_is_normalized(tmp_path: Path) -> None:
     settings = Settings.from_env(
         {

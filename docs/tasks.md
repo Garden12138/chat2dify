@@ -1,7 +1,7 @@
 # Chat2Dify v4.0.0 Development Tasks
 
 > - Branch: `v4.0.0`
-> - Overall status: `pending`
+> - Overall status: `in_progress`
 > - Architecture:
 >   [v4 Agent architecture and implementation plan](architecture/v4-agent-architecture-and-implementation-plan.md)
 > - Agent instructions: [`AGENTS.md`](../AGENTS.md)
@@ -35,7 +35,7 @@ Rules:
 
 | Phase | Goal | Dependencies | Status |
 | --- | --- | --- | --- |
-| Phase 0 | Architecture foundation | None | `pending` |
+| Phase 0 | Architecture foundation | None | `completed` |
 | Phase 1A | Existing-app modify vertical slice | Phase 0 | `pending` |
 | Phase 1B | New-app create adapter | Phase 1A | `pending` |
 | Phase 2 | Canvas context and Agent Workbench | Phase 1 | `pending` |
@@ -101,7 +101,7 @@ Phase 0
 
 ## 4. Phase 0 — Architecture foundation
 
-Status: `pending`
+Status: `completed`
 
 Dependencies: none
 
@@ -110,7 +110,7 @@ exist behind a disabled-by-default feature flag without changing v3 behavior.
 
 ### Tasks
 
-- [ ] **P0-01 — Feature flag and configuration**
+- [x] **P0-01 — Feature flag and configuration**
   - Add `CHAT2DIFY_AGENT_V4_ENABLED`, default `false`.
   - Add a typed `Settings` field and environment parsing.
   - Expose only non-sensitive enabled/disabled status in health or manifest
@@ -118,14 +118,14 @@ exist behind a disabled-by-default feature flag without changing v3 behavior.
   - Document the flag in `.env.example` and deployment configuration.
   - Test default, true/false parsing, and invalid values.
 
-- [ ] **P0-02 — Agent domain models**
+- [x] **P0-02 — Agent domain models**
   - Add Session, Run, Run Phase, Goal Plan, Goal Step, Decision,
     Observation, Budget, and Run Constraint models.
   - Limit model decisions to `tool_call`, `ask_user`, and `finish`.
   - Define terminal, paused, and recoverable states.
   - Validate illegal state transitions deterministically.
 
-- [ ] **P0-03 — Agent persistence schema**
+- [x] **P0-03 — Agent persistence schema**
   - Add `agent_sessions`, `agent_runs`, `agent_events`,
     `agent_workspace_versions`, and `agent_approvals`.
   - Use the existing task SQLite database with separate tables.
@@ -133,21 +133,21 @@ exist behind a disabled-by-default feature flag without changing v3 behavior.
   - Add repository methods for create/get/update/list operations.
   - Add schema initialization and repeat-initialization tests.
 
-- [ ] **P0-04 — Event and trace foundation**
+- [x] **P0-04 — Event and trace foundation**
   - Define the public Agent Event envelope.
   - Allocate strictly increasing `seq` values per Run.
   - Append events transactionally and read them after a sequence/cursor.
   - Redact sensitive keys before persistence.
   - Define the initial event-type registry.
 
-- [ ] **P0-05 — Typed Tool Registry**
+- [x] **P0-05 — Typed Tool Registry**
   - Add `ToolSpec`, `ToolResult`, `ToolError`, and executor contracts.
   - Register tools explicitly by stable name and version.
   - Validate input/output with Pydantic.
   - Record side-effect and approval metadata.
   - Reject unknown tools and invalid payloads with stable error codes.
 
-- [ ] **P0-06 — Node Capability Catalog MVP**
+- [x] **P0-06 — Node Capability Catalog MVP**
   - Define `NodeDefinition`.
   - Add static definitions for `llm`, `if-else`, `end`, and `answer`.
   - Reuse existing node output metadata where possible.
@@ -155,7 +155,7 @@ exist behind a disabled-by-default feature flag without changing v3 behavior.
     classification.
   - Add search and exact-lookup tests.
 
-- [ ] **P0-07 — Patch IR schema**
+- [x] **P0-07 — Patch IR schema**
   - Add explicit discriminated operations for `node.add`, `node.update`,
     `edge.add`, and `edge.remove`.
   - Add `PatchDocument` with workspace version, expected base Hash,
@@ -163,7 +163,7 @@ exist behind a disabled-by-default feature flag without changing v3 behavior.
   - Support `temp_ref` in schema without implementing arbitrary JSON Patch.
   - Reject unknown operations and dangerous/unbounded payload shapes.
 
-- [ ] **P0-08 — v4 API and SSE skeleton**
+- [x] **P0-08 — v4 API and SSE skeleton**
   - Add `app/api/agent_v4.py`.
   - Register `/api/v4/agent` routes through a clean router boundary.
   - Add Session/Run/Event response schemas.
@@ -172,7 +172,7 @@ exist behind a disabled-by-default feature flag without changing v3 behavior.
     Agent Runtime.
   - Keep polling-readable Run state as a fallback.
 
-- [ ] **P0-09 — Foundation tests and documentation**
+- [x] **P0-09 — Foundation tests and documentation**
   - Add focused tests for P0 domain, store, trace, registry, catalog, patch
     schema, flag, API, and SSE behavior.
   - Confirm v3 endpoints and task persistence still work.
@@ -180,23 +180,41 @@ exist behind a disabled-by-default feature flag without changing v3 behavior.
 
 ### Acceptance criteria
 
-- [ ] Feature flag defaults to off and leaves v3 behavior unchanged.
-- [ ] Reinitializing the SQLite store is safe and does not lose v3 tasks.
-- [ ] Run events survive repository/service reconstruction and preserve order.
-- [ ] Sensitive test values do not appear in stored or streamed event payloads.
-- [ ] Unknown tools and invalid Patch IR are rejected before execution.
-- [ ] SSE reconnect can resume after a known event sequence without duplicates.
-- [ ] Targeted Phase 0 tests pass.
-- [ ] Full existing test suite passes.
-- [ ] `git diff --check` passes.
+- [x] Feature flag defaults to off and leaves v3 behavior unchanged.
+- [x] Reinitializing the SQLite store is safe and does not lose v3 tasks.
+- [x] Run events survive repository/service reconstruction and preserve order.
+- [x] Sensitive test values do not appear in stored or streamed event payloads.
+- [x] Unknown tools and invalid Patch IR are rejected before execution.
+- [x] SSE reconnect can resume after a known event sequence without duplicates.
+- [x] Targeted Phase 0 tests pass.
+- [x] Full existing test suite passes.
+- [x] `git diff --check` passes.
 
 ### Completion record
 
-- Started:
-- Completed:
+- Started: 2026-07-25
+- Completed: 2026-07-25
 - Tests:
+  - Phase 0 plus directly affected v3 tests: `50 passed`.
+  - Full repository suite: `386 passed`.
+  - `git diff --check`: passed.
+  - Both pytest runs reported one upstream Starlette deprecation warning for
+    `fastapi.testclient`; no test failures or unhandled warnings occurred.
 - Decisions/deviations:
+  - The v4 store reuses `CHAT2DIFY_TASK_DB` but creates only separately named
+    `agent_*` tables. Startup initializes those tables only when the v4 feature
+    flag is enabled; repeat initialization and coexistence with
+    `workflow_tasks` are tested.
+  - The Phase 0 router is registered as a clean boundary but returns a stable
+    `AGENT_V4_DISABLED` response while the flag is off. Its current surface is
+    intentionally read-only Session/Run polling plus resumable SSE; no Runtime,
+    Patch execution, approval resolution, or Dify write path was started.
+  - Full-suite verification used a temporary minimal Dify DSL-version fixture
+    because the local checkout has no adjacent Dify source tree. This changed
+    no repository files and does not alter production behavior.
 - Remaining limitations:
+  - Workspace mutation, Runtime execution, review/approval behavior, and Dify
+    Commit remain Phase 1 scope by design.
 
 ## 5. Phase 1A — Existing-app modify vertical slice
 
@@ -737,4 +755,5 @@ the plan.
 | --- | --- | --- | --- | --- |
 | 2026-07-25 | Planning | Use one Builder Agent, Typed Tools, versioned Workspace, Patch IR, and approval-bound Commit | Preserve v3 safety while adding multi-step autonomy | Architecture document |
 | 2026-07-25 | Planning | Implement existing-app modification before new-app creation | Validates Hash, diff, guard, approval, and conflict boundaries first | Architecture document |
-
+| 2026-07-25 | Phase 0 | Gate the registered v4 router and initialize its store only when `CHAT2DIFY_AGENT_V4_ENABLED` is true | Keeps v3 as the effective default path while making flag-on startup deterministic | `app/main.py`, `app/api/agent_v4.py` |
+| 2026-07-25 | Phase 0 | Keep the Phase 0 API read-only and limit it to persisted Session/Run reads plus resumable SSE | Establishes API and event primitives without starting Phase 1 Runtime or mutation behavior | `app/api/agent_v4.py` |

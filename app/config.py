@@ -83,6 +83,7 @@ class Settings:
     openrouter_model: str
     openrouter_max_tokens: int
     chat2dify_public_base_path: str
+    agent_v4_enabled: bool
     task_db_path: Path
     task_workers: int
 
@@ -177,6 +178,10 @@ class Settings:
             ),
             chat2dify_public_base_path=normalize_public_base_path(
                 source.get("CHAT2DIFY_PUBLIC_BASE_PATH", "")
+            ),
+            agent_v4_enabled=_boolean(
+                source.get("CHAT2DIFY_AGENT_V4_ENABLED", "false"),
+                name="CHAT2DIFY_AGENT_V4_ENABLED",
             ),
             task_db_path=resolve_path_from_project_root(
                 source.get("CHAT2DIFY_TASK_DB", "data/tasks.sqlite3"),

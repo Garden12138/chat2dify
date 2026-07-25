@@ -13,6 +13,7 @@ services:
     restart: always
     environment:
       CHAT2DIFY_PUBLIC_BASE_PATH: ${CHAT2DIFY_PUBLIC_BASE_PATH:-/chat2dify}
+      CHAT2DIFY_AGENT_V4_ENABLED: ${CHAT2DIFY_AGENT_V4_ENABLED:-false}
       CHAT2DIFY_TASK_DB: /app/data/tasks.sqlite3
       CHAT2DIFY_TASK_WORKERS: ${CHAT2DIFY_TASK_WORKERS:-2}
       DIFY_SOURCE_DIR: /dify

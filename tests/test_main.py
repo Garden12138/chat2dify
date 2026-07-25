@@ -126,6 +126,7 @@ def test_health_returns_configured_dataset_count(monkeypatch) -> None:
     assert data["dify"]["configured_dataset_count"] == 2
     assert data["dify"]["default_model"] == {"provider": "langgenius/tongyi/tongyi", "name": "qwen3.5-plus"}
     assert data["planner"] == {"provider": "openai", "model": "gpt-4o-mini", "configured": True}
+    assert data["features"] == {"agent_v4": False}
 
 
 def test_panel_manifest_uses_public_base_path(monkeypatch) -> None:
