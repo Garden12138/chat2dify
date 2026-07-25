@@ -74,6 +74,8 @@ chat2dify Dify 风格对话工作台，对话中完成创建、运行、修改�
 
 准备中的 v4.0.0 Builder Agent 架构与分阶段落地计划见
 [v4.0.0 AI Chat Agent 架构升级与实现方案](docs/architecture/v4-agent-architecture-and-implementation-plan.md)。
+阶段任务、验收标准和可复制的 `/goal` 指令见
+[v4.0.0 开发任务清单](docs/tasks.md)。
 
 ## 能做什么
 
