@@ -18,7 +18,10 @@
     "status": "failed",
     "reviewable": false,
     "final_valid": false,
-    "changes": [],
+    "changes": [
+      "input.file.added",
+      "node.document-extractor.added"
+    ],
     "unrelated_total": 10,
     "unrelated_preserved": 10,
     "unapproved_writes": 0,

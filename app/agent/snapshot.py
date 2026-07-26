@@ -19,6 +19,16 @@ class SnapshotClient(Protocol):
 
     def get_draft_workflow(self, app_id: str) -> DifyDraftWorkflow: ...
 
+    def list_datasets(self, **kwargs): ...
+
+    def list_models(self, **kwargs): ...
+
+    def list_tools(self, **kwargs): ...
+
+    def list_agent_strategies(self, **kwargs): ...
+
+    def list_trigger_providers(self, **kwargs): ...
+
 
 class WorkflowSnapshotError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
@@ -51,6 +61,7 @@ class WorkflowSnapshotService:
         with self.client_factory() as client:
             app = client.get_app_detail(session.app_id)
             draft = client.get_draft_workflow(session.app_id)
+            resource_capabilities = _resource_capabilities(client)
         app_mode = _resolve_graph_app_mode(app, draft)
         if app_mode not in {"workflow", "advanced-chat"}:
             raise WorkflowSnapshotError(
@@ -78,6 +89,7 @@ class WorkflowSnapshotService:
             for definition in self.catalog.list()
             if app_mode in definition.supported_app_modes
         ]
+        capabilities.extend(resource_capabilities)
         compatibility = (
             self.compatibility.decide(
                 self.dify_version,
@@ -137,6 +149,8 @@ class WorkflowSnapshotService:
             for definition in self.catalog.list()
             if session.app_mode in definition.supported_app_modes
         ]
+        with self.client_factory() as client:
+            capabilities.extend(_resource_capabilities(client))
         compatibility = (
             self.compatibility.decide(
                 self.dify_version,
@@ -192,6 +206,112 @@ def _resolve_graph_app_mode(
     ):
         return "advanced-chat"
     return app.mode or "workflow"
+
+
+def _resource_capabilities(client: object) -> list[dict]:
+    capabilities: list[dict] = []
+    datasets = _safe_resource_list(client, "list_datasets", limit=100)
+    for item in datasets:
+        capabilities.append(
+            {
+                "type": "dataset",
+                "id": str(getattr(item, "id", "")),
+                "name": str(getattr(item, "name", "")),
+                "summary": str(getattr(item, "description", "") or ""),
+                "document_count": getattr(item, "document_count", None),
+                "indexing_technique": getattr(
+                    item,
+                    "indexing_technique",
+                    None,
+                ),
+                "embedding_available": getattr(
+                    item,
+                    "embedding_available",
+                    None,
+                ),
+                "untrusted_data": True,
+            }
+        )
+    models = _safe_resource_list(client, "list_models")
+    for item in models:
+        capabilities.append(
+            {
+                "type": "model",
+                "provider": str(getattr(item, "provider", "")),
+                "name": str(getattr(item, "model", "")),
+                "summary": str(getattr(item, "model_label", "") or ""),
+                "status": str(getattr(item, "status", "")),
+                "features": list(getattr(item, "features", []) or []),
+                "untrusted_data": True,
+            }
+        )
+    tools = _safe_resource_list(client, "list_tools")
+    for item in tools:
+        capabilities.append(
+            {
+                "type": "tool-resource",
+                "provider_id": str(getattr(item, "provider_id", "")),
+                "provider_type": str(getattr(item, "provider_type", "")),
+                "tool_name": str(getattr(item, "tool_name", "")),
+                "summary": str(getattr(item, "description", "") or ""),
+                "requires_configuration": bool(
+                    getattr(item, "requires_configuration", False)
+                ),
+                "untrusted_data": True,
+            }
+        )
+    strategies = _safe_resource_list(client, "list_agent_strategies")
+    for item in strategies:
+        capabilities.append(
+            {
+                "type": "agent-strategy",
+                "provider": str(
+                    getattr(item, "agent_strategy_provider_name", "")
+                ),
+                "name": str(getattr(item, "agent_strategy_name", "")),
+                "summary": str(getattr(item, "description", "") or ""),
+                "features": list(getattr(item, "features", []) or []),
+                "requires_configuration": bool(
+                    getattr(item, "requires_configuration", False)
+                ),
+                "untrusted_data": True,
+            }
+        )
+    triggers = _safe_resource_list(client, "list_trigger_providers")
+    for item in triggers:
+        capabilities.append(
+            {
+                "type": "trigger",
+                "provider_id": str(getattr(item, "provider_id", "")),
+                "event_name": str(getattr(item, "event_name", "")),
+                "summary": str(
+                    getattr(item, "event_description", "")
+                    or getattr(item, "description", "")
+                    or ""
+                ),
+                "supported_creation_methods": list(
+                    getattr(item, "supported_creation_methods", []) or []
+                ),
+                "untrusted_data": True,
+            }
+        )
+    return capabilities
+
+
+def _safe_resource_list(
+    client: object,
+    method_name: str,
+    **kwargs,
+) -> list[object]:
+    method = getattr(client, method_name, None)
+    if not callable(method):
+        return []
+    try:
+        result = method(**kwargs)
+    except Exception:  # noqa: BLE001 - one unavailable catalog must not block Snapshot.
+        return []
+    data = getattr(result, "data", None)
+    return list(data) if isinstance(data, list) else []
 
 
 def _create_scaffold_plan(session: AgentSession) -> WorkflowPlan:

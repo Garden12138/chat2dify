@@ -1,0 +1,90 @@
+{
+  "snapshot_id": "workflow-http-no-error-path",
+  "snapshot_version": "1.0.0",
+  "template": "workflow-http",
+  "operation": "modify",
+  "app_mode": "workflow",
+  "decisions": [
+    {
+      "type": "tool_call",
+      "tool_name": "skill.search",
+      "arguments": {"names": ["error-handling"]},
+      "goal_step_id": "observe"
+    },
+    {
+      "type": "tool_call",
+      "tool_name": "workflow.patch",
+      "arguments": {
+        "workspace_version": "${workspace_version}",
+        "expected_base_hash": "${base_hash}",
+        "rationale": "First repair attempt intentionally references an unknown output.",
+        "operations": [
+          {
+            "op": "node.add",
+            "temp_ref": "tmp_bad_error",
+            "node_type": "end",
+            "title": "Invalid error response",
+            "params": {
+              "outputs": [
+                {
+                  "variable": "error",
+                  "value_selector": ["missing-node", "text"]
+                }
+              ]
+            }
+          },
+          {
+            "op": "edge.add",
+            "source": "http",
+            "source_handle": "error",
+            "target": "tmp_bad_error"
+          }
+        ]
+      },
+      "goal_step_id": "repair"
+    },
+    {
+      "type": "tool_call",
+      "tool_name": "workflow.patch",
+      "arguments": {
+        "workspace_version": "${workspace_version}",
+        "expected_base_hash": "${base_hash}",
+        "rationale": "Add a valid safe error response after validation feedback.",
+        "operations": [
+          {
+            "op": "node.add",
+            "temp_ref": "tmp_safe_error",
+            "node_type": "end",
+            "title": "Safe error response",
+            "params": {
+              "outputs": [
+                {
+                  "variable": "error",
+                  "value_selector": ["start", "query"]
+                }
+              ]
+            }
+          },
+          {
+            "op": "edge.add",
+            "source": "http",
+            "source_handle": "error",
+            "target": "tmp_safe_error"
+          }
+        ]
+      },
+      "goal_step_id": "repair"
+    },
+    {
+      "type": "tool_call",
+      "tool_name": "workflow.diff",
+      "arguments": {"workspace_version": "${workspace_version}"},
+      "goal_step_id": "review"
+    },
+    {
+      "type": "finish",
+      "summary": "The HTTP error path is ready.",
+      "evidence": ["An invalid attempt rolled back before the valid repair."]
+    }
+  ]
+}

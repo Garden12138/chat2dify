@@ -5,11 +5,14 @@ import {
   CANVAS_CONTEXT_PROTOCOL,
   CanvasContextChannel,
   EventCursor,
+  appModeLabel,
   approvalMatchesVisibleVersion,
   commitBlockReason,
+  isAgentWorkbenchSupported,
   parseSse,
   reviewDiffRows,
   runControlState,
+  supportsCanvasContext,
   testPresentation,
   timelinePresentation,
   undoPresentation,
@@ -33,6 +36,47 @@ const contextMessage = (overrides = {}) => ({
     canvas_draft_hash: "hash-v0",
     ...overrides,
   },
+});
+
+test("Workbench supports graph creation and existing graph or config applications", () => {
+  assert.equal(isAgentWorkbenchSupported({
+    featureEnabled: true,
+    intent: "create",
+    appMode: "workflow",
+  }), true);
+  assert.equal(isAgentWorkbenchSupported({
+    featureEnabled: true,
+    intent: "modify",
+    appMode: "advanced-chat",
+    appId: "app-1",
+  }), true);
+  for (const appMode of ["chat", "completion", "agent-chat"]) {
+    assert.equal(isAgentWorkbenchSupported({
+      featureEnabled: true,
+      intent: "modify",
+      appMode,
+      appId: "app-1",
+    }), true);
+    assert.equal(isAgentWorkbenchSupported({
+      featureEnabled: true,
+      intent: "create",
+      appMode,
+    }), false);
+    assert.equal(supportsCanvasContext(appMode), false);
+  }
+  assert.equal(isAgentWorkbenchSupported({
+    featureEnabled: false,
+    intent: "modify",
+    appMode: "chat",
+    appId: "app-1",
+  }), false);
+  assert.equal(isAgentWorkbenchSupported({
+    featureEnabled: true,
+    intent: "modify",
+    appMode: "chat",
+  }), false);
+  assert.equal(supportsCanvasContext("workflow"), true);
+  assert.equal(appModeLabel("completion"), "文本生成应用");
 });
 
 test("canvas channel accepts valid selection and rejects origin, source, and nonce changes", () => {

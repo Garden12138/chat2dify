@@ -1,0 +1,130 @@
+{
+  "snapshot_id": "chatflow-confidence-routing",
+  "snapshot_version": "1.0.0",
+  "template": "chatflow-basic",
+  "operation": "modify",
+  "app_mode": "advanced-chat",
+  "resources": [
+    {
+      "type": "human-queue",
+      "id": "support-review",
+      "summary": "Approved human support review channel."
+    }
+  ],
+  "decisions": [
+    {
+      "type": "tool_call",
+      "tool_name": "skill.search",
+      "arguments": {"names": ["human-fallback"]},
+      "goal_step_id": "observe"
+    },
+    {
+      "type": "tool_call",
+      "tool_name": "workflow.patch",
+      "arguments": {
+        "workspace_version": "${workspace_version}",
+        "expected_base_hash": "${base_hash}",
+        "rationale": "Route low-confidence answers to a reviewed human handoff.",
+        "operations": [
+          {
+            "op": "node.add",
+            "temp_ref": "tmp_confidence",
+            "node_type": "if-else",
+            "title": "Check confidence",
+            "params": {
+              "cases": [
+                {
+                  "case_id": "low",
+                  "logical_operator": "and",
+                  "conditions": [
+                    {
+                      "variable_selector": ["llm", "text"],
+                      "comparison_operator": "contains",
+                      "value": "low confidence",
+                      "varType": "string"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "op": "node.add",
+            "temp_ref": "tmp_human",
+            "node_type": "human-input",
+            "title": "Human support review",
+            "params": {
+              "delivery_methods": [
+                {
+                  "id": "22222222-2222-4222-8222-222222222222",
+                  "type": "webapp",
+                  "enabled": true,
+                  "config": {}
+                }
+              ],
+              "form_content": "Review the low-confidence support answer.",
+              "inputs": [],
+              "user_actions": [
+                {"id": "approve", "title": "Approve", "button_style": "primary"},
+                {"id": "reject", "title": "Reject", "button_style": "default"}
+              ],
+              "timeout": 3,
+              "timeout_unit": "day"
+            }
+          },
+          {
+            "op": "node.add",
+            "temp_ref": "tmp_handoff_answer",
+            "node_type": "answer",
+            "title": "Return handoff result",
+            "params": {"answer": "A human support specialist reviewed this request."}
+          },
+          {
+            "op": "edge.remove",
+            "source": "llm",
+            "source_handle": "source",
+            "target": "answer",
+            "target_handle": "target"
+          },
+          {"op": "edge.add", "source": "llm", "target": "tmp_confidence"},
+          {
+            "op": "edge.add",
+            "source": "tmp_confidence",
+            "source_handle": "false",
+            "target": "answer"
+          },
+          {
+            "op": "edge.add",
+            "source": "tmp_confidence",
+            "source_handle": "low",
+            "target": "tmp_human"
+          },
+          {
+            "op": "edge.add",
+            "source": "tmp_human",
+            "source_handle": "approve",
+            "target": "tmp_handoff_answer"
+          },
+          {
+            "op": "edge.add",
+            "source": "tmp_human",
+            "source_handle": "reject",
+            "target": "tmp_handoff_answer"
+          }
+        ]
+      },
+      "goal_step_id": "patch"
+    },
+    {
+      "type": "tool_call",
+      "tool_name": "workflow.diff",
+      "arguments": {"workspace_version": "${workspace_version}"},
+      "goal_step_id": "review"
+    },
+    {
+      "type": "finish",
+      "summary": "The human fallback is ready.",
+      "evidence": ["Human side effects remain visible in review."]
+    }
+  ]
+}

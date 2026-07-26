@@ -1,0 +1,65 @@
+{
+  "snapshot_id": "workflow-stale-variable",
+  "snapshot_version": "1.0.0",
+  "template": "workflow-runtime-broken",
+  "operation": "modify",
+  "app_mode": "workflow",
+  "allow_draft_test": true,
+  "allowed_test_runs": 1,
+  "draft_failure_markers": ["eval-broken-variable-reference"],
+  "decisions": [
+    {
+      "type": "tool_call",
+      "tool_name": "workflow.test_draft",
+      "arguments": {
+        "workspace_version": "${workspace_version}",
+        "inputs": {"query": "Evaluate stale reference repair."},
+        "requested_test_runs": 1
+      },
+      "goal_step_id": "test"
+    },
+    {
+      "type": "tool_call",
+      "tool_name": "workflow.patch",
+      "arguments": {
+        "workspace_version": "${workspace_version}",
+        "expected_base_hash": "${base_hash}",
+        "rationale": "Replace the stale runtime reference with the supported input.",
+        "operations": [
+          {
+            "op": "node.update",
+            "node_id": "llm",
+            "set": {
+              "params.system_prompt": "Use the supported start.query input."
+            },
+            "expected": {
+              "params.system_prompt": "eval-broken-variable-reference"
+            }
+          }
+        ]
+      },
+      "goal_step_id": "repair"
+    },
+    {
+      "type": "tool_call",
+      "tool_name": "workflow.test_draft",
+      "arguments": {
+        "workspace_version": "${workspace_version}",
+        "inputs": {"query": "Evaluate repaired reference."},
+        "requested_test_runs": 1
+      },
+      "goal_step_id": "test"
+    },
+    {
+      "type": "tool_call",
+      "tool_name": "workflow.diff",
+      "arguments": {"workspace_version": "${workspace_version}"},
+      "goal_step_id": "review"
+    },
+    {
+      "type": "finish",
+      "summary": "The stale reference was repaired.",
+      "evidence": ["The second approved candidate run succeeded."]
+    }
+  ]
+}

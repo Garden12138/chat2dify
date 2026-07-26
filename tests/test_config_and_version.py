@@ -3,7 +3,11 @@ from pathlib import Path
 import pytest
 
 from app.config import Settings, load_public_base_path, normalize_public_base_path
-from app.dify.version import read_app_dsl_version
+from app.dify.version import (
+    read_app_dsl_version,
+    read_dify_package_version,
+    read_dify_version_info,
+)
 
 
 def test_relative_dify_source_dir_resolves_from_project_root(tmp_path: Path) -> None:
@@ -17,6 +21,35 @@ def test_relative_dify_source_dir_resolves_from_project_root(tmp_path: Path) -> 
     settings = Settings.from_env({"DIFY_SOURCE_DIR": "../dify"}, project_root=project_root)
 
     assert settings.dify_source_path == dify_root.resolve()
+
+
+def test_dify_package_version_is_read_without_git(tmp_path: Path) -> None:
+    version_dir = tmp_path / "api" / "constants"
+    version_dir.mkdir(parents=True)
+    (tmp_path / "api" / "pyproject.toml").write_text(
+        '[project]\nname = "dify-api"\nversion = "1.14.2"\n',
+        encoding="utf-8",
+    )
+    (version_dir / "dsl_version.py").write_text(
+        'CURRENT_APP_DSL_VERSION = "0.6.0"\n',
+        encoding="utf-8",
+    )
+
+    version = read_dify_version_info(tmp_path)
+
+    assert read_dify_package_version(tmp_path) == "1.14.2"
+    assert version.git_describe == "1.14.2"
+    assert version.app_dsl_version == "0.6.0"
+
+
+def test_dify_package_version_falls_back_to_unknown_for_invalid_metadata(
+    tmp_path: Path,
+) -> None:
+    api_dir = tmp_path / "api"
+    api_dir.mkdir(parents=True)
+    (api_dir / "pyproject.toml").write_text("[project\n", encoding="utf-8")
+
+    assert read_dify_package_version(tmp_path) == "unknown"
 
 
 def test_dotenv_is_loaded_relative_to_project_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

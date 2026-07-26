@@ -1,0 +1,45 @@
+{
+  "snapshot_id": "existing-support-chatflow",
+  "snapshot_version": "1.0.0",
+  "template": "chatflow-with-variable",
+  "operation": "modify",
+  "app_mode": "advanced-chat",
+  "decisions": [
+    {
+      "type": "tool_call",
+      "tool_name": "workflow.inspect",
+      "arguments": {"view": "variables"},
+      "goal_step_id": "observe"
+    },
+    {
+      "type": "tool_call",
+      "tool_name": "workflow.patch",
+      "arguments": {
+        "workspace_version": "${workspace_version}",
+        "expected_base_hash": "${base_hash}",
+        "rationale": "Add the requested typed conversation variable.",
+        "operations": [
+          {
+            "op": "conversation_variable.add",
+            "name": "customer_tier",
+            "value_type": "string",
+            "value": "standard",
+            "description": "Current customer service tier."
+          }
+        ]
+      },
+      "goal_step_id": "patch"
+    },
+    {
+      "type": "tool_call",
+      "tool_name": "workflow.diff",
+      "arguments": {"workspace_version": "${workspace_version}"},
+      "goal_step_id": "review"
+    },
+    {
+      "type": "finish",
+      "summary": "The conversation variable is ready.",
+      "evidence": ["Existing variables remain present."]
+    }
+  ]
+}

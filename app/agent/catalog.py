@@ -119,7 +119,72 @@ def _mvp_definitions() -> list[NodeDefinition]:
             output_schema=_output_schema("answer"),
             side_effect="none",
         ),
+        _permissive_definition(
+            "http-request",
+            modes=shared_modes,
+            summary=(
+                "Call an explicit HTTP endpoint; execution has external "
+                "network side effects and requires conservative Draft approval."
+            ),
+            side_effect="external",
+        ),
+        _permissive_definition(
+            "document-extractor",
+            modes=shared_modes,
+            summary=(
+                "Extract bounded text from a declared file or file-list input."
+            ),
+            side_effect="none",
+        ),
+        _permissive_definition(
+            "knowledge-retrieval",
+            modes=shared_modes,
+            summary=(
+                "Retrieve grounded context from explicitly pinned Dify dataset IDs."
+            ),
+            side_effect="none",
+        ),
+        _permissive_definition(
+            "human-input",
+            modes=shared_modes,
+            summary=(
+                "Pause for explicit human input or review through configured "
+                "delivery methods."
+            ),
+            side_effect="external",
+        ),
+        _permissive_definition(
+            "tool",
+            modes=shared_modes,
+            summary=(
+                "Invoke an explicitly selected Dify Tool binding with reviewed "
+                "parameters."
+            ),
+            side_effect="external",
+        ),
     ]
+
+
+def _permissive_definition(
+    node_type: NodeType,
+    *,
+    modes: set[AppMode],
+    summary: str,
+    side_effect: SideEffectClass,
+) -> NodeDefinition:
+    return NodeDefinition(
+        type=node_type,
+        supported_app_modes=modes,
+        summary=summary,
+        config_schema={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": True,
+        },
+        output_schema=_output_schema(node_type),
+        side_effect=side_effect,
+        dify_version_range="1.14.x",
+    )
 
 
 def _output_schema(node_type: str) -> dict[str, Any]:

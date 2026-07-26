@@ -87,19 +87,41 @@ def test_registry_validates_output_and_hides_executor_errors() -> None:
 def test_node_capability_catalog_has_bounded_mvp_definitions() -> None:
     catalog = NodeCapabilityCatalog()
 
-    assert [item.type for item in catalog.list()] == ["answer", "end", "if-else", "llm"]
+    assert [item.type for item in catalog.list()] == [
+        "answer",
+        "document-extractor",
+        "end",
+        "http-request",
+        "human-input",
+        "if-else",
+        "knowledge-retrieval",
+        "llm",
+        "tool",
+    ]
     assert catalog.require("llm").side_effect == "model_cost"
+    assert catalog.require("human-input").side_effect == "external"
+    assert catalog.require("knowledge-retrieval").dify_version_range == "1.14.x"
     assert catalog.require("llm").output_schema["properties"]["text"]["type"] == "string"
     assert [item.type for item in catalog.search("conditional")] == ["if-else"]
     assert [item.type for item in catalog.search(app_mode="workflow")] == [
+        "document-extractor",
         "end",
+        "http-request",
+        "human-input",
         "if-else",
+        "knowledge-retrieval",
         "llm",
+        "tool",
     ]
     assert [item.type for item in catalog.search(app_mode="advanced-chat")] == [
         "answer",
+        "document-extractor",
+        "http-request",
+        "human-input",
         "if-else",
+        "knowledge-retrieval",
         "llm",
+        "tool",
     ]
     assert catalog.get("start") is None
     with pytest.raises(KeyError):
@@ -140,6 +162,39 @@ def test_patch_schema_is_explicit_bounded_and_supports_temp_refs() -> None:
     assert patch.model_dump(mode="json", by_alias=True)["operations"][2]["set"] == {
         "params": {"outputs": [{"value_selector": ["tmp_llm", "text"]}]}
     }
+    variable_patch = PatchDocument.model_validate(
+        {
+            "workspace_version": "v0",
+            "expected_base_hash": "hash-0",
+            "rationale": "Add and update a typed conversation variable.",
+            "operations": [
+                {
+                    "op": "conversation_variable.add",
+                    "name": "customer_tier",
+                    "value_type": "string",
+                    "value": "standard",
+                },
+                {
+                    "op": "conversation_variable.update",
+                    "variable_id": "11111111-1111-4111-8111-111111111111",
+                    "set": {"description": "Preserved customer tier."},
+                    "expected_name": "customer_tier",
+                },
+                {
+                    "op": "conversation_variable.remove",
+                    "variable_id": "11111111-1111-4111-8111-111111111111",
+                    "expected_name": "customer_tier",
+                },
+            ],
+        }
+    )
+    assert [
+        operation.op for operation in variable_patch.operations
+    ] == [
+        "conversation_variable.add",
+        "conversation_variable.update",
+        "conversation_variable.remove",
+    ]
 
     with pytest.raises(ValidationError):
         PatchDocument.model_validate(

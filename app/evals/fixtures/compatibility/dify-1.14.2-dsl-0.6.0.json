@@ -4,5 +4,8 @@
   "expected_rule_id": "dify-1.14-dsl-0.6",
   "mutation_supported": true,
   "diagnostic_supported": true,
-  "notes": "Console Draft Run cannot execute an uncommitted candidate Graph."
+  "candidate_graph_draft_run_supported": false,
+  "create_import_idempotency_supported": false,
+  "create_import_reconciliation_lookup_supported": false,
+  "notes": "Console Draft Run cannot execute an uncommitted candidate Graph. App import ignores client idempotency headers and exposes no reconciliation lookup."
 }

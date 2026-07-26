@@ -114,7 +114,7 @@ from app.validator import has_errors, validate_dsl, validate_plan
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 INDEX_TEMPLATE = STATIC_DIR / "index.html"
 DEFAULT_INDEX_CONFIG = (
-    '{"basePath":"","version":"3.0.0","agentV4Enabled":false}'
+    '{"basePath":"","version":"4.0.0","agentV4Enabled":false}'
 )
 
 

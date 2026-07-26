@@ -4,5 +4,8 @@
   "expected_rule_id": null,
   "mutation_supported": false,
   "diagnostic_supported": true,
+  "candidate_graph_draft_run_supported": false,
+  "create_import_idempotency_supported": false,
+  "create_import_reconciliation_lookup_supported": false,
   "notes": "Unsupported mutations fail closed while bounded diagnostics remain available."
 }

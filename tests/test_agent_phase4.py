@@ -820,6 +820,18 @@ def test_compatibility_fixtures_match_the_version_matrix() -> None:
             decision.diagnostic_supported
             is fixture["diagnostic_supported"]
         )
+        assert (
+            decision.candidate_graph_draft_run_supported
+            is fixture["candidate_graph_draft_run_supported"]
+        )
+        assert (
+            decision.create_import_idempotency_supported
+            is fixture["create_import_idempotency_supported"]
+        )
+        assert (
+            decision.create_import_reconciliation_lookup_supported
+            is fixture["create_import_reconciliation_lookup_supported"]
+        )
 
 
 def test_security_fixtures_redact_secrets_and_do_not_elevate_policy(
@@ -994,9 +1006,15 @@ def test_fixed_evaluation_suite_is_reproducible_and_meets_gates() -> None:
     )
     assert report.model_dump(mode="json") == second.model_dump(mode="json")
     assert report.gates.passed
+    assert report.runtime_executed is True
+    assert report.executor == "deterministic-agent-runtime"
+    assert all(
+        result.executor_evidence.get("runtime_executed") is True
+        for result in report.cases
+    )
     assert report.metrics.final_validity_rate == 1
     assert report.metrics.goal_completion_rate == 0.9
-    assert report.metrics.unrelated_preservation_rate == 0.98
+    assert report.metrics.unrelated_preservation_rate == 1
     assert report.metrics.auto_repair_rate == 1
     assert report.metrics.unapproved_writes == 0
     assert report.metrics.incorrect_conflict_overwrites == 0
@@ -1017,6 +1035,7 @@ def test_live_provider_evaluation_requires_explicit_opt_in() -> None:
         name = "fake-live-provider"
         live_provider = True
         reproducible = False
+        runtime_executed = True
 
         def execute(self, case):
             return EvaluationCaseResult(

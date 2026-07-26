@@ -80,6 +80,7 @@ class GeneratedTestInputs(StrictModel):
     preview: dict[str, Any]
     missing_user_inputs: list[str] = Field(default_factory=list)
     sensitive_input_names: list[str] = Field(default_factory=list)
+    file_input_names: list[str] = Field(default_factory=list)
 
 
 class PreparedDraftTest(StrictModel):
@@ -247,6 +248,7 @@ class MinimalTestInputGenerator:
         inputs: dict[str, Any] = {}
         missing: list[str] = []
         sensitive: list[str] = []
+        file_inputs: list[str] = []
         start = next((node for node in plan.nodes if node.type == "start"), None)
         variables = (
             start.params.get("variables") or start.params.get("inputs") or []
@@ -264,6 +266,8 @@ class MinimalTestInputGenerator:
                 missing.append(name)
                 continue
             variable_type = _normalize_input_type(raw.get("type"))
+            if variable_type in {"file", "file-list"}:
+                file_inputs.append(name)
             if name in supplied:
                 inputs[name] = supplied.pop(name)
                 continue
@@ -295,6 +299,7 @@ class MinimalTestInputGenerator:
             preview=preview,
             missing_user_inputs=sorted(set(missing)),
             sensitive_input_names=sorted(set(sensitive)),
+            file_input_names=sorted(set(file_inputs)),
         )
 
 
@@ -533,13 +538,27 @@ def prepare_draft_test(
         files=parsed.files,
     )
     if generated.missing_user_inputs:
+        only_file_inputs_missing = (
+            set(generated.missing_user_inputs)
+            <= set(generated.file_input_names)
+            and not generated.sensitive_input_names
+        )
         raise DraftPreparationError(
-            "DRAFT_TEST_INPUT_REQUIRED",
-            "Draft Run needs user-provided file or sensitive test inputs.",
+            (
+                "DRAFT_TEST_FILE_REQUIRED"
+                if only_file_inputs_missing
+                else "DRAFT_TEST_INPUT_REQUIRED"
+            ),
+            (
+                "Draft Run needs an explicit user file or approved fixture."
+                if only_file_inputs_missing
+                else "Draft Run needs user-provided file or sensitive test inputs."
+            ),
             details=[
                 {
                     "missing": generated.missing_user_inputs,
                     "sensitive": generated.sensitive_input_names,
+                    "file_inputs": generated.file_input_names,
                 }
             ],
         )

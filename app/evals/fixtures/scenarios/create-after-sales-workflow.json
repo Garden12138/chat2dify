@@ -1,0 +1,144 @@
+{
+  "snapshot_id": "workflow-create-scaffold",
+  "snapshot_version": "1.0.0",
+  "template": "workflow-basic",
+  "operation": "create",
+  "app_mode": "workflow",
+  "decisions": [
+    {
+      "type": "tool_call",
+      "tool_name": "workflow.inspect",
+      "arguments": {"view": "summary"},
+      "goal_step_id": "observe"
+    },
+    {
+      "type": "tool_call",
+      "tool_name": "workflow.patch",
+      "arguments": {
+        "workspace_version": "${workspace_version}",
+        "expected_base_hash": "${base_hash}",
+        "rationale": "Build a classified after-sales workflow with JSON responses.",
+        "operations": [
+          {
+            "op": "node.add",
+            "temp_ref": "tmp_route",
+            "node_type": "if-else",
+            "title": "Classify after-sales request",
+            "params": {
+              "cases": [
+                {
+                  "case_id": "priority",
+                  "logical_operator": "and",
+                  "conditions": [
+                    {
+                      "variable_selector": ["${node:start}", "query"],
+                      "comparison_operator": "contains",
+                      "value": "urgent",
+                      "varType": "string"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "op": "node.add",
+            "temp_ref": "tmp_priority",
+            "node_type": "llm",
+            "title": "Generate priority response",
+            "params": {
+              "system_prompt": "Return professional support as JSON: {\"answer\":\"string\",\"priority\":\"high\"}.",
+              "user_prompt": "{{#${node:start}.query#}}"
+            }
+          },
+          {
+            "op": "node.add",
+            "temp_ref": "tmp_regular",
+            "node_type": "llm",
+            "title": "Generate standard response",
+            "params": {
+              "system_prompt": "Return professional support as JSON: {\"answer\":\"string\",\"priority\":\"normal\"}.",
+              "user_prompt": "{{#${node:start}.query#}}"
+            }
+          },
+          {
+            "op": "node.add",
+            "temp_ref": "tmp_priority_end",
+            "node_type": "end",
+            "title": "Return priority response",
+            "params": {
+              "outputs": [
+                {
+                  "variable": "priority_answer",
+                  "value_selector": ["tmp_priority", "text"]
+                }
+              ]
+            }
+          },
+          {
+            "op": "node.update",
+            "node_id": "${node:end}",
+            "set": {
+              "title": "Return standard response",
+              "params": {
+                "outputs": [
+                  {
+                    "variable": "answer",
+                    "value_selector": ["tmp_regular", "text"]
+                  }
+                ]
+              }
+            },
+            "expected": {"type": "end"}
+          },
+          {
+            "op": "edge.remove",
+            "source": "${node:start}",
+            "source_handle": "source",
+            "target": "${node:end}",
+            "target_handle": "target"
+          },
+          {
+            "op": "edge.add",
+            "source": "${node:start}",
+            "target": "tmp_route"
+          },
+          {
+            "op": "edge.add",
+            "source": "tmp_route",
+            "source_handle": "false",
+            "target": "tmp_regular"
+          },
+          {
+            "op": "edge.add",
+            "source": "tmp_route",
+            "source_handle": "priority",
+            "target": "tmp_priority"
+          },
+          {
+            "op": "edge.add",
+            "source": "tmp_regular",
+            "target": "${node:end}"
+          },
+          {
+            "op": "edge.add",
+            "source": "tmp_priority",
+            "target": "tmp_priority_end"
+          }
+        ]
+      },
+      "goal_step_id": "patch"
+    },
+    {
+      "type": "tool_call",
+      "tool_name": "workflow.diff",
+      "arguments": {"workspace_version": "${workspace_version}"},
+      "goal_step_id": "review"
+    },
+    {
+      "type": "finish",
+      "summary": "The after-sales workflow is ready for review.",
+      "evidence": ["The real Workspace validation and Diff passed."]
+    }
+  ]
+}

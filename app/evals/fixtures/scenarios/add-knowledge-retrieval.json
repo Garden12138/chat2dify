@@ -1,0 +1,87 @@
+{
+  "snapshot_id": "workflow-without-retrieval",
+  "snapshot_version": "1.0.0",
+  "template": "workflow-basic",
+  "operation": "modify",
+  "app_mode": "workflow",
+  "resources": [
+    {
+      "type": "dataset",
+      "id": "dataset-repair-manual",
+      "name": "repair-manual",
+      "summary": "Approved repair manual dataset."
+    }
+  ],
+  "decisions": [
+    {
+      "type": "tool_call",
+      "tool_name": "skill.search",
+      "arguments": {"names": ["knowledge-retrieval"]},
+      "goal_step_id": "observe"
+    },
+    {
+      "type": "tool_call",
+      "tool_name": "workflow.patch",
+      "arguments": {
+        "workspace_version": "${workspace_version}",
+        "expected_base_hash": "${base_hash}",
+        "rationale": "Ground the response in the pinned repair manual dataset.",
+        "operations": [
+          {
+            "op": "node.add",
+            "temp_ref": "tmp_knowledge",
+            "node_type": "knowledge-retrieval",
+            "title": "Retrieve repair manual",
+            "params": {
+              "query_variable_selector": ["start", "query"],
+              "dataset_ids": ["dataset-repair-manual"],
+              "retrieval_mode": "multiple",
+              "multiple_retrieval_config": {
+                "top_k": 4,
+                "score_threshold": null,
+                "reranking_enable": false
+              }
+            }
+          },
+          {
+            "op": "node.update",
+            "node_id": "llm",
+            "set": {
+              "params.user_prompt": "Question: {{#start.query#}}\nContext: {{#tmp_knowledge.result#}}"
+            },
+            "expected": {"type": "llm"}
+          },
+          {
+            "op": "edge.remove",
+            "source": "start",
+            "source_handle": "source",
+            "target": "llm",
+            "target_handle": "target"
+          },
+          {
+            "op": "edge.add",
+            "source": "start",
+            "target": "tmp_knowledge"
+          },
+          {
+            "op": "edge.add",
+            "source": "tmp_knowledge",
+            "target": "llm"
+          }
+        ]
+      },
+      "goal_step_id": "patch"
+    },
+    {
+      "type": "tool_call",
+      "tool_name": "workflow.diff",
+      "arguments": {"workspace_version": "${workspace_version}"},
+      "goal_step_id": "review"
+    },
+    {
+      "type": "finish",
+      "summary": "Knowledge retrieval is ready.",
+      "evidence": ["The dataset ID came from pinned capabilities."]
+    }
+  ]
+}

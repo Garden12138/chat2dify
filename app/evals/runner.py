@@ -9,7 +9,6 @@ from typing import Protocol
 from app.evals.graders import (
     aggregate_metrics,
     evaluate_release_gates,
-    grade_case,
 )
 from app.evals.models import (
     EvaluationCase,
@@ -30,17 +29,9 @@ class EvaluationExecutor(Protocol):
     name: str
     live_provider: bool
     reproducible: bool
+    runtime_executed: bool
 
     def execute(self, case: EvaluationCase) -> EvaluationCaseResult: ...
-
-
-class FixtureEvaluationExecutor:
-    name = "deterministic-fixture-replay"
-    live_provider = False
-    reproducible = True
-
-    def execute(self, case: EvaluationCase) -> EvaluationCaseResult:
-        return grade_case(case)
 
 
 class EvaluationRunner:
@@ -50,7 +41,13 @@ class EvaluationRunner:
         executor: EvaluationExecutor | None = None,
         allow_live_provider: bool = False,
     ) -> None:
-        self.executor = executor or FixtureEvaluationExecutor()
+        if executor is None:
+            from app.evals.runtime_executor import (
+                DeterministicRuntimeEvaluationExecutor,
+            )
+
+            executor = DeterministicRuntimeEvaluationExecutor()
+        self.executor = executor
         if self.executor.live_provider and not allow_live_provider:
             raise ValueError(
                 "Live-provider evaluation requires explicit opt-in."
@@ -73,6 +70,7 @@ class EvaluationRunner:
             executor=self.executor.name,
             live_provider=self.executor.live_provider,
             reproducible=self.executor.reproducible,
+            runtime_executed=self.executor.runtime_executed,
             cases=results,
             metrics=metrics,
             gates=evaluate_release_gates(metrics),
@@ -102,7 +100,9 @@ def write_report(report: EvaluationReport, path: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run deterministic Chat2Dify Builder Agent evaluations."
+        description=(
+            "Run deterministic Chat2Dify Builder Agent Runtime evaluations."
+        )
     )
     parser.add_argument(
         "--cases",

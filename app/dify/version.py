@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,10 +40,26 @@ def read_git_describe(dify_source_path: Path) -> str:
     return result.stdout.strip() or "unknown"
 
 
+def read_dify_package_version(dify_source_path: Path) -> str:
+    version_file = dify_source_path / "api" / "pyproject.toml"
+    try:
+        payload = tomllib.loads(version_file.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return "unknown"
+    version = payload.get("project", {}).get("version")
+    if not isinstance(version, str) or not version.strip():
+        return "unknown"
+    return version.strip()
+
+
 def read_dify_version_info(dify_source_path: Path) -> DifyVersionInfo:
+    package_version = read_dify_package_version(dify_source_path)
     return DifyVersionInfo(
         source_dir=str(dify_source_path),
-        git_describe=read_git_describe(dify_source_path),
+        git_describe=(
+            package_version
+            if package_version != "unknown"
+            else read_git_describe(dify_source_path)
+        ),
         app_dsl_version=read_app_dsl_version(dify_source_path),
     )
-

@@ -16,6 +16,11 @@ CSRF_HEADER_NAME = "X-CSRF-Token"
 CSRF_COOKIE_NAMES = ("csrf_token", "__Host-csrf_token")
 
 
+class _SensitiveJson(dict[str, Any]):
+    def __repr__(self) -> str:
+        return "<redacted-sensitive-json>"
+
+
 class DifyClientError(RuntimeError):
     """Raised when Dify cannot be reached or rejects a request."""
 
@@ -653,12 +658,14 @@ class DifyClient:
         if not self.settings.dify_email or not self.settings.dify_password:
             raise DifyClientError("DIFY_EMAIL and DIFY_PASSWORD are required to create workflows in Dify.")
 
-        payload = {
-            "email": self.settings.dify_email,
-            "password": self.encode_password(self.settings.dify_password),
-            "language": self.settings.dify_login_language,
-            "remember_me": True,
-        }
+        payload = _SensitiveJson(
+            {
+                "email": self.settings.dify_email,
+                "password": self.encode_password(self.settings.dify_password),
+                "language": self.settings.dify_login_language,
+                "remember_me": True,
+            }
+        )
         response = self._post("/login", json=payload)
         self._raise_for_response(response)
         body = response.json()

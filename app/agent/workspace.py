@@ -9,7 +9,16 @@ from pydantic import Field, ValidationError
 
 from app.agent.catalog import NodeCapabilityCatalog
 from app.agent.normalizer import normalize_plan_payload
-from app.agent.patch import AddEdge, AddNode, PatchDocument, RemoveEdge, UpdateNode
+from app.agent.patch import (
+    AddEdge,
+    AddNode,
+    ConversationVariableAdd,
+    ConversationVariableRemove,
+    ConversationVariableUpdate,
+    PatchDocument,
+    RemoveEdge,
+    UpdateNode,
+)
 from app.agent.state import (
     AgentRun,
     AgentWorkflowSnapshot,
@@ -502,6 +511,7 @@ def _apply_operations(
 ) -> None:
     nodes = payload["nodes"]
     edges = payload["edges"]
+    conversation_variables = payload.setdefault("conversation_variables", [])
     for operation in patch.operations:
         if isinstance(operation, AddNode):
             definition = catalog.get(operation.node_type)
@@ -576,6 +586,71 @@ def _apply_operations(
                     "PATCH_EDGE_NOT_FOUND",
                     "edge.remove did not match an existing edge.",
                 ) from exc
+        elif isinstance(operation, ConversationVariableAdd):
+            _require_conversation_variable_mode(app_mode)
+            if any(
+                str(item.get("name") or "") == operation.name
+                for item in conversation_variables
+            ):
+                raise WorkspaceOperationError(
+                    "PATCH_CONVERSATION_VARIABLE_NAME_CONFLICT",
+                    (
+                        "conversation_variable.add requires a name that is not "
+                        f"already declared: {operation.name}"
+                    ),
+                )
+            conversation_variables.append(
+                {
+                    "id": str(uuid4()),
+                    "name": operation.name,
+                    "value_type": operation.value_type,
+                    "value": deepcopy(operation.value),
+                    "description": operation.description,
+                    "selector": ["conversation", operation.name],
+                }
+            )
+        elif isinstance(operation, ConversationVariableUpdate):
+            _require_conversation_variable_mode(app_mode)
+            variable = _require_conversation_variable(
+                conversation_variables,
+                operation.variable_id,
+            )
+            _check_conversation_variable_expected(
+                variable,
+                expected_name=operation.expected_name,
+                expected_value_type=operation.expected_value_type,
+            )
+            updates = operation.set_values.model_dump(
+                mode="json",
+                exclude_none=True,
+            )
+            next_name = str(updates.get("name") or variable.get("name") or "")
+            if any(
+                item is not variable
+                and str(item.get("name") or "") == next_name
+                for item in conversation_variables
+            ):
+                raise WorkspaceOperationError(
+                    "PATCH_CONVERSATION_VARIABLE_NAME_CONFLICT",
+                    (
+                        "conversation_variable.update would duplicate the name "
+                        f"{next_name}."
+                    ),
+                )
+            variable.update(deepcopy(updates))
+            variable["selector"] = ["conversation", next_name]
+        elif isinstance(operation, ConversationVariableRemove):
+            _require_conversation_variable_mode(app_mode)
+            variable = _require_conversation_variable(
+                conversation_variables,
+                operation.variable_id,
+            )
+            _check_conversation_variable_expected(
+                variable,
+                expected_name=operation.expected_name,
+                expected_value_type=operation.expected_value_type,
+            )
+            conversation_variables.remove(variable)
 
 
 def _resolve_node_reference(value: str, mapping: dict[str, str]) -> str:
@@ -620,6 +695,64 @@ def _require_node(nodes: list[dict[str, Any]], node_id: str) -> dict[str, Any]:
         "PATCH_NODE_NOT_FOUND",
         f"Patch references an unknown node: {node_id}",
     )
+
+
+def _require_conversation_variable_mode(app_mode: str) -> None:
+    if app_mode != "advanced-chat":
+        raise WorkspaceOperationError(
+            "PATCH_CONVERSATION_VARIABLE_MODE_UNSUPPORTED",
+            "Conversation-variable Patch operations require advanced-chat.",
+        )
+
+
+def _require_conversation_variable(
+    variables: list[dict[str, Any]],
+    variable_id: str,
+) -> dict[str, Any]:
+    for variable in variables:
+        if str(variable.get("id") or "") == variable_id:
+            return variable
+    raise WorkspaceOperationError(
+        "PATCH_CONVERSATION_VARIABLE_NOT_FOUND",
+        f"Patch references an unknown conversation variable: {variable_id}",
+    )
+
+
+def _check_conversation_variable_expected(
+    variable: dict[str, Any],
+    *,
+    expected_name: str | None,
+    expected_value_type: str | None,
+) -> None:
+    if expected_name is not None and variable.get("name") != expected_name:
+        raise WorkspaceOperationError(
+            "PATCH_PRECONDITION_FAILED",
+            "Conversation-variable name precondition failed.",
+            details=[
+                {
+                    "variable_id": variable.get("id"),
+                    "field": "name",
+                    "expected": expected_name,
+                    "actual": variable.get("name"),
+                }
+            ],
+        )
+    if (
+        expected_value_type is not None
+        and variable.get("value_type") != expected_value_type
+    ):
+        raise WorkspaceOperationError(
+            "PATCH_PRECONDITION_FAILED",
+            "Conversation-variable type precondition failed.",
+            details=[
+                {
+                    "variable_id": variable.get("id"),
+                    "field": "value_type",
+                    "expected": expected_value_type,
+                    "actual": variable.get("value_type"),
+                }
+            ],
+        )
 
 
 def _check_expected(node: dict[str, Any], expected: dict[str, Any]) -> None:

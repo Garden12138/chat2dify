@@ -3,10 +3,13 @@ from __future__ import annotations
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any
+from uuid import UUID
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+import httpx
 import pytest
 import yaml
 
@@ -17,12 +20,14 @@ from app.agent.context import BuilderContext, BuilderContextBuilder
 from app.agent.decision import (
     AgentDecisionProvider,
     DecisionProviderError,
+    OpenAICompatibleDecisionProvider,
+    _provider_tool_name_map,
     normalize_provider_decision,
 )
 from app.agent.patch import PatchDocument
 from app.agent.planner import fallback_plan
 from app.agent.policy import AgentToolPolicy
-from app.agent.registry import ToolRegistry
+from app.agent.registry import ToolRegistry, ToolSpec
 from app.agent.review import WorkflowReviewService
 from app.agent.runtime import AgentRuntime
 from app.agent.service import AgentApplicationService, InlineRunDispatcher
@@ -45,6 +50,7 @@ from app.agent.validation import WorkflowValidationService
 from app.agent.workspace import VersionedWorkflowWorkspace, WorkspaceOperationError
 from app.api.agent_v4 import router
 from app.compiler.dify import DifyDslCompiler
+from app.config import Settings
 from app.dify.client import (
     DifyAppDetail,
     DifyDraftSyncResult,
@@ -207,6 +213,118 @@ class BranchDecisionProvider(AgentDecisionProvider):
         )
 
 
+class MislabelledProgressProvider(AgentDecisionProvider):
+    def __init__(self, mode: str) -> None:
+        self.mode = mode
+        self.calls: list[BuilderContext] = []
+
+    def decide(self, context: BuilderContext, tools):
+        del tools
+        self.calls.append(context)
+        index = len(self.calls)
+        if index == 1:
+            return ToolCallDecision(
+                type="tool_call",
+                tool_name="workflow.inspect",
+                arguments={"view": "summary"},
+                goal_step_id="observe",
+            )
+        if index == 2:
+            return ToolCallDecision(
+                type="tool_call",
+                tool_name="workflow.inspect",
+                arguments={
+                    "view": "nodes",
+                    "node_ids": ["llm"],
+                    "depth": 1,
+                },
+                goal_step_id="patch",
+            )
+        if index == 3:
+            return ToolCallDecision(
+                type="tool_call",
+                tool_name="workflow.patch",
+                arguments=_classification_patch(context, self.mode),
+                goal_step_id="validate",
+            )
+        if index == 4:
+            return ToolCallDecision(
+                type="tool_call",
+                tool_name="workflow.diff",
+                arguments={"workspace_version": context.workspace["version"]},
+                goal_step_id="review",
+            )
+        return FinishDecision(
+            type="finish",
+            summary="The classification branch is ready for approval.",
+            evidence=["Patch accepted", "Validation passed", "Diff reviewed"],
+        )
+
+
+class RetryableInterruptionProvider(AgentDecisionProvider):
+    def __init__(self, mode: str) -> None:
+        self.mode = mode
+        self.calls: list[BuilderContext] = []
+
+    def decide(self, context: BuilderContext, tools):
+        del tools
+        self.calls.append(context)
+        index = len(self.calls)
+        if index == 1:
+            return ToolCallDecision(
+                type="tool_call",
+                tool_name="workflow.inspect",
+                arguments={"view": "summary"},
+                goal_step_id="observe",
+            )
+        if index == 2:
+            raise DecisionProviderError(
+                "NVIDIA NIM remained temporarily unavailable.",
+                model_calls=3,
+                details=[
+                    {
+                        "provider": "NVIDIA NIM",
+                        "error_type": "ConnectError",
+                        "attempt": 1,
+                        "retryable": True,
+                    },
+                    {
+                        "provider": "NVIDIA NIM",
+                        "error_type": "HTTPStatusError",
+                        "attempt": 2,
+                        "retryable": True,
+                        "status_code": 503,
+                    },
+                    {
+                        "provider": "NVIDIA NIM",
+                        "error_type": "HTTPStatusError",
+                        "attempt": 3,
+                        "retryable": True,
+                        "status_code": 503,
+                    },
+                ],
+            )
+        if index == 3:
+            return ToolCallDecision(
+                type="tool_call",
+                tool_name="workflow.patch",
+                arguments=_classification_patch(context, self.mode),
+                goal_step_id="patch",
+            )
+        if index == 4:
+            return ToolCallDecision(
+                type="tool_call",
+                tool_name="workflow.diff",
+                arguments={"workspace_version": context.workspace["version"]},
+                goal_step_id="review",
+            )
+        return FinishDecision(
+            type="finish",
+            summary="The classification branch is ready for approval.",
+            evidence=["Patch accepted", "Validation passed", "Diff reviewed"],
+        )
+
+
 class NoopDecisionProvider(AgentDecisionProvider):
     def __init__(self) -> None:
         self.calls = 0
@@ -245,6 +363,23 @@ class RepeatingDecisionProvider(AgentDecisionProvider):
             tool_name=self.tool_name,
             arguments=arguments,
             goal_step_id="patch",
+        )
+
+
+class FailingDecisionProvider(AgentDecisionProvider):
+    def decide(self, context: BuilderContext, tools):
+        del context, tools
+        raise DecisionProviderError(
+            "Provider failed.",
+            model_calls=2,
+            details=[
+                {
+                    "provider": "test-provider",
+                    "error_type": "HTTPStatusError",
+                    "status_code": 400,
+                    "api_key": "must-not-persist",
+                }
+            ],
         )
 
 
@@ -501,6 +636,221 @@ def test_decision_provider_normalizes_native_and_strict_json_contracts() -> None
         )
 
 
+def test_decision_provider_maps_dotted_tool_names_to_safe_wire_aliases() -> None:
+    names = _provider_tool_name_map(
+        [
+            ToolSpec(
+                name="workflow.inspect",
+                version="1.0.0",
+                description="Inspect the workflow.",
+                side_effect="none",
+                approval="never",
+                input_schema={"type": "object"},
+                output_schema={"type": "object"},
+            )
+        ]
+    )
+    wire_name = names["workflow.inspect"]
+
+    assert "." not in wire_name
+    assert len(wire_name) <= 64
+    native = normalize_provider_decision(
+        {
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": wire_name,
+                        "arguments": '{"view":"summary"}',
+                    }
+                }
+            ]
+        },
+        default_goal_step_id="observe",
+        tool_name_map={
+            provider_name: canonical_name
+            for canonical_name, provider_name in names.items()
+        },
+    )
+    assert native.type == "tool_call"
+    assert native.tool_name == "workflow.inspect"
+
+
+def test_decision_provider_retries_transient_503_within_call_budget(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    stack = _stack(tmp_path, "workflow", NoopDecisionProvider())
+    _session, run, _version = _initialize_workspace(stack, "workflow")
+    context = BuilderContextBuilder(store=stack.store).build(run)
+    tools = stack.registry.visible_specs()
+    wire_name = _provider_tool_name_map(tools)["workflow.inspect"]
+    settings = Settings.from_env(
+        {
+            "DIFY_SOURCE_DIR": "../dify",
+            "PLANNER_DEFAULT_PROVIDER": "nvidia",
+            "PLANNER_FALLBACK_PROVIDERS": "",
+            "PLANNER_REQUEST_RETRIES": "2",
+            "NVIDIA_API_KEY": "test-key",
+        },
+        validate_dify=False,
+    )
+    calls: list[str] = []
+
+    def fake_post(url: str, **_kwargs):
+        calls.append(url)
+        request = httpx.Request("POST", url)
+        if len(calls) == 1:
+            return httpx.Response(503, request=request)
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": wire_name,
+                                        "arguments": '{"view":"summary"}',
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr("app.agent.decision.httpx.post", fake_post)
+    monkeypatch.setattr("app.agent.decision.sleep", lambda _seconds: None)
+    outcome = OpenAICompatibleDecisionProvider(settings).decide(context, tools)
+
+    assert len(calls) == 2
+    assert outcome.model_calls == 2
+    assert outcome.decision.type == "tool_call"
+    assert outcome.decision.tool_name == "workflow.inspect"
+
+
+def test_decision_provider_does_not_retry_non_retryable_403(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    stack = _stack(tmp_path, "workflow", NoopDecisionProvider())
+    _session, run, _version = _initialize_workspace(stack, "workflow")
+    context = BuilderContextBuilder(store=stack.store).build(run)
+    tools = stack.registry.visible_specs()
+    settings = Settings.from_env(
+        {
+            "DIFY_SOURCE_DIR": "../dify",
+            "PLANNER_DEFAULT_PROVIDER": "nvidia",
+            "PLANNER_FALLBACK_PROVIDERS": "",
+            "PLANNER_REQUEST_RETRIES": "2",
+            "NVIDIA_API_KEY": "test-key",
+        },
+        validate_dify=False,
+    )
+    calls = 0
+
+    def fake_post(url: str, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            403,
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr("app.agent.decision.httpx.post", fake_post)
+    with pytest.raises(DecisionProviderError) as raised:
+        OpenAICompatibleDecisionProvider(settings).decide(context, tools)
+
+    assert calls == 1
+    assert raised.value.model_calls == 1
+    assert raised.value.details == [
+        {
+            "provider": "NVIDIA NIM",
+            "error_type": "HTTPStatusError",
+            "attempt": 1,
+            "retryable": False,
+            "status_code": 403,
+        }
+    ]
+
+
+def test_runtime_persists_safe_provider_failure_diagnostics(tmp_path) -> None:
+    stack = _stack(tmp_path, "workflow", FailingDecisionProvider())
+    session = stack.service.create_session(app_id="app-1", app_mode="workflow")
+    submitted = stack.service.submit_goal(
+        session.id,
+        message="Inspect the workflow.",
+    )
+    failed = stack.store.get_run(submitted.id)
+
+    assert failed.phase == RunPhase.FAILED
+    assert failed.error["code"] == "AGENT_DECISION_PROVIDER_FAILED"
+    assert failed.error["details"] == [
+        {
+            "provider": "test-provider",
+            "error_type": "HTTPStatusError",
+            "status_code": 400,
+            "api_key": "[REDACTED]",
+        }
+    ]
+    assert failed.budget_usage.model_calls == 2
+
+
+def test_retryable_provider_failure_interrupts_and_resumes_from_checkpoint(
+    tmp_path,
+) -> None:
+    provider = RetryableInterruptionProvider("workflow")
+    stack = _stack(tmp_path, "workflow", provider)
+    session = stack.service.create_session(app_id="app-1", app_mode="workflow")
+    submitted = stack.service.submit_goal(
+        session.id,
+        message="增加紧急诉求分类分支，并保持原有分支不变。",
+        budget=AgentBudget(max_iterations=12, max_model_calls=8),
+    )
+    interrupted = stack.store.get_run(submitted.id)
+
+    assert interrupted.phase == RunPhase.INTERRUPTED
+    assert interrupted.recoverable is True
+    assert interrupted.budget_usage.model_calls == 4
+    assert interrupted.error["code"] == "AGENT_DECISION_PROVIDER_FAILED"
+    assert interrupted.error["retryable"] is True
+    assert stack.fake_dify.write_count == 0
+    assert {
+        step["id"]: step["status"]
+        for step in interrupted.goal_plan.model_dump(mode="json")["steps"]
+    } == {
+        "observe": "completed",
+        "patch": "pending",
+        "validate": "pending",
+        "review": "pending",
+    }
+
+    stack.service.resume(interrupted.id)
+    reviewed = stack.store.get_run(interrupted.id)
+
+    assert reviewed.phase == RunPhase.WAITING_APPROVAL
+    assert reviewed.budget_usage.model_calls == 7
+    assert reviewed.review is not None
+    assert reviewed.review["ready"] is True
+    assert stack.fake_dify.write_count == 0
+    events = stack.store.list_events(interrupted.id)
+    assert sum(event.type == "context.loaded" for event in events) == 1
+    assert sum(
+        event.type == "tool.started"
+        and event.data.get("tool_name") == "workflow.inspect"
+        for event in events
+    ) == 1
+    assert any(
+        event.type == "agent.paused"
+        and event.data.get("reason") == "decision_provider_retryable"
+        for event in events
+    )
+    assert any(event.type == "agent.resumed" for event in events)
+
+
 def test_snapshot_workspace_patch_is_transactional_reversible_and_private(tmp_path) -> None:
     stack = _stack(tmp_path, "workflow", NoopDecisionProvider())
     _session, run, v0 = _initialize_workspace(stack, "workflow")
@@ -508,9 +858,14 @@ def test_snapshot_workspace_patch_is_transactional_reversible_and_private(tmp_pa
     assert run.snapshot.base_graph["custom_graph_metadata"] == {"preserve": True}
     assert run.snapshot.environment_variables[0]["value"] == "must-stay-private"
     assert {item["type"] for item in run.snapshot.capabilities} == {
+        "document-extractor",
         "end",
+        "http-request",
+        "human-input",
         "if-else",
+        "knowledge-retrieval",
         "llm",
+        "tool",
     }
 
     context = BuilderContextBuilder(store=stack.store).build(run)
@@ -556,6 +911,210 @@ def test_snapshot_workspace_patch_is_transactional_reversible_and_private(tmp_pa
     assert len(stack.store.list_workspace_versions(run.id)) == 2
 
 
+def test_snapshot_pins_sanitized_dynamic_dify_resources() -> None:
+    class ResourceDify(FakeDify):
+        def list_datasets(self, **_kwargs):
+            return SimpleNamespace(
+                data=[
+                    SimpleNamespace(
+                        id="dataset-1",
+                        name="Repair manual",
+                        description="Untrusted dataset description.",
+                        document_count=3,
+                        indexing_technique="high_quality",
+                        embedding_available=True,
+                    )
+                ]
+            )
+
+        def list_models(self, **_kwargs):
+            return SimpleNamespace(
+                data=[
+                    SimpleNamespace(
+                        provider="openai",
+                        model="gpt-4o-mini",
+                        model_label="GPT",
+                        status="active",
+                        features=["tool-call"],
+                    )
+                ]
+            )
+
+        def list_tools(self, **_kwargs):
+            return SimpleNamespace(
+                data=[
+                    SimpleNamespace(
+                        provider_id="provider-1",
+                        provider_type="builtin",
+                        tool_name="search",
+                        description="Search approved sources.",
+                        requires_configuration=False,
+                        credential="must-not-leak",
+                    )
+                ]
+            )
+
+        def list_agent_strategies(self, **_kwargs):
+            return SimpleNamespace(data=[])
+
+        def list_trigger_providers(self, **_kwargs):
+            return SimpleNamespace(data=[])
+
+    fake = ResourceDify("workflow")
+    snapshot = WorkflowSnapshotService(
+        client_factory=lambda: nullcontext(fake),
+        catalog=NodeCapabilityCatalog(),
+        dify_version=DifyVersionInfo(
+            source_dir="/dify",
+            git_describe="1.14.2",
+            app_dsl_version="0.6.0",
+        ),
+    ).capture(AgentSession(app_id="app-1", app_mode="workflow"))
+    resource_types = {
+        item["type"]
+        for item in snapshot.capabilities
+        if item["type"] in {"dataset", "model", "tool-resource"}
+    }
+    assert resource_types == {"dataset", "model", "tool-resource"}
+    serialized = str(snapshot.capabilities)
+    assert "must-not-leak" not in serialized
+    assert all(
+        item.get("untrusted_data") is True
+        for item in snapshot.capabilities
+        if item["type"] in resource_types
+    )
+
+
+def test_conversation_variable_patch_operations_are_typed_and_transactional(
+    tmp_path,
+) -> None:
+    stack = _stack(tmp_path, "advanced-chat", NoopDecisionProvider())
+    _session, run, v0 = _initialize_workspace(stack, "advanced-chat")
+    added = stack.workspace.apply_patch(
+        run.id,
+        PatchDocument.model_validate(
+            {
+                "workspace_version": v0.id,
+                "expected_base_hash": "hash-v0",
+                "rationale": "Add a typed conversation variable.",
+                "operations": [
+                    {
+                        "op": "conversation_variable.add",
+                        "name": "customer_tier",
+                        "value_type": "string",
+                        "value": "standard",
+                    }
+                ],
+            }
+        ),
+    )
+    added_plan = WorkflowPlan.model_validate(
+        stack.store.get_workspace_version(added.workspace_version).snapshot
+    )
+    variable = next(
+        item
+        for item in added_plan.conversation_variables
+        if item.name == "customer_tier"
+    )
+    assert UUID(variable.id)
+    assert variable.selector == ["conversation", "customer_tier"]
+
+    updated = stack.workspace.apply_patch(
+        run.id,
+        PatchDocument.model_validate(
+            {
+                "workspace_version": added.workspace_version,
+                "expected_base_hash": "hash-v0",
+                "rationale": "Update the typed conversation variable.",
+                "operations": [
+                    {
+                        "op": "conversation_variable.update",
+                        "variable_id": variable.id,
+                        "set": {
+                            "name": "service_tier",
+                            "description": "Current service tier.",
+                        },
+                        "expected_name": "customer_tier",
+                        "expected_value_type": "string",
+                    }
+                ],
+            }
+        ),
+    )
+    updated_plan = WorkflowPlan.model_validate(
+        stack.store.get_workspace_version(updated.workspace_version).snapshot
+    )
+    updated_variable = next(
+        item
+        for item in updated_plan.conversation_variables
+        if item.id == variable.id
+    )
+    assert updated_variable.name == "service_tier"
+    assert updated_variable.selector == ["conversation", "service_tier"]
+
+    removed = stack.workspace.apply_patch(
+        run.id,
+        PatchDocument.model_validate(
+            {
+                "workspace_version": updated.workspace_version,
+                "expected_base_hash": "hash-v0",
+                "rationale": "Remove the typed conversation variable.",
+                "operations": [
+                    {
+                        "op": "conversation_variable.remove",
+                        "variable_id": variable.id,
+                        "expected_name": "service_tier",
+                        "expected_value_type": "string",
+                    }
+                ],
+            }
+        ),
+    )
+    removed_plan = WorkflowPlan.model_validate(
+        stack.store.get_workspace_version(removed.workspace_version).snapshot
+    )
+    assert all(
+        item.id != variable.id
+        for item in removed_plan.conversation_variables
+    )
+
+    workflow_stack = _stack(
+        tmp_path,
+        "workflow",
+        NoopDecisionProvider(),
+    )
+    _session, workflow_run, workflow_v0 = _initialize_workspace(
+        workflow_stack,
+        "workflow",
+    )
+    with pytest.raises(WorkspaceOperationError) as exc_info:
+        workflow_stack.workspace.apply_patch(
+            workflow_run.id,
+            PatchDocument.model_validate(
+                {
+                    "workspace_version": workflow_v0.id,
+                    "expected_base_hash": "hash-v0",
+                    "rationale": "Reject variables outside Chatflow.",
+                    "operations": [
+                        {
+                            "op": "conversation_variable.add",
+                            "name": "invalid",
+                            "value_type": "string",
+                            "value": "",
+                        }
+                    ],
+                }
+            ),
+        )
+    assert (
+        exc_info.value.code
+        == "PATCH_CONVERSATION_VARIABLE_MODE_UNSUPPORTED"
+    )
+    assert workflow_stack.store.get_run(
+        workflow_run.id
+    ).head_version_id == workflow_v0.id
+
+
 def test_tools_are_bounded_pinned_sanitized_and_never_expose_commit(tmp_path) -> None:
     stack = _stack(
         tmp_path,
@@ -586,6 +1145,7 @@ def test_tools_are_bounded_pinned_sanitized_and_never_expose_commit(tmp_path) ->
     assert "top-secret" not in str(inspect.observation)
     assert "[REDACTED]" in str(inspect.observation)
     assert capabilities.observation["capabilities"][0]["type"] == "if-else"
+    assert capabilities.observation["untrusted_data"] is True
     assert schema.observation["definition"]["type"] == "if-else"
     assert {spec.name for spec in stack.registry.visible_specs()} == {
         "capability.search",
@@ -596,6 +1156,44 @@ def test_tools_are_bounded_pinned_sanitized_and_never_expose_commit(tmp_path) ->
         "workflow.validate",
     }
     assert all(spec.side_effect != "dify_write" for spec in stack.registry.visible_specs())
+
+
+def test_runtime_advances_goal_plan_from_tool_semantics_not_model_step_label(
+    tmp_path,
+) -> None:
+    provider = MislabelledProgressProvider("workflow")
+    stack = _stack(tmp_path, "workflow", provider)
+    session = stack.service.create_session(
+        app_id="app-1",
+        app_mode="workflow",
+    )
+    submitted = stack.service.submit_goal(
+        session.id,
+        message="增加紧急诉求分类分支，并保持原有分支不变。",
+    )
+    run = stack.store.get_run(submitted.id)
+
+    assert run.phase == RunPhase.WAITING_APPROVAL
+    before_patch = {
+        step["id"]: step["status"]
+        for step in provider.calls[2].goal_plan["steps"]
+    }
+    assert before_patch == {
+        "observe": "completed",
+        "patch": "pending",
+        "validate": "pending",
+        "review": "pending",
+    }
+    after_patch = {
+        step["id"]: step["status"]
+        for step in provider.calls[3].goal_plan["steps"]
+    }
+    assert after_patch == {
+        "observe": "completed",
+        "patch": "completed",
+        "validate": "completed",
+        "review": "pending",
+    }
 
 
 @pytest.mark.parametrize("mode", ["workflow", "advanced-chat"])

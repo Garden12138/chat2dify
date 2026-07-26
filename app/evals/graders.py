@@ -1,77 +1,10 @@
 from __future__ import annotations
 
 from app.evals.models import (
-    EvaluationCase,
     EvaluationCaseResult,
     EvaluationGates,
     EvaluationMetrics,
 )
-
-
-def grade_case(case: EvaluationCase) -> EvaluationCaseResult:
-    result = case.expected_result
-    observed_changes = set(result.changes)
-    required_present = set(case.required_changes).issubset(observed_changes)
-    forbidden_absent = not (
-        set(case.forbidden_changes) & observed_changes
-    )
-    readable_trace = bool(
-        result.trace
-        and all(
-            isinstance(event.get("type"), str)
-            and isinstance(event.get("message"), str)
-            and event.get("type")
-            and event.get("message")
-            for event in result.trace
-        )
-    )
-    structured_terminal = (
-        result.status != "failed"
-        or bool(
-            isinstance(result.terminal_reason, dict)
-            and result.terminal_reason.get("code")
-            and result.terminal_reason.get("message")
-        )
-    )
-    invariant_passed = (
-        result.unapproved_writes == 0
-        and result.incorrect_conflict_overwrites == 0
-        and result.unrelated_preserved <= result.unrelated_total
-        and forbidden_absent
-    )
-    goal_completed = (
-        result.status == "completed"
-        and result.reviewable
-        and result.final_valid
-        and required_present
-        and forbidden_absent
-        and invariant_passed
-    )
-    return EvaluationCaseResult(
-        case_id=case.id,
-        case_version=case.version,
-        goal=case.goal,
-        app_mode=case.app_mode,
-        status=result.status,
-        reviewable=result.reviewable,
-        final_valid=result.final_valid,
-        goal_completed=goal_completed,
-        required_changes_present=required_present,
-        forbidden_changes_absent=forbidden_absent,
-        invariant_passed=invariant_passed,
-        unrelated_total=result.unrelated_total,
-        unrelated_preserved=result.unrelated_preserved,
-        repairable_failure=result.repairable_failure,
-        auto_repaired=result.auto_repaired,
-        unapproved_writes=result.unapproved_writes,
-        incorrect_conflict_overwrites=(
-            result.incorrect_conflict_overwrites
-        ),
-        readable_trace=readable_trace,
-        structured_terminal_reason=structured_terminal,
-        trace_event_count=len(result.trace),
-        terminal_reason=result.terminal_reason,
-    )
 
 
 def aggregate_metrics(

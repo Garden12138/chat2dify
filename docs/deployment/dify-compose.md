@@ -1,6 +1,6 @@
 # Dify Compose Deployment
 
-chat2dify v3.0.0 can run as an independent component beside Dify, be exposed
+chat2dify v4.0.0 can run as an independent component beside Dify, be exposed
 inside the same nginx entry point at `/chat2dify/`, and be opened from embedded
 Dify Console drawer entries.
 
@@ -89,7 +89,10 @@ http://localhost/apps
 Embedded entries:
 
 - `Chat2Dify 创建` in the Studio create-app card.
-- `Chat2Dify` in the Workflow canvas header.
+- `Chat2Dify` in the Workflow/Chatflow canvas header.
+- A Chat2Dify Builder bar on existing Chatbot, Completion, and Agent
+  configuration pages. These modes pass app identity only and do not create a
+  graph/canvas context channel.
 
 Open the direct sidecar route:
 
@@ -102,6 +105,7 @@ The embedded drawer uses URLs like:
 ```text
 /chat2dify/?embed=1&intent=create&app_mode=workflow
 /chat2dify/?embed=1&intent=modify&app_id=<app_id>&app_mode=workflow&app_name=<name>
+/chat2dify/?embed=1&intent=modify&app_id=<app_id>&app_mode=chat&app_name=<name>
 ```
 
 The component still exposes its standalone API under the mounted prefix:
@@ -119,7 +123,9 @@ POST /chat2dify/api/assistant/execute
 - If you only need the direct `/chat2dify/` route and not Dify Console embedded
   entries, the `web` rebuild is optional. For embedded entries, rebuild `web`.
 - The overlay mounts the Dify repository into the container at `/dify` as
-  read-only so chat2dify can read the current DSL version.
+  read-only so chat2dify can read the Dify package version from
+  `api/pyproject.toml` and the current DSL version. Runtime version detection
+  does not require `git` in the chat2dify image.
 - chat2dify task state is isolated in `chat2dify_data`; it does not use Dify's
   database.
 - To run chat2dify standalone, leave `CHAT2DIFY_PUBLIC_BASE_PATH` empty and run

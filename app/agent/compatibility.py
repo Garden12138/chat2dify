@@ -18,6 +18,9 @@ class DifyCompatibilityRule(StrictModel):
     dsl_versions: set[str] = Field(min_length=1)
     app_modes: set[str] = Field(min_length=1)
     level: Literal["supported"] = "supported"
+    candidate_graph_draft_run_supported: bool = False
+    create_import_idempotency_supported: bool = False
+    create_import_reconciliation_lookup_supported: bool = False
     notes: str = Field(default="", max_length=2_000)
 
 
@@ -30,6 +33,9 @@ class DifyCompatibilityDecision(StrictModel):
     level: CompatibilityLevel
     mutation_supported: bool
     diagnostic_supported: bool = True
+    candidate_graph_draft_run_supported: bool = False
+    create_import_idempotency_supported: bool = False
+    create_import_reconciliation_lookup_supported: bool = False
     reason: str
 
 
@@ -63,6 +69,15 @@ class DifyCompatibilityMatrix:
                     app_mode=app_mode,
                     level="supported",
                     mutation_supported=True,
+                    candidate_graph_draft_run_supported=(
+                        rule.candidate_graph_draft_run_supported
+                    ),
+                    create_import_idempotency_supported=(
+                        rule.create_import_idempotency_supported
+                    ),
+                    create_import_reconciliation_lookup_supported=(
+                        rule.create_import_reconciliation_lookup_supported
+                    ),
                     reason=rule.notes or "Matched a tested compatibility rule.",
                 )
         return DifyCompatibilityDecision(
@@ -109,9 +124,14 @@ def default_compatibility_rules() -> list[DifyCompatibilityRule]:
             dify_version_pattern=r"1\.14(?:\.\d+)?",
             dsl_versions={"0.6.0"},
             app_modes=all_modes,
+            candidate_graph_draft_run_supported=False,
+            create_import_idempotency_supported=False,
+            create_import_reconciliation_lookup_supported=False,
             notes=(
                 "Tested against Dify 1.14.2 Console APIs and application DSL "
-                "0.6.0."
+                "0.6.0. Draft Run cannot receive a candidate Graph, and app "
+                "import has neither request idempotency nor a reconciliation "
+                "lookup keyed by a client token."
             ),
         ),
         DifyCompatibilityRule(
@@ -119,6 +139,9 @@ def default_compatibility_rules() -> list[DifyCompatibilityRule]:
             dify_version_pattern=r"test",
             dsl_versions={"9.9.9"},
             app_modes=all_modes,
+            candidate_graph_draft_run_supported=True,
+            create_import_idempotency_supported=True,
+            create_import_reconciliation_lookup_supported=True,
             notes=(
                 "Repository-only deterministic fixture; never advertised as "
                 "a production Dify version."

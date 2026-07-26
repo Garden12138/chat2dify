@@ -1,0 +1,71 @@
+{
+  "snapshot_id": "chatflow-runtime-failure",
+  "snapshot_version": "1.0.0",
+  "template": "chatflow-runtime-broken",
+  "operation": "modify",
+  "app_mode": "advanced-chat",
+  "allow_draft_test": true,
+  "allowed_test_runs": 1,
+  "draft_failure_markers": ["eval-runtime-failure"],
+  "decisions": [
+    {
+      "type": "tool_call",
+      "tool_name": "workflow.test_draft",
+      "arguments": {
+        "workspace_version": "${workspace_version}",
+        "query": "Evaluate runtime recovery.",
+        "requested_test_runs": 1
+      },
+      "goal_step_id": "test"
+    },
+    {
+      "type": "tool_call",
+      "tool_name": "workflow.patch",
+      "arguments": {
+        "workspace_version": "${workspace_version}",
+        "expected_base_hash": "${base_hash}",
+        "rationale": "Repair the normalized runtime failure.",
+        "operations": [
+          {
+            "op": "node.update",
+            "node_id": "llm",
+            "set": {
+              "params.system_prompt": "Use the supported Chatflow query."
+            },
+            "expected": {
+              "params.system_prompt": "eval-runtime-failure"
+            }
+          }
+        ]
+      },
+      "goal_step_id": "repair"
+    },
+    {
+      "type": "tool_call",
+      "tool_name": "workflow.test_draft",
+      "arguments": {
+        "workspace_version": "${workspace_version}",
+        "query": "Evaluate repaired runtime.",
+        "requested_test_runs": 1
+      },
+      "goal_step_id": "test"
+    },
+    {
+      "type": "tool_call",
+      "tool_name": "execution.inspect",
+      "arguments": {"workspace_version": "${workspace_version}"},
+      "goal_step_id": "test"
+    },
+    {
+      "type": "tool_call",
+      "tool_name": "workflow.diff",
+      "arguments": {"workspace_version": "${workspace_version}"},
+      "goal_step_id": "review"
+    },
+    {
+      "type": "finish",
+      "summary": "The runtime failure was repaired.",
+      "evidence": ["A subsequent approved candidate run succeeded."]
+    }
+  ]
+}

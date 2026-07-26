@@ -1,0 +1,109 @@
+{
+  "snapshot_id": "existing-support-workflow",
+  "snapshot_version": "1.0.0",
+  "template": "workflow-basic",
+  "operation": "modify",
+  "app_mode": "workflow",
+  "decisions": [
+    {
+      "type": "tool_call",
+      "tool_name": "workflow.inspect",
+      "arguments": {"view": "summary"},
+      "goal_step_id": "observe"
+    },
+    {
+      "type": "tool_call",
+      "tool_name": "workflow.patch",
+      "arguments": {
+        "workspace_version": "${workspace_version}",
+        "expected_base_hash": "${base_hash}",
+        "rationale": "Add one urgent classification branch.",
+        "operations": [
+          {
+            "op": "node.add",
+            "temp_ref": "tmp_route",
+            "node_type": "if-else",
+            "title": "Classify urgency",
+            "params": {
+              "cases": [
+                {
+                  "case_id": "urgent",
+                  "logical_operator": "and",
+                  "conditions": [
+                    {
+                      "variable_selector": ["start", "query"],
+                      "comparison_operator": "contains",
+                      "value": "urgent",
+                      "varType": "string"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "op": "node.add",
+            "temp_ref": "tmp_urgent_llm",
+            "node_type": "llm",
+            "title": "Generate urgent response",
+            "params": {
+              "system_prompt": "Give urgent, actionable support.",
+              "user_prompt": "{{#start.query#}}"
+            }
+          },
+          {
+            "op": "node.add",
+            "temp_ref": "tmp_urgent_end",
+            "node_type": "end",
+            "title": "Return urgent response",
+            "params": {
+              "outputs": [
+                {
+                  "variable": "urgent_answer",
+                  "value_selector": ["tmp_urgent_llm", "text"]
+                }
+              ]
+            }
+          },
+          {
+            "op": "edge.remove",
+            "source": "start",
+            "source_handle": "source",
+            "target": "llm",
+            "target_handle": "target"
+          },
+          {"op": "edge.add", "source": "start", "target": "tmp_route"},
+          {
+            "op": "edge.add",
+            "source": "tmp_route",
+            "source_handle": "false",
+            "target": "llm"
+          },
+          {
+            "op": "edge.add",
+            "source": "tmp_route",
+            "source_handle": "urgent",
+            "target": "tmp_urgent_llm"
+          },
+          {
+            "op": "edge.add",
+            "source": "tmp_urgent_llm",
+            "target": "tmp_urgent_end"
+          }
+        ]
+      },
+      "goal_step_id": "patch"
+    },
+    {
+      "type": "tool_call",
+      "tool_name": "workflow.diff",
+      "arguments": {"workspace_version": "${workspace_version}"},
+      "goal_step_id": "review"
+    },
+    {
+      "type": "finish",
+      "summary": "The classification branch is ready.",
+      "evidence": ["The original response nodes remain present."]
+    }
+  ]
+}

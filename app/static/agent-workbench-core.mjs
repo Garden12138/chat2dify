@@ -1,6 +1,9 @@
 export const CANVAS_CONTEXT_PROTOCOL = "chat2dify.canvas-context.v1";
 export const CANVAS_CONTEXT_VERSION = "1.0";
 
+export const GRAPH_APP_MODES = new Set(["workflow", "advanced-chat"]);
+export const CONFIG_APP_MODES = new Set(["chat", "completion", "agent-chat"]);
+
 export const CANVAS_MESSAGE_TYPES = new Set([
   "dify.context.init",
   "dify.selection.changed",
@@ -36,6 +39,39 @@ export const AGENT_EVENT_TYPES = [
   "agent.completed",
   "agent.failed",
 ];
+
+export function isAgentWorkbenchSupported({
+  featureEnabled,
+  intent,
+  appMode,
+  appId,
+}) {
+  if (!featureEnabled || !["create", "modify"].includes(intent)) {
+    return false;
+  }
+  if (GRAPH_APP_MODES.has(appMode)) {
+    return intent === "create" || Boolean(String(appId || "").trim());
+  }
+  return (
+    CONFIG_APP_MODES.has(appMode)
+    && intent === "modify"
+    && Boolean(String(appId || "").trim())
+  );
+}
+
+export function supportsCanvasContext(appMode) {
+  return GRAPH_APP_MODES.has(appMode);
+}
+
+export function appModeLabel(appMode) {
+  return {
+    workflow: "工作流",
+    "advanced-chat": "对话流",
+    chat: "聊天助手",
+    completion: "文本生成应用",
+    "agent-chat": "Agent 应用",
+  }[appMode] || "Dify 应用";
+}
 
 export class CanvasContextChannel {
   constructor({ expectedOrigin, nonce, sourceWindow }) {

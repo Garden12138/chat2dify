@@ -1,0 +1,62 @@
+{
+  "snapshot_id": "completion-config-openai",
+  "snapshot_version": "1.0.0",
+  "template": "config-completion-basic",
+  "operation": "modify",
+  "app_mode": "completion",
+  "resources": [
+    {
+      "type": "model",
+      "provider": "anthropic",
+      "name": "claude-3-5-sonnet",
+      "summary": "Allowed replacement completion model."
+    }
+  ],
+  "decisions": [
+    {
+      "type": "tool_call",
+      "tool_name": "config.inspect",
+      "arguments": {"view": "model"},
+      "goal_step_id": "observe"
+    },
+    {
+      "type": "tool_call",
+      "tool_name": "config.patch",
+      "arguments": {
+        "workspace_version": "${workspace_version}",
+        "expected_base_hash": "${base_hash}",
+        "app_mode": "completion",
+        "rationale": "Replace only the configured model provider.",
+        "operations": [
+          {
+            "op": "config.model.set",
+            "value": {
+              "provider": "anthropic",
+              "name": "claude-3-5-sonnet",
+              "mode": "chat",
+              "completion_params": {"temperature": 0.2}
+            }
+          }
+        ]
+      },
+      "goal_step_id": "patch"
+    },
+    {
+      "type": "tool_call",
+      "tool_name": "config.validate",
+      "arguments": {"workspace_version": "${workspace_version}"},
+      "goal_step_id": "validate"
+    },
+    {
+      "type": "tool_call",
+      "tool_name": "config.diff",
+      "arguments": {"workspace_version": "${workspace_version}"},
+      "goal_step_id": "review"
+    },
+    {
+      "type": "finish",
+      "summary": "The configured model replacement is ready.",
+      "evidence": ["Unrelated config fields remain unchanged."]
+    }
+  ]
+}

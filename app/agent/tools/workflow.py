@@ -48,6 +48,7 @@ class CapabilitySearchInput(StrictModel):
 class CapabilitySearchOutput(StrictModel):
     capabilities: list[dict[str, Any]]
     pinned: bool = True
+    untrusted_data: bool = True
 
 
 class NodeSchemaGetInput(StrictModel):

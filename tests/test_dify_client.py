@@ -4,7 +4,13 @@ import pytest
 import httpx
 
 from app.config import Settings
-from app.dify.client import CSRF_HEADER_NAME, DifyClient, DifyClientError, DifyConflictError
+from app.dify.client import (
+    CSRF_HEADER_NAME,
+    DifyClient,
+    DifyClientError,
+    DifyConflictError,
+    _SensitiveJson,
+)
 from app.tasks import TaskCancelled
 
 
@@ -19,6 +25,15 @@ def _settings() -> Settings:
         },
         validate_dify=False,
     )
+
+
+def test_sensitive_login_payload_repr_is_redacted() -> None:
+    payload = _SensitiveJson(
+        {"email": "user@example.com", "password": "encoded-secret"}
+    )
+
+    assert repr(payload) == "<redacted-sensitive-json>"
+    assert "encoded-secret" not in repr({"json": payload})
 
 
 def test_login_encodes_password_and_import_sends_csrf_cookie() -> None:

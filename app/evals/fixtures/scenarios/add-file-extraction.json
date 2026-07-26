@@ -1,0 +1,85 @@
+{
+  "snapshot_id": "workflow-document-analysis",
+  "snapshot_version": "1.0.0",
+  "template": "workflow-basic",
+  "operation": "modify",
+  "app_mode": "workflow",
+  "allow_draft_test": true,
+  "allowed_test_runs": 1,
+  "decisions": [
+    {
+      "type": "tool_call",
+      "tool_name": "skill.search",
+      "arguments": {"names": ["file-upload-extraction"]},
+      "goal_step_id": "observe"
+    },
+    {
+      "type": "tool_call",
+      "tool_name": "workflow.patch",
+      "arguments": {
+        "workspace_version": "${workspace_version}",
+        "expected_base_hash": "${base_hash}",
+        "rationale": "Add a real file input and document extraction node.",
+        "operations": [
+          {
+            "op": "node.update",
+            "node_id": "start",
+            "set": {
+              "params": {
+                "variables": [
+                  {"name": "query", "type": "paragraph"},
+                  {"name": "files", "type": "file-list"}
+                ]
+              }
+            },
+            "expected": {"type": "start"}
+          },
+          {
+            "op": "node.add",
+            "temp_ref": "tmp_doc",
+            "node_type": "document-extractor",
+            "title": "Extract uploaded document",
+            "params": {
+              "variable_selector": ["start", "files"],
+              "is_array_file": true
+            }
+          },
+          {
+            "op": "node.update",
+            "node_id": "llm",
+            "set": {
+              "params.user_prompt": "Question: {{#start.query#}}\nDocument: {{#tmp_doc.text#}}"
+            },
+            "expected": {"type": "llm"}
+          },
+          {
+            "op": "edge.remove",
+            "source": "start",
+            "source_handle": "source",
+            "target": "llm",
+            "target_handle": "target"
+          },
+          {"op": "edge.add", "source": "start", "target": "tmp_doc"},
+          {"op": "edge.add", "source": "tmp_doc", "target": "llm"}
+        ]
+      },
+      "goal_step_id": "patch"
+    },
+    {
+      "type": "tool_call",
+      "tool_name": "workflow.test_draft",
+      "arguments": {
+        "workspace_version": "${workspace_version}",
+        "inputs": {"query": "Extract this file."},
+        "files": [],
+        "requested_test_runs": 1
+      },
+      "goal_step_id": "test"
+    },
+    {
+      "type": "ask_user",
+      "question": "Please provide the real file that should be used for the draft test.",
+      "missing": ["file"]
+    }
+  ]
+}

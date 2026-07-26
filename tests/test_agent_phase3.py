@@ -356,6 +356,7 @@ def test_minimal_input_generator_covers_types_and_requires_user_files() -> None:
         "payload": {"name": "test"},
     }
     assert generated.missing_user_inputs == ["attachments", "document"]
+    assert generated.file_input_names == ["attachments", "document"]
     overridden = MinimalTestInputGenerator().generate(
         plan,
         overrides={
@@ -364,6 +365,7 @@ def test_minimal_input_generator_covers_types_and_requires_user_files() -> None:
         },
     )
     assert overridden.missing_user_inputs == []
+    assert overridden.file_input_names == ["attachments", "document"]
     assert overridden.inputs["document"]["upload_file_id"] == "file-1"
 
 

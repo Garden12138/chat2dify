@@ -296,6 +296,18 @@ class FinishDecision(BaseModel):
 ```
 
 无论 Provider 是否原生支持 function calling，都在 Provider Adapter 后统一验证成这个协议。原生 Tool Call 可直接映射；不支持时使用严格 JSON Schema 输出。
+Registry 的规范工具名可以包含 `.`；当 Provider 的 function-name 语法不接受该
+字符时，Adapter 必须生成确定性、唯一且满足长度/字符约束的线上别名，并在协议
+验证前映射回规范名称。别名冲突必须在外呼前失败关闭。Provider 失败 Trace 只
+持久化 Provider 标签、错误类型、可选 HTTP 状态和协议阶段，不持久化响应正文、
+请求头、凭据或未脱敏上下文。
+Provider Adapter 只对网络错误、`408`、`425`、`429` 和 `5xx` 执行配置内的
+有界重试；每一次实际请求都计入服务器的模型调用预算。`4xx` 鉴权/请求错误和
+决策协议错误不在同一 Provider 上自动重试。若配置内尝试全部失败、每个错误
+都属于可重试类别且 Run 仍有模型调用预算，Runtime 将 Run 持久化为
+`interrupted`，保留 Goal Plan、Workspace Head 和已接受的 Tool checkpoint。
+后续必须由显式 Resume 继续决策循环，不自动重放任何 Tool 或副作用。只要其中
+包含不可重试错误，或模型调用预算已经耗尽，Run 仍进入终态 `failed`。
 
 ### 5.3 核心循环
 
@@ -334,6 +346,11 @@ while budget.can_continue():
         run.fail("repeated_error")
         break
 ```
+
+`goal_step_id` 只作为模型建议的 Trace 标签，不能决定 Goal Plan 进度。服务端按
+已注册工具的语义和经过输出校验的结果推进步骤：Inspect 只能完成 Observe，
+Patch 只能完成 Patch（且其内置确定性校验通过时同时完成 Validate），Diff
+才能完成 Review。这样模型不能通过错标步骤跳过 Patch、Validation 或 Review。
 
 ### 5.4 默认预算
 
@@ -540,6 +557,11 @@ Graph `PatchDocument`，也不允许两个 Operation Union 互相解析。
 新配置型应用继续使用 v3 创建入口。这样可以先复用已经存在的配置预览、运行和
 创建行为，而不把未经独立验收的创建 Adapter 放进 v4 Runtime。
 
+已有配置型应用可以进入同一个 Agent Workbench，但不建立 Canvas Context
+通道：Dify 持久化的 `model_config` 是唯一权威状态，配置型会话不等待
+`postMessage` 画布握手，也不接受节点/连线选择约束。只有 Workflow/Chatflow
+修改会话使用画布 selection、dirty state 和 draft Hash。
+
 `ConfigPatchDocument` 显式支持：
 
 ```text
@@ -673,6 +695,12 @@ class NodeDefinition(BaseModel):
 5. Catalog Snapshot 固定到 Run，避免同一 Run 中资源列表漂移；
 6. 缓存必须按 Dify 版本、Tenant 和用户配置隔离。
 
+v4.0.0 的静态目录覆盖 LLM、条件分支、End、Answer、HTTP、
+文档提取、知识检索、人工输入和 Tool 节点。Snapshot 同时通过只读 Dify
+Client 捕获可用 Dataset、Model、Tool、Agent Strategy 和 Trigger 摘要；
+这些数据在持久化和提供给模型前必须脱敏，读取失败只影响对应的动态资源类别，
+不能扩大 Capability 或写权限。
+
 不要让 Agent 依赖一个持续增长的 System Prompt 记住所有节点参数。
 
 ## 10. 分层验证与 Repair
@@ -753,6 +781,11 @@ LLM 只负责在确定 Schema 后生成更贴近目标的样例值。
 - Workflow Draft Run 请求只接受 `inputs` 和 `files`；
 - Chatflow Draft Run 请求只接受 `query`、`inputs`、`files` 和会话标识；
 - 两个接口都不接受候选 Graph 或 DSL，实际运行的是 Dify 已持久化草稿。
+
+localhost Dify `1.14.2` 的真实探针进一步确认了该行为：对一个无模型、
+无外部副作用的 Start → End 工作流，正常 Draft Run 返回持久化基线；同一请求
+附带修改后的候选 Graph 时仍返回完全相同的基线输出，并且草稿 Hash 与 Graph
+均未变化。因此不能把请求中的额外 Graph 字段视为候选执行能力。
 
 因此 Phase 3 使用显式 `DraftExecutionAdapter` 边界：
 
@@ -901,6 +934,9 @@ agent.failed
 - 用户可以从最后一个成功工作区版本显式恢复；
 - 不自动重放正在执行的 Dify Run 或 Commit；
 - Commit 使用幂等键和 Hash，防止重启后重复写；
+- 创建导入的幂等性由服务端 checkpoint/receipt 保证，不能依赖 Dify
+  `Idempotency-Key`；真实 Dify `1.14.2` 探针证明同一键重复导入会创建两个
+  不同 App。若响应中没有 App/Import ID，必须停止并人工对账；
 - 如果 Dify Hash 已变化，进入 `conflicted`，重新观察后生成新的 Preview。
 
 ### 12.4 Undo
@@ -1042,6 +1078,13 @@ context_nonce
 ```
 
 Tool 原始参数、完整 Plan 和 DSL 放在折叠的技术视图中。
+
+Workbench 对 Workflow/Chatflow 支持创建和修改，对 Chatbot、Completion 和
+Dify Agent 只支持带现有 App ID 的修改。配置型应用复用 Goal Plan、Trace、
+Diff、Approval 和 Commit UI，但显示“配置应用不使用画布上下文”，不会因缺少
+Canvas `postMessage` 握手而禁用输入。Dify Web Adapter 在配置页提供独立的
+Builder 操作条和 Chat2Dify 入口，传递 `intent=modify`、App ID、App Mode 和
+App Name，不创建或发送伪造的画布上下文。
 
 ## 15. 建议代码结构
 
@@ -1308,11 +1351,13 @@ approval_for_vN_cannot_commit_vN+1
 
 ### 18.4 Phase 4 离线评测执行决策
 
-默认发布评测使用版本化 JSON Case 和确定性 Fixture Replay，不调用真实 Provider
-或 Dify。每个 Case 固定 Goal、Snapshot 版本、允许能力/资源、不变量、
-必须/禁止变更、预算、副作用策略、预期验证、Trace 和终止原因。Runner 按 Case
-ID 排序并生成无时间戳、键顺序固定的机器可读报告，因此同一版本输入可逐字节
-复现。
+默认发布评测使用版本化 JSON Case 和 Scenario，由确定性 Decision Provider
+驱动真实 `AgentRuntime`、Tool Registry、版本化 Workspace、Patch Engine、
+Validation、Review、Approval 和 Draft Run Service。它不调用真实 Provider 或
+Dify，也不执行 Commit；只有模型决策和 Dify 执行 Adapter 被确定性替身隔离。
+Grader 从实际 Workspace 前后版本、Run 状态、Approval 和 append-only Events
+计算结果，不从 Case 的 `expected_result` 直接复制分数。Runner 按 Case ID
+排序并生成无时间戳、键顺序固定的机器可读报告，因此同一版本输入可逐字节复现。
 
 Live-provider 评测通过 `EvaluationExecutor` 边界注入，并要求显式
 `allow_live_provider=True`。默认 CI 不会因为存在 Provider 配置而自动切换成
@@ -1329,6 +1374,10 @@ Capability 和可变更行为按 Run Snapshot 固定到 Dify/DSL 兼容决策。
 未知组合保留有界 Inspect/Validate 诊断，但 Graph/Config Patch 和 Commit
 返回 `DIFY_VERSION_MUTATION_UNSUPPORTED`。仓库中的 `test` / `9.9.9` 规则只用于
 确定性测试，不属于生产兼容声明。
+
+容器内的版本识别优先读取只读挂载源码的 `api/pyproject.toml`，再在元数据缺失
+时回退到 `git describe`。这样精简运行镜像不需要安装 Git，也不会把
+`git_describe=unknown` 误判成不兼容而永久阻塞受支持版本的变更。
 
 ## 19. 风险与对策
 

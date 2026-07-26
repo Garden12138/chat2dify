@@ -2,11 +2,14 @@ import {
   AGENT_EVENT_TYPES,
   CanvasContextChannel,
   EventCursor,
+  appModeLabel,
   approvalMatchesVisibleVersion,
   commitBlockReason,
+  isAgentWorkbenchSupported,
   parseSse,
   reviewDiffRows,
   runControlState,
+  supportsCanvasContext,
   testPresentation,
   timelinePresentation,
   undoPresentation,
@@ -22,9 +25,12 @@ const appName = params.get("app_name") || "";
 const embedded = ["1", "true", "yes"].includes(
   (params.get("embed") || "").toLowerCase(),
 );
-const enabled = Boolean(config.agentV4Enabled)
-  && ["create", "modify"].includes(intent)
-  && ["workflow", "advanced-chat"].includes(appMode);
+const enabled = isAgentWorkbenchSupported({
+  featureEnabled: Boolean(config.agentV4Enabled),
+  intent,
+  appMode,
+  appId,
+});
 
 const workbenchState = {
   session: null,
@@ -54,8 +60,8 @@ async function bootAgentWorkbench() {
   document.querySelector("#legacy-workbench")?.setAttribute("hidden", "");
   elements.root.hidden = false;
   elements.title.textContent = intent === "create"
-    ? `新建${appMode === "advanced-chat" ? "对话流" : "工作流"}`
-    : (appName || "Dify Agent Workbench");
+    ? `新建${appModeLabel(appMode)}`
+    : (appName || `修改${appModeLabel(appMode)}`);
   bindActions();
   setupCanvasChannel();
   try {
@@ -106,6 +112,11 @@ function bindActions() {
 }
 
 function setupCanvasChannel() {
+  if (!supportsCanvasContext(appMode)) {
+    elements.selection.textContent = "使用持久化 Dify 配置";
+    setContextStatus("配置应用不使用画布上下文", "ok");
+    return;
+  }
   if (intent !== "modify") {
     setContextStatus("新建模式不读取现有画布", "ok");
     return;
@@ -611,7 +622,7 @@ function queueCanvasContextSync() {
 
 function canvasConstraints() {
   const context = workbenchState.canvasContext;
-  if (intent !== "modify" || !context) {
+  if (!supportsCanvasContext(appMode) || intent !== "modify" || !context) {
     return {};
   }
   return {
@@ -626,7 +637,9 @@ function canvasConstraints() {
 }
 
 function updateComposerAvailability() {
-  const needsHandshake = intent === "modify" && embedded;
+  const needsHandshake = supportsCanvasContext(appMode)
+    && intent === "modify"
+    && embedded;
   const hasContext = Boolean(workbenchState.canvasContext);
   const run = workbenchState.run;
   const blockedByRun = run && !isTerminalRun(run)

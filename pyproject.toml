@@ -1,6 +1,10 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "chat2dify"
-version = "3.0.0"
+version = "4.0.0"
 description = "Dify panel component for creating, editing, running, and publishing apps from natural language."
 requires-python = ">=3.11"
 dependencies = [
@@ -21,4 +25,16 @@ testpaths = ["tests"]
 pythonpath = ["."]
 markers = [
     "live_dify: destructive localhost-only Dify integration acceptance; disabled unless explicitly enabled",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+app = [
+    "evals/cases/*.json",
+    "evals/fixtures/**/*.json",
+    "evals/reports/*.json",
+    "static/*",
 ]

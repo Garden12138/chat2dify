@@ -101,6 +101,7 @@ class EvaluationCaseResult(StrictModel):
     structured_terminal_reason: bool
     trace_event_count: int
     terminal_reason: dict[str, Any] | None = None
+    executor_evidence: dict[str, Any] = Field(default_factory=dict)
 
 
 class EvaluationMetrics(StrictModel):
@@ -134,6 +135,7 @@ class EvaluationReport(StrictModel):
     executor: str
     live_provider: bool
     reproducible: bool
+    runtime_executed: bool
     cases: list[EvaluationCaseResult]
     metrics: EvaluationMetrics
     gates: EvaluationGates

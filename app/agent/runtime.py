@@ -391,15 +391,19 @@ class AgentRuntime:
         execution_succeeded = bool(
             execution and execution.get("status") == "succeeded"
         )
-        run = _update_goal_step(
+        run = _update_goal_steps(
             run,
-            decision.goal_step_id,
-            evidence=observation.summary,
-            completed=(
-                execution_succeeded
-                if execution is not None
-                else result.ok
+            _goal_step_updates(
+                run,
+                decision.tool_name,
+                result,
+                completed=(
+                    execution_succeeded
+                    if execution is not None
+                    else result.ok
+                ),
             ),
+            evidence=observation.summary,
         )
         if execution is not None and not execution_succeeded:
             run = _record_same_error(
@@ -666,12 +670,54 @@ class AgentRuntime:
         if run.terminal:
             return _run_summary(run)
         code = getattr(exc, "code", "AGENT_RUNTIME_FAILED")
+        details = getattr(exc, "details", [])
+        error = {
+            "code": str(code),
+            "message": f"Agent Runtime failed with {exc.__class__.__name__}.",
+            **(
+                {"details": redact_sensitive_data(details)}
+                if isinstance(details, list) and details
+                else {}
+            ),
+        }
+        if (
+            isinstance(exc, DecisionProviderError)
+            and _retryable_provider_failure(details)
+            and run.budget_usage.model_calls < run.budget.max_model_calls
+        ):
+            interrupted = run.transition_to(
+                RunPhase.INTERRUPTED,
+                error={
+                    **error,
+                    "retryable": True,
+                    "next_action": (
+                        "Explicitly resume this Run to continue from the last "
+                        "accepted Tool checkpoint without replaying a side effect."
+                    ),
+                },
+            )
+            interrupted = self.store.update_run(interrupted)
+            self.store.append_event(
+                run_id=run.id,
+                event_type="agent.paused",
+                phase=interrupted.phase.value,
+                message=(
+                    "Agent Run was interrupted by retryable decision Provider "
+                    "failures."
+                ),
+                data={
+                    "reason": "decision_provider_retryable",
+                    "side_effect_replay": False,
+                    "remaining_model_calls": (
+                        run.budget.max_model_calls
+                        - run.budget_usage.model_calls
+                    ),
+                },
+            )
+            return _run_summary(interrupted)
         failed = run.transition_to(
             RunPhase.FAILED,
-            error={
-                "code": str(code),
-                "message": f"Agent Runtime failed with {exc.__class__.__name__}.",
-            },
+            error=error,
         )
         failed = self.store.update_run(failed)
         self.store.append_event(
@@ -686,6 +732,13 @@ class AgentRuntime:
     @staticmethod
     def _raise_repeated_error(code: str) -> None:
         raise RepeatedAgentError(f"Repeated identical Tool error: {code}")
+
+
+def _retryable_provider_failure(details: Any) -> bool:
+    return bool(details) and isinstance(details, list) and all(
+        isinstance(detail, dict) and detail.get("retryable") is True
+        for detail in details
+    )
 
 
 def _initial_goal_plan(
@@ -833,27 +886,83 @@ def _with_observation(run: AgentRun, observation: Observation) -> AgentRun:
     )
 
 
-def _update_goal_step(
+def _goal_step_updates(
     run: AgentRun,
-    step_id: str,
+    tool_name: str,
+    result: ToolResult,
+    *,
+    completed: bool,
+) -> dict[str, bool]:
+    if run.goal_plan is None:
+        return {}
+    if tool_name in {"workflow.patch", "config.patch"}:
+        steps_by_id = {step.id: step for step in run.goal_plan.steps}
+        mutation_step = "patch"
+        repair = steps_by_id.get("repair")
+        patch = steps_by_id.get("patch")
+        if (
+            repair is not None
+            and patch is not None
+            and patch.status == "completed"
+            and repair.status != "completed"
+        ):
+            mutation_step = "repair"
+        updates = {mutation_step: completed}
+        validation = result.observation.get("validation")
+        if (
+            result.ok
+            and isinstance(validation, dict)
+            and bool(validation.get("ok"))
+        ):
+            updates["validate"] = True
+        return updates
+    step_id = {
+        "workflow.inspect": "observe",
+        "config.inspect": "observe",
+        "capability.search": "observe",
+        "node.schema.get": "observe",
+        "workflow.validate": "validate",
+        "config.validate": "validate",
+        "workflow.diff": "review",
+        "config.diff": "review",
+        "workflow.test_draft": "test",
+        "execution.inspect": "inspect",
+    }.get(tool_name)
+    return {step_id: completed} if step_id is not None else {}
+
+
+def _update_goal_steps(
+    run: AgentRun,
+    updates: dict[str, bool],
     *,
     evidence: str,
-    completed: bool,
 ) -> AgentRun:
-    if run.goal_plan is None:
+    if run.goal_plan is None or not updates:
         return run
+    current_status = {
+        step.id: step.status
+        for step in run.goal_plan.steps
+    }
     steps = []
-    matched = False
+    changed = False
     for step in run.goal_plan.steps:
         payload = step.model_dump()
-        if step.id == step_id:
-            matched = True
-            payload["status"] = "completed" if completed else "in_progress"
+        requested_completion = updates.get(step.id)
+        if requested_completion is not None and step.status != "completed":
+            dependencies_complete = all(
+                current_status.get(dependency) == "completed"
+                or updates.get(dependency) is True
+                for dependency in step.depends_on
+            )
+            payload["status"] = (
+                "completed"
+                if requested_completion and dependencies_complete
+                else "in_progress"
+            )
             payload["evidence"] = [*step.evidence, evidence][-100:]
-        elif step.status == "pending" and not matched:
-            payload["status"] = step.status
+            changed = True
         steps.append(GoalStep.model_validate(payload))
-    if not matched:
+    if not changed:
         return run
     goal_plan = GoalPlan.model_validate(
         {

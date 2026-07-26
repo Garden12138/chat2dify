@@ -3,10 +3,16 @@ from __future__ import annotations
 import json
 from typing import Annotated, Any, Literal
 
-from pydantic import ConfigDict, Field, StringConstraints, field_validator
+from pydantic import (
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from app.agent.state import StrictModel
-from app.models import NodeType
+from app.models import ConversationVariableType, NodeType
 
 
 MAX_PATCH_OPERATIONS = 50
@@ -84,8 +90,73 @@ class RemoveEdge(PatchOperationBase):
     target_handle: str = Field(min_length=1, max_length=128)
 
 
+class ConversationVariableAdd(PatchOperationBase):
+    op: Literal["conversation_variable.add"]
+    name: str = Field(min_length=1, max_length=256)
+    value_type: ConversationVariableType
+    value: Any
+    description: str = Field(default="", max_length=2_000)
+
+    @field_validator("value")
+    @classmethod
+    def validate_value(cls, value: Any) -> Any:
+        _validate_bounded_json(value, field_name="conversation_variable.value")
+        return value
+
+
+class ConversationVariableUpdateValues(StrictModel):
+    name: str | None = Field(default=None, min_length=1, max_length=256)
+    value_type: ConversationVariableType | None = None
+    value: Any | None = None
+    description: str | None = Field(default=None, max_length=2_000)
+
+    @model_validator(mode="after")
+    def require_update(self) -> "ConversationVariableUpdateValues":
+        if all(
+            value is None
+            for value in (
+                self.name,
+                self.value_type,
+                self.value,
+                self.description,
+            )
+        ):
+            raise ValueError(
+                "conversation_variable.update requires at least one field."
+            )
+        if self.value is not None:
+            _validate_bounded_json(
+                self.value,
+                field_name="conversation_variable.value",
+            )
+        return self
+
+
+class ConversationVariableUpdate(PatchOperationBase):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    op: Literal["conversation_variable.update"]
+    variable_id: NodeReference
+    set_values: ConversationVariableUpdateValues = Field(alias="set")
+    expected_name: str | None = Field(default=None, min_length=1, max_length=256)
+    expected_value_type: ConversationVariableType | None = None
+
+
+class ConversationVariableRemove(PatchOperationBase):
+    op: Literal["conversation_variable.remove"]
+    variable_id: NodeReference
+    expected_name: str | None = Field(default=None, min_length=1, max_length=256)
+    expected_value_type: ConversationVariableType | None = None
+
+
 PatchOperation = Annotated[
-    AddNode | UpdateNode | AddEdge | RemoveEdge,
+    AddNode
+    | UpdateNode
+    | AddEdge
+    | RemoveEdge
+    | ConversationVariableAdd
+    | ConversationVariableUpdate
+    | ConversationVariableRemove,
     Field(discriminator="op"),
 ]
 

@@ -53,10 +53,12 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
 
     assert index.status_code == 200
     assert "chat2dify" in index.text
-    assert "chat-v3.0.0" in index.text
-    assert 'href="static/styles.css?v=chat-v3.0.0"' in index.text
-    assert 'src="static/app.js?v=chat-v3.0.0"' in index.text
-    assert '"version": "3.0.0"' in index.text
+    assert "chat-v4.0.0" in index.text
+    assert 'href="static/styles.css?v=chat-v4.0.0"' in index.text
+    assert "[hidden]" in styles.text
+    assert "display: none !important;" in styles.text
+    assert 'src="static/app.js?v=chat-v4.0.0"' in index.text
+    assert '"version": "4.0.0"' in index.text
     assert index.headers["cache-control"] == "no-store"
     assert 'id="chat-log"' in index.text
     assert 'id="chat-form"' in index.text
@@ -104,7 +106,7 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert "BASE_PATH" in script.text
     assert "apiUrl(path)" in script.text
     assert "applyContextHints(text)" not in script.text
-    assert app.version == "3.0.0"
+    assert app.version == "4.0.0"
     assert styles.status_code == 200
     assert ".chat-shell" in styles.text
     assert ".chat-composer" in styles.text
@@ -132,7 +134,7 @@ def test_health_returns_configured_dataset_count(monkeypatch) -> None:
 
     assert response.status_code == 200
     data = response.json()
-    assert data["version"] == "3.0.0"
+    assert data["version"] == "4.0.0"
     assert data["component"]["kind"] == "dify-panel-component"
     assert data["component"]["panel_url"] == "/"
     assert data["configured_dataset_count"] == 2
@@ -152,7 +154,7 @@ def test_panel_manifest_uses_public_base_path(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json() == {
         "name": "chat2dify",
-        "version": "3.0.0",
+        "version": "4.0.0",
         "kind": "dify-panel-component",
         "mount_path": "/chat2dify",
         "panel_url": "/chat2dify/",

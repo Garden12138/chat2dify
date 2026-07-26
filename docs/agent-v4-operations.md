@@ -41,7 +41,9 @@ Draft Run, or publish APIs.
 Configured-app creation deliberately remains on v3 in v4.0.0. Existing
 configured apps gain v4 inspect, Patch, validate, Diff, review, approval, and
 Hash-checked Commit. Graph Patch and Config Patch types are not convertible or
-interchangeable.
+interchangeable. The Dify configuration page exposes a Chat2Dify Builder bar
+for these existing apps. It passes only the app identity and mode into the
+Sidecar; unlike Workflow/Chatflow, it does not open a Canvas Context channel.
 
 ## Approval and Hash boundaries
 
@@ -115,6 +117,12 @@ After process restart:
 5. an in-flight side effect is not replayed;
 6. Commit rechecks approval, Workspace version, and Dify Hash.
 
+Exhausted decision-Provider attempts also become `interrupted` only when every
+recorded failure is retryable (network, 408/425/429, or 5xx) and model-call
+budget remains. Explicit Resume continues from the last accepted Tool
+checkpoint. Authentication/request 4xx, decision-contract failures, and
+budget exhaustion remain terminal failures.
+
 Before Commit, Undo moves only the graph Workspace head to its parent and
 invalidates approval. After Workflow/Chatflow Commit, Undo creates a new
 compensating preview with a new approval. Configured-app compensating Undo is
@@ -157,10 +165,29 @@ python -m app.evals.runner \
 ```
 
 It loads versioned JSON cases from `app/evals/cases/`, uses deterministic
-fixture replay, and emits a sorted machine-readable report. Live-provider
-executors must implement the `EvaluationExecutor` protocol and be passed with
-`allow_live_provider=True`; this explicit opt-in prevents the default suite
-from making provider or Dify calls.
+scenarios to drive the real `AgentRuntime`, Tool Registry, versioned Workspace,
+Patch, validation, review, approval, and Draft Run services, and emits a sorted
+machine-readable report. The grader reads the resulting Workspace, Run,
+Approval, and Event evidence; it does not copy `expected_result` fields into
+scores. The deterministic decision and execution adapters make no Provider,
+Dify, or Commit call.
+
+Localhost-only Dify acceptance is opt-in because it creates and deletes
+isolated temporary apps:
+
+```bash
+CHAT2DIFY_LIVE_DIFY_ACCEPTANCE=1 \
+python -m pytest -q \
+  tests/test_agent_phase1a_live.py \
+  tests/test_agent_phase2_live.py \
+  tests/test_agent_release_live.py
+```
+
+The additional real-Provider case requires both the localhost Dify flag and
+`CHAT2DIFY_LIVE_PROVIDER_ACCEPTANCE=1`. It sends a bounded, sanitized workflow
+goal/context to the configured Provider, allows at most eight model calls,
+stops at review, and performs no Dify Commit or publish. Enable it only after
+the operator explicitly approves that external data transfer.
 
 ## Extending the Builder Agent
 
