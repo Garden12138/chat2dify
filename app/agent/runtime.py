@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import json
 from typing import Any
 
 from app.agent.approval import AgentApprovalService
@@ -17,10 +18,12 @@ from app.agent.snapshot import WorkflowSnapshotService
 from app.agent.state import (
     AgentBudgetUsage,
     AgentRun,
+    ApprovalStatus,
     GoalPlan,
     GoalStep,
     Observation,
     RunPhase,
+    ToolCallDecision,
     utc_now,
 )
 from app.agent.store import AgentStore, AgentStoreConflict
@@ -80,7 +83,11 @@ class AgentRuntime:
             return run
         session = self.store.get_session(run.session_id)
         snapshot = self.snapshot.capture(session)
-        goal_plan = _initial_goal_plan(run.goal, operation=snapshot.operation)
+        goal_plan = _initial_goal_plan(
+            run.goal,
+            operation=snapshot.operation,
+            allow_draft_test=run.constraints.allow_draft_test,
+        )
         try:
             run, version = self.workspace.initialize(run, snapshot, goal_plan)
         except AgentStoreConflict:
@@ -129,10 +136,18 @@ class AgentRuntime:
             exhaustion = _budget_exhaustion(run)
             if exhaustion:
                 return self._budget_failed(run, exhaustion)
+            pending_draft = self._pending_draft_decision(run)
+            if pending_draft is not None:
+                run = self._execute_tool(run, pending_draft)
+                continue
             context = self.context_builder.build(run)
+            context_tokens = _estimate_context_tokens(context.model_dump(mode="json"))
+            if context_tokens > run.budget.max_context_tokens:
+                return self._budget_failed(run, "max_context_tokens")
             run = _with_usage(
                 run,
                 iterations=1,
+                context_tokens=context_tokens,
             )
             run = AgentRun.model_validate(
                 {
@@ -213,7 +228,45 @@ class AgentRuntime:
             run = self.store.update_run(run.transition_to(RunPhase.ACTING))
         registered = self.registry.get(decision.tool_name)
         if registered is not None:
-            authorization = self.policy.authorize(registered.spec, run)
+            authorization = self.policy.authorize(
+                registered.spec,
+                run,
+                decision.arguments,
+                goal_step_id=decision.goal_step_id,
+            )
+            if authorization.requires_approval:
+                approval = self.approval.request_for_draft_run(
+                    run.id,
+                    authorization.approval_scope,
+                )
+                paused = run.transition_to(RunPhase.WAITING_APPROVAL)
+                paused = _with_observation(
+                    paused,
+                    Observation(
+                        kind="test.approval_required",
+                        summary="Draft Run is waiting for persisted user approval.",
+                        data={
+                            "approval_id": approval.id,
+                            "input_preview": approval.scope.get("input_preview"),
+                            "side_effects": approval.scope.get("side_effects"),
+                            "requested_test_runs": approval.scope.get(
+                                "requested_test_runs"
+                            ),
+                        },
+                    ),
+                )
+                paused = self.store.update_run(paused)
+                self.store.append_event(
+                    run_id=run.id,
+                    event_type="agent.paused",
+                    phase=paused.phase.value,
+                    message="Agent Run paused for Draft Run approval.",
+                    data={
+                        "approval_id": approval.id,
+                        "action": approval.action,
+                    },
+                )
+                return paused
             if not authorization.allowed:
                 result = ToolResult(
                     ok=False,
@@ -223,7 +276,7 @@ class AgentRuntime:
                         "code": authorization.code or "TOOL_POLICY_DENIED",
                         "message": authorization.message
                         or "Tool was denied by server policy.",
-                        "details": [],
+                        "details": authorization.details,
                         "retryable": False,
                     },
                 )
@@ -238,6 +291,11 @@ class AgentRuntime:
             > run.budget.max_patch_operations
         ):
             return self._budget_failed_run(run, "max_patch_operations")
+        if (
+            decision.tool_name == "workflow.test_draft"
+            and run.phase == RunPhase.ACTING
+        ):
+            run = self.store.update_run(run.transition_to(RunPhase.TESTING))
         self.store.append_event(
             run_id=run.id,
             event_type="tool.started",
@@ -297,13 +355,38 @@ class AgentRuntime:
             ),
         )
         run = _with_observation(run, observation)
+        execution = (
+            result.observation.get("execution")
+            if result.ok
+            and decision.tool_name == "workflow.test_draft"
+            and isinstance(result.observation.get("execution"), dict)
+            else None
+        )
+        execution_succeeded = bool(
+            execution and execution.get("status") == "succeeded"
+        )
         run = _update_goal_step(
             run,
             decision.goal_step_id,
             evidence=observation.summary,
-            completed=result.ok,
+            completed=(
+                execution_succeeded
+                if execution is not None
+                else result.ok
+            ),
         )
-        if result.ok:
+        if execution is not None and not execution_succeeded:
+            run = _record_same_error(
+                run,
+                _execution_error_signature(execution),
+            )
+        elif result.ok and not (
+            run.budget_usage.latest_error_signature
+            and run.budget_usage.latest_error_signature.startswith(
+                ("EXECUTION_", "DRAFT_RUN_")
+            )
+            and decision.tool_name != "workflow.test_draft"
+        ):
             run = _reset_same_error(run)
         else:
             run = _record_same_error(run, _tool_error_signature(result))
@@ -352,6 +435,49 @@ class AgentRuntime:
                     message="Rejected Patch failed deterministic validation; head unchanged.",
                     data={"issues": result.error.details},
                 )
+        if decision.tool_name == "workflow.test_draft":
+            current = self.store.get_run(run.id)
+            if current.phase == RunPhase.TESTING:
+                run = self.store.update_run(
+                    current.transition_to(RunPhase.ACTING)
+                )
+            else:
+                run = current
+            if (
+                execution is not None
+                and not execution_succeeded
+                and bool(execution.get("retryable"))
+            ):
+                self.store.append_event(
+                    run_id=run.id,
+                    event_type="repair.started",
+                    phase=run.phase.value,
+                    message="Draft Run failure was normalized for bounded repair.",
+                    data={
+                        "workspace_version_id": result.workspace_version,
+                        "error_code": execution.get("error_code"),
+                        "failed_node_id": execution.get("failed_node_id"),
+                        "retryable": execution.get("retryable"),
+                    },
+                )
+            if (
+                execution is not None
+                and not execution_succeeded
+                and run.budget_usage.same_error_retries
+                > run.budget.max_same_error_retries
+            ):
+                return self._budget_failed_run(
+                    run,
+                    "max_same_error_retries",
+                )
+            if (
+                run.budget_usage.test_total_tokens
+                > run.budget.max_test_total_tokens
+            ):
+                return self._budget_failed_run(
+                    run,
+                    "max_test_total_tokens",
+                )
         if (
             not result.ok
             and run.budget_usage.same_error_retries
@@ -359,6 +485,35 @@ class AgentRuntime:
         ):
             self._raise_repeated_error(result.error.code)
         return run
+
+    def _pending_draft_decision(
+        self,
+        run: AgentRun,
+    ) -> ToolCallDecision | None:
+        for approval in self.store.list_approvals(run.id):
+            scope = approval.scope
+            if (
+                approval.action != "draft_run"
+                or approval.status != ApprovalStatus.APPROVED
+                or approval.expires_at <= utc_now()
+                or not bool(scope.get("pending"))
+                or approval.workspace_version_id != run.head_version_id
+            ):
+                continue
+            return ToolCallDecision(
+                type="tool_call",
+                tool_name="workflow.test_draft",
+                arguments={
+                    "workspace_version": run.head_version_id,
+                    "inputs": scope.get("inputs") or {},
+                    "query": scope.get("query"),
+                    "files": scope.get("files") or [],
+                    "timeout_seconds": scope.get("timeout_seconds") or 120,
+                    "requested_test_runs": scope.get("allowed_test_runs") or 1,
+                },
+                goal_step_id=str(scope.get("goal_step_id") or "test"),
+            )
+        return None
 
     def _finish_for_review(
         self,
@@ -454,6 +609,18 @@ class AgentRuntime:
                 "message": f"Agent budget exhausted: {reason}.",
                 "reason": reason,
                 "partial_review": review_data,
+                "attempts": {
+                    "iterations": run.budget_usage.iterations,
+                    "model_calls": run.budget_usage.model_calls,
+                    "patch_operations": run.budget_usage.patch_operations,
+                    "test_runs": run.budget_usage.test_runs,
+                    "test_total_tokens": run.budget_usage.test_total_tokens,
+                    "same_error_retries": run.budget_usage.same_error_retries,
+                },
+                "next_action": (
+                    "Review the partial Diff and explicitly start or resume a "
+                    "Run with a new server-enforced budget."
+                ),
             },
         )
         failed = self.store.update_run(failed)
@@ -497,6 +664,7 @@ def _initial_goal_plan(
     goal: str,
     *,
     operation: str = "modify",
+    allow_draft_test: bool = False,
 ) -> GoalPlan:
     create_mode = operation == "create"
     return GoalPlan(
@@ -539,10 +707,31 @@ def _initial_goal_plan(
                 description="Run deterministic validation and repair if needed.",
                 depends_on=["patch"],
             ),
+            *(
+                [
+                    GoalStep(
+                        id="test",
+                        description="Run an approved Draft with bounded test inputs.",
+                        depends_on=["validate"],
+                    ),
+                    GoalStep(
+                        id="inspect",
+                        description="Inspect the sanitized execution observation.",
+                        depends_on=["test"],
+                    ),
+                    GoalStep(
+                        id="repair",
+                        description="Apply bounded repair Patches and revalidate.",
+                        depends_on=["inspect"],
+                    ),
+                ]
+                if allow_draft_test
+                else []
+            ),
             GoalStep(
                 id="review",
                 description="Prepare business Diff, technical Diff, and risk.",
-                depends_on=["validate"],
+                depends_on=["repair" if allow_draft_test else "validate"],
             ),
         ],
     )
@@ -554,6 +743,7 @@ def _with_usage(
     iterations: int = 0,
     model_calls: int = 0,
     patch_operations: int = 0,
+    context_tokens: int | None = None,
 ) -> AgentRun:
     usage = run.budget_usage
     updated_usage = AgentBudgetUsage.model_validate(
@@ -562,6 +752,11 @@ def _with_usage(
             "iterations": usage.iterations + iterations,
             "model_calls": usage.model_calls + model_calls,
             "patch_operations": usage.patch_operations + patch_operations,
+            "context_tokens": (
+                max(usage.context_tokens, context_tokens)
+                if context_tokens is not None
+                else usage.context_tokens
+            ),
         }
     )
     return AgentRun.model_validate(
@@ -695,6 +890,16 @@ def _tool_error_signature(result: ToolResult) -> str:
     ).rstrip(":")
 
 
+def _execution_error_signature(execution: dict[str, Any]) -> str:
+    return ":".join(
+        [
+            str(execution.get("error_code") or "EXECUTION_ERROR_UNKNOWN"),
+            str(execution.get("failed_node_id") or ""),
+            str(execution.get("failed_node_type") or ""),
+        ]
+    ).rstrip(":")
+
+
 def _reset_same_error(run: AgentRun) -> AgentRun:
     usage = AgentBudgetUsage.model_validate(
         {
@@ -718,10 +923,22 @@ def _budget_exhaustion(run: AgentRun) -> str | None:
         return "max_iterations"
     if usage.model_calls >= run.budget.max_model_calls:
         return "max_model_calls"
+    if usage.test_total_tokens > run.budget.max_test_total_tokens:
+        return "max_test_total_tokens"
     elapsed = (utc_now() - run.created_at).total_seconds()
     if elapsed >= run.budget.max_run_seconds:
         return "max_run_seconds"
     return None
+
+
+def _estimate_context_tokens(value: dict[str, Any]) -> int:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=str,
+    )
+    return max(1, (len(payload) + 3) // 4)
 
 
 def _run_summary(run: AgentRun) -> dict[str, Any]:

@@ -116,8 +116,10 @@ _RUN_PHASE_TRANSITIONS: dict[RunPhase, frozenset[RunPhase]] = {
     RunPhase.ACTING: frozenset(
         {
             RunPhase.VALIDATING,
+            RunPhase.TESTING,
             RunPhase.PAUSED,
             RunPhase.WAITING_USER,
+            RunPhase.WAITING_APPROVAL,
             RunPhase.CANCELLED,
             RunPhase.FAILED,
             RunPhase.INTERRUPTED,
@@ -148,7 +150,13 @@ _RUN_PHASE_TRANSITIONS: dict[RunPhase, frozenset[RunPhase]] = {
         {RunPhase.PLANNING, RunPhase.CANCELLED, RunPhase.FAILED, RunPhase.INTERRUPTED}
     ),
     RunPhase.WAITING_APPROVAL: frozenset(
-        {RunPhase.COMMITTING, RunPhase.CANCELLED, RunPhase.FAILED, RunPhase.INTERRUPTED}
+        {
+            RunPhase.PLANNING,
+            RunPhase.COMMITTING,
+            RunPhase.CANCELLED,
+            RunPhase.FAILED,
+            RunPhase.INTERRUPTED,
+        }
     ),
     RunPhase.PAUSED: frozenset(
         {
@@ -292,8 +300,10 @@ class AgentBudget(StrictModel):
     max_model_calls: int = Field(default=6, ge=1, le=100)
     max_patch_operations: int = Field(default=50, ge=1, le=500)
     max_test_runs: int = Field(default=3, ge=0, le=100)
+    max_test_total_tokens: int = Field(default=100_000, ge=0, le=100_000_000)
     max_same_error_retries: int = Field(default=2, ge=0, le=20)
     max_run_seconds: int = Field(default=600, ge=1, le=86_400)
+    max_context_tokens: int = Field(default=32_000, ge=256, le=2_000_000)
 
 
 class AgentBudgetUsage(StrictModel):
@@ -301,8 +311,10 @@ class AgentBudgetUsage(StrictModel):
     model_calls: int = Field(default=0, ge=0)
     patch_operations: int = Field(default=0, ge=0)
     test_runs: int = Field(default=0, ge=0)
+    test_total_tokens: int = Field(default=0, ge=0)
     same_error_retries: int = Field(default=0, ge=0)
     latest_error_signature: str | None = Field(default=None, max_length=1_000)
+    context_tokens: int = Field(default=0, ge=0)
 
 
 class CanvasViewport(StrictModel):

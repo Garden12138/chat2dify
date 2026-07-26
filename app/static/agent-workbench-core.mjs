@@ -24,6 +24,7 @@ export const AGENT_EVENT_TYPES = [
   "repair.started",
   "test.approval_required",
   "test.started",
+  "test.progress",
   "test.completed",
   "review.ready",
   "approval.required",
@@ -179,7 +180,7 @@ export function runControlState(run) {
   const phase = run?.phase || "";
   const terminal = ["completed", "conflicted", "cancelled", "failed"].includes(phase);
   return {
-    canPause: ["queued", "observing", "planning", "acting", "validating"].includes(phase),
+    canPause: ["queued", "observing", "planning", "acting", "validating", "testing"].includes(phase),
     canResume: ["paused", "interrupted"].includes(phase),
     resumesFromComposer: phase === "waiting_user",
     canUndo: Boolean(run?.head_version_id),
@@ -210,6 +211,28 @@ export function reviewDiffRows(review) {
       type: String(change.type || "changed"),
       message: String(change.message || change.type || "changed"),
     }));
+}
+
+export function testPresentation(review) {
+  const sideEffects = review?.test_result?.side_effects
+    || review?.side_effects
+    || review?.validation?.side_effects;
+  const execution = review?.test_result?.execution || review?.test_result;
+  const risk = sideEffects?.highest_risk || "unknown";
+  const counts = Object.entries(sideEffects?.counts || {})
+    .map(([kind, count]) => `${kind}:${count}`)
+    .join(" · ");
+  const status = execution?.status || "not_run";
+  const failedNode = execution?.failed_node_id
+    ? ` · 失败节点 ${execution.failed_node_id}`
+    : "";
+  return {
+    scope: `副作用：${risk}${counts ? ` · ${counts}` : ""}`,
+    inputs: review?.test_result?.input_preview || {},
+    result: status === "not_run"
+      ? "等待执行观察"
+      : `执行结果：${status}${failedNode}${execution?.error_code ? ` · ${execution.error_code}` : ""}`,
+  };
 }
 
 export function timelinePresentation(event) {
@@ -350,6 +373,11 @@ function businessEventMessage(event) {
     "validation.started": "正在执行确定性校验。",
     "validation.failed": "确定性校验未通过。",
     "validation.passed": "确定性校验通过。",
+    "repair.started": "已根据结构化执行错误开始受限修复。",
+    "test.approval_required": "Draft Test 正在等待副作用审批。",
+    "test.started": "已开始批准的 Draft Test。",
+    "test.progress": "Draft Test 返回了脱敏进度。",
+    "test.completed": "Draft Test 已生成结构化执行观察。",
     "review.ready": "业务 Diff 与风险审阅已就绪。",
     "approval.required": "此操作需要用户审批。",
     "approval.resolved": "审批状态已更新。",

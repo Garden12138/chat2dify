@@ -4,6 +4,7 @@ from typing import Any, Literal
 
 from pydantic import Field
 
+from app.agent.execution import SideEffectSummary, classify_plan_side_effects
 from app.agent.state import StrictModel
 from app.agent.trace import redact_sensitive_data
 from app.compiler.dify import DifyDslCompiler
@@ -30,6 +31,7 @@ class AgentValidationReport(StrictModel):
     dsl_version: str = ""
     roundtrip_ok: bool = False
     graph_compiled: bool = False
+    side_effects: SideEffectSummary | None = None
 
 
 class WorkflowValidationService:
@@ -70,6 +72,7 @@ class WorkflowValidationService:
             dsl_version=preflight.dsl_version,
             roundtrip_ok=preflight.roundtrip_ok,
             graph_compiled=graph_compiled,
+            side_effects=classify_plan_side_effects(plan),
         )
 
 

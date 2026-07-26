@@ -18,6 +18,7 @@ from app.agent.catalog import NodeCapabilityCatalog
 from app.agent.commit import CreationCommitService, ModificationCommitService
 from app.agent.context import BuilderContextBuilder
 from app.agent.decision import OpenAICompatibleDecisionProvider
+from app.agent.execution import DifyDraftExecutionAdapter, DraftRunService
 from app.agent.policy import AgentToolPolicy
 from app.agent.registry import ToolRegistry
 from app.agent.review import WorkflowReviewService
@@ -25,7 +26,7 @@ from app.agent.runtime import AgentRuntime
 from app.agent.service import AgentApplicationService, ThreadedRunDispatcher
 from app.agent.snapshot import WorkflowSnapshotService
 from app.agent.store import AgentStore
-from app.agent.tools import register_phase1a_tools
+from app.agent.tools import register_phase1a_tools, register_phase3_tools
 from app.agent.undo import AgentUndoService
 from app.agent.validation import WorkflowValidationService
 from app.agent.workspace import VersionedWorkflowWorkspace
@@ -133,14 +134,23 @@ async def lifespan(application: FastAPI):
         review = WorkflowReviewService(store=agent_store, workspace=workspace)
         approval = AgentApprovalService(store=agent_store)
         registry = ToolRegistry()
+        def client_factory():
+            return DifyClient(settings)
         register_phase1a_tools(
             registry,
             store=agent_store,
             workspace=workspace,
             review=review,
         )
-        def client_factory():
-            return DifyClient(settings)
+        draft_adapter = DifyDraftExecutionAdapter(client_factory)
+        register_phase3_tools(
+            registry,
+            store=agent_store,
+            draft_runs=DraftRunService(
+                store=agent_store,
+                adapter=draft_adapter,
+            ),
+        )
         snapshot_service = WorkflowSnapshotService(
             client_factory=client_factory,
             catalog=catalog,
@@ -155,7 +165,12 @@ async def lifespan(application: FastAPI):
             registry=registry,
             context_builder=BuilderContextBuilder(store=agent_store),
             decision_provider=OpenAICompatibleDecisionProvider(settings),
-            policy=AgentToolPolicy(),
+            policy=AgentToolPolicy(
+                store=agent_store,
+                supports_candidate_workspace=(
+                    draft_adapter.supports_candidate_workspace
+                ),
+            ),
         )
         commit_service = ModificationCommitService(
             store=agent_store,

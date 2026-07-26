@@ -26,6 +26,7 @@ AgentEventType = Literal[
     "repair.started",
     "test.approval_required",
     "test.started",
+    "test.progress",
     "test.completed",
     "review.ready",
     "approval.required",

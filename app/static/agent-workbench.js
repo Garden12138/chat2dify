@@ -7,6 +7,7 @@ import {
   parseSse,
   reviewDiffRows,
   runControlState,
+  testPresentation,
   timelinePresentation,
   undoPresentation,
 } from "./agent-workbench-core.mjs";
@@ -79,6 +80,9 @@ function bindElements() {
     risk: document.querySelector("#agent-risk"),
     approvals: document.querySelector("#agent-approvals"),
     technical: document.querySelector("#agent-technical"),
+    testScope: document.querySelector("#agent-test-scope"),
+    testInputs: document.querySelector("#agent-test-inputs"),
+    testResult: document.querySelector("#agent-test-result"),
     phase: document.querySelector("#agent-phase"),
     form: document.querySelector("#agent-form"),
     input: document.querySelector("#agent-input"),
@@ -301,6 +305,7 @@ function consumeAgentEvent(event) {
   if (
     event.type === "review.ready"
     || event.type === "approval.required"
+    || event.type.startsWith("test.")
     || event.type.startsWith("commit.")
     || event.type.startsWith("agent.")
   ) {
@@ -406,7 +411,15 @@ function renderReview(review) {
     ? "确定性校验通过"
     : `校验未通过：${(review.validation?.issues || []).map(item => item.message).join("；")}`;
   elements.risk.textContent = `风险：${review.risk?.risk || "unknown"}${review.risk?.ok === false ? "（需要额外确认）" : ""}`;
+  renderTestResult(review);
   elements.technical.textContent = JSON.stringify(review, null, 2);
+}
+
+function renderTestResult(review) {
+  const presentation = testPresentation(review);
+  elements.testScope.textContent = presentation.scope;
+  elements.testInputs.textContent = JSON.stringify(presentation.inputs, null, 2);
+  elements.testResult.textContent = presentation.result;
 }
 
 function renderApprovals() {
@@ -416,7 +429,10 @@ function renderApprovals() {
     return;
   }
   for (const approval of workbenchState.approvals) {
-    if (!approvalMatchesVisibleVersion(approval, run.head_version_id)) {
+    if (
+      approval.action !== "draft_run"
+      && !approvalMatchesVisibleVersion(approval, run.head_version_id)
+    ) {
       continue;
     }
     const card = document.createElement("article");
@@ -427,10 +443,40 @@ function renderApprovals() {
     meta.textContent = `${approval.status} · 版本 ${approval.workspace_version_id}`;
     card.append(title, meta);
     if (approval.status === "pending") {
+      let draftOptions = null;
+      if (approval.action === "draft_run") {
+        const scope = document.createElement("pre");
+        scope.className = "test-input-preview";
+        scope.textContent = JSON.stringify({
+          side_effects: approval.scope?.side_effects,
+          input_preview: approval.scope?.input_preview,
+          requested_test_runs: approval.scope?.requested_test_runs,
+        }, null, 2);
+        const count = document.createElement("input");
+        count.type = "number";
+        count.min = "1";
+        count.max = String(approval.scope?.requested_test_runs || 1);
+        count.value = String(approval.scope?.requested_test_runs || 1);
+        count.setAttribute("aria-label", "批准的 Draft Test 次数");
+        const inputs = document.createElement("textarea");
+        inputs.rows = 4;
+        inputs.value = JSON.stringify(approval.scope?.input_preview?.inputs || {}, null, 2);
+        inputs.setAttribute("aria-label", "Draft Test 输入覆盖");
+        card.append(scope, count, inputs);
+        draftOptions = { count, inputs };
+      }
       card.append(
-        actionButton("批准", () => resolveApproval(approval.id, true)),
+        actionButton(
+          "批准",
+          () => resolveApproval(approval.id, true, draftOptions),
+        ),
         actionButton("拒绝", () => resolveApproval(approval.id, false), "secondary"),
       );
+    }
+    if (approval.action === "draft_run" && approval.status !== "pending") {
+      const remaining = document.createElement("small");
+      remaining.textContent = `剩余测试次数：${approval.scope?.remaining_test_runs || 0}`;
+      card.append(remaining);
     }
     if (approval.status === "approved" && approval.action === "commit") {
       const reason = commitBlockReason(run, workbenchState.canvasContext);
@@ -447,15 +493,32 @@ function renderApprovals() {
   }
 }
 
-async function resolveApproval(approvalId, approved) {
+async function resolveApproval(approvalId, approved, draftOptions = null) {
   const run = workbenchState.run;
   if (!run) {
     return;
   }
   try {
+    let testInputs;
+    if (draftOptions?.inputs) {
+      try {
+        testInputs = JSON.parse(draftOptions.inputs.value || "{}");
+      } catch (_error) {
+        throw new Error("Draft Test 输入必须是 JSON 对象。");
+      }
+    }
     await requestJson(
       `/api/v4/agent/runs/${encodeURIComponent(run.id)}/approvals/${encodeURIComponent(approvalId)}`,
-      { method: "POST", body: { approved } },
+      {
+        method: "POST",
+        body: {
+          approved,
+          allowed_test_runs: draftOptions?.count
+            ? Number(draftOptions.count.value)
+            : undefined,
+          test_inputs: testInputs,
+        },
+      },
     );
     await refreshRun();
   } catch (error) {

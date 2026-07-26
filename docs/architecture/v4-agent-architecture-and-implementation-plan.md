@@ -697,6 +697,31 @@ class ExecutionObservation(BaseModel):
 
 LLM 只负责在确定 Schema 后生成更贴近目标的样例值。
 
+### 10.5 候选工作区执行边界
+
+实现核对 Dify `1.14.2` Console API 后确认：
+
+- Workflow Draft Run 请求只接受 `inputs` 和 `files`；
+- Chatflow Draft Run 请求只接受 `query`、`inputs`、`files` 和会话标识；
+- 两个接口都不接受候选 Graph 或 DSL，实际运行的是 Dify 已持久化草稿。
+
+因此 Phase 3 使用显式 `DraftExecutionAdapter` 边界：
+
+- 支持隔离候选执行的 Adapter 可以运行当前 Workspace Head，并参与完整
+  Test → Inspect → Repair → Re-test 闭环；
+- 内置 Dify `1.14.2` Adapter 只在 Workspace 与固定的持久化基线一致时运行；
+- Workspace 发生 Patch 后，内置 Adapter 返回稳定的
+  `DRAFT_TEST_CANDIDATE_GRAPH_UNSUPPORTED`，不能把旧草稿结果误标为新版本测试；
+- 不通过临时同步目标草稿、临时导入/删除应用或绕过 Commit Approval 来模拟
+  候选执行，因为这些方案会引入未建模的 Dify 写入、Hash 漂移和恢复风险；
+- 对当前内置 Adapter，修复后的真实运行验证需要先走现有 Review → Commit
+  审批链，再由一个新的显式 Run 测试已提交草稿。
+
+默认确定性验收使用支持候选 Workspace 的 Fake Adapter 验证完整修复循环；真实
+Dify Adapter 仍验证审批、输入、Hash、脱敏、超时、取消和预算边界，并对不支持
+的候选执行 fail closed。若后续 Dify 提供候选 Graph 执行 API，只替换 Adapter，
+不扩大模型 Tool 权限。
+
 ## 11. 权限、审批与副作用
 
 ### 11.1 默认策略

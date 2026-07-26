@@ -5,6 +5,7 @@ from typing import Any
 from pydantic import Field
 
 from app.agent.diff import diff_plans
+from app.agent.execution import SideEffectSummary, classify_plan_side_effects
 from app.agent.guard import guard_plan_change
 from app.agent.state import AgentRun, StrictModel, utc_now
 from app.agent.store import AgentStore
@@ -21,6 +22,8 @@ class WorkflowReview(StrictModel):
     business_diff: list[str] = Field(default_factory=list)
     technical_diff: list[dict[str, Any]] = Field(default_factory=list)
     risk: dict[str, Any]
+    side_effects: SideEffectSummary
+    test_result: dict[str, Any] | None = None
 
 
 class WorkflowReviewService:
@@ -54,6 +57,15 @@ class WorkflowReviewService:
             ],
             technical_diff=safe_changes,
             risk=redact_sensitive_data(guard.to_dict()),
+            side_effects=(
+                validation.side_effects
+                or classify_plan_side_effects(after)
+            ),
+            test_result=(
+                redact_sensitive_data(head.test_result)
+                if head.test_result is not None
+                else None
+            ),
         )
         updated = AgentRun.model_validate(
             {

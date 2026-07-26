@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 from datetime import datetime
 import json
 import time
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -95,6 +95,13 @@ class CanvasContextUpdateRequest(StrictModel):
 
 class ResolveApprovalRequest(StrictModel):
     approved: bool
+    allowed_test_runs: int | None = Field(default=None, ge=1, le=20)
+    test_inputs: dict[str, Any] | None = None
+    test_query: str | None = Field(default=None, max_length=8_000)
+    test_files: list[dict[str, Any]] | None = Field(
+        default=None,
+        max_length=20,
+    )
 
 
 class ResolveApprovalResponse(StrictModel):
@@ -330,6 +337,10 @@ def resolve_approval(
             run_id,
             approval_id,
             approved=payload.approved,
+            allowed_test_runs=payload.allowed_test_runs,
+            test_inputs=payload.test_inputs,
+            test_query=payload.test_query,
+            test_files=payload.test_files,
         )
         return ResolveApprovalResponse(
             approval=approval,

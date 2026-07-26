@@ -16,7 +16,9 @@ class RemainingBudget(StrictModel):
     model_calls: int
     patch_operations: int
     test_runs: int
+    test_total_tokens: int
     run_seconds: int
+    context_tokens: int
 
 
 class BuilderContext(StrictModel):
@@ -27,6 +29,7 @@ class BuilderContext(StrictModel):
     selection: dict[str, Any]
     capabilities: list[dict[str, Any]] = Field(default_factory=list)
     latest_validation: dict[str, Any] | None = None
+    latest_execution: dict[str, Any] | None = None
     recent_observations: list[Observation] = Field(default_factory=list)
     older_observation_summary: dict[str, Any] = Field(default_factory=dict)
     trace_summary: dict[str, int] = Field(default_factory=dict)
@@ -102,6 +105,7 @@ class BuilderContextBuilder:
             },
             capabilities=run.snapshot.capabilities[: self.max_capabilities],
             latest_validation=head.validation,
+            latest_execution=head.test_result,
             recent_observations=recent,
             older_observation_summary={
                 "count": len(older),
@@ -127,7 +131,17 @@ class BuilderContextBuilder:
                     0,
                     run.budget.max_test_runs - run.budget_usage.test_runs,
                 ),
+                test_total_tokens=max(
+                    0,
+                    run.budget.max_test_total_tokens
+                    - run.budget_usage.test_total_tokens,
+                ),
                 run_seconds=max(0, run.budget.max_run_seconds - elapsed),
+                context_tokens=max(
+                    0,
+                    run.budget.max_context_tokens
+                    - run.budget_usage.context_tokens,
+                ),
             ),
         )
 

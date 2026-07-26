@@ -39,7 +39,7 @@ Rules:
 | Phase 1A | Existing-app modify vertical slice | Phase 0 | `completed` |
 | Phase 1B | New-app create adapter | Phase 1A | `completed` |
 | Phase 2 | Canvas context and Agent Workbench | Phase 1 | `completed` |
-| Phase 3 | Draft Test, Inspect, and Repair | Phase 2 | `pending` |
+| Phase 3 | Draft Test, Inspect, and Repair | Phase 2 | `completed` |
 | Phase 4 | Config apps, Skills, evals, and hardening | Phase 3 | `pending` |
 | Release gate | v4.0.0 release readiness | Phases 0–3; selected Phase 4 gates | `pending` |
 
@@ -688,7 +688,7 @@ review, approve, undo, and resume Agent work through a durable UI.
 
 ## 8. Phase 3 — Draft Test, Inspect, and Repair
 
-Status: `pending`
+Status: `completed`
 
 Dependencies: Phase 2 `completed`
 
@@ -698,19 +698,19 @@ result.
 
 ### Tasks
 
-- [ ] **P3-01 — Side-effect classification**
+- [x] **P3-01 — Side-effect classification**
   - Classify local/read, model-cost, HTTP, Tool, notification/human, and
     unknown nodes.
   - Include side-effect summary in validation/review.
   - Treat unknown behavior conservatively.
 
-- [ ] **P3-02 — Draft Run approval and budget**
+- [x] **P3-02 — Draft Run approval and budget**
   - Default to one Session-scoped approval with explicit run count.
   - Require per-run approval for external/unknown side effects unless the user
     grants a narrower explicit allowance.
   - Persist approval scope, expiry, inputs, and remaining run count.
 
-- [ ] **P3-03 — Minimal test-input generator**
+- [x] **P3-03 — Minimal test-input generator**
   - Generate deterministic values from input types and schemas.
   - Require user files for file/file-list inputs unless an explicit fixture is
     available.
@@ -718,37 +718,37 @@ result.
     resolution.
   - Allow users to review or override sensitive test inputs.
 
-- [ ] **P3-04 — `workflow.test_draft` tool**
+- [x] **P3-04 — `workflow.test_draft` tool**
   - Dispatch to existing Workflow/Chatflow Draft Run implementations.
   - Enforce approval, timeout, cancellation, and test budget.
   - Record sanitized progress and terminal events.
   - Do not automatically run trigger-based Workflows through normal Draft Run.
 
-- [ ] **P3-05 — `execution.inspect` tool**
+- [x] **P3-05 — `execution.inspect` tool**
   - Normalize success, failure, timeout, and cancellation.
   - Identify failed node, node type, stable error code, sanitized upstream
     summary, output summary, and retryability.
   - Do not persist raw secrets or model chain-of-thought.
 
-- [ ] **P3-06 — Repair loop**
+- [x] **P3-06 — Repair loop**
   - Feed only structured Validation/Execution observations to the decision
     model.
   - Create repair patches through the normal Patch Tool.
   - Revalidate after every repair.
   - Re-run only when approval and budget remain.
 
-- [ ] **P3-07 — Loop guards and terminal reporting**
+- [x] **P3-07 — Loop guards and terminal reporting**
   - Enforce max iterations, model calls, Patch operations, test runs, same
     error retries, time, and provider context.
   - Return partial result, current Diff, attempts, and next action at budget
     exhaustion.
 
-- [ ] **P3-08 — Test/repair UI**
+- [x] **P3-08 — Test/repair UI**
   - Show approval scope and remaining tests.
   - Show sanitized test inputs, failed node, repair attempts, and final result.
   - Let the user stop automatic testing without losing the Workspace.
 
-- [ ] **P3-09 — Test and repair tests**
+- [x] **P3-09 — Test and repair tests**
   - Cover pure/model-cost/external/unknown side-effect policy.
   - Cover input generation by type.
   - Cover success, failed node, timeout, cancellation, malformed SSE,
@@ -761,24 +761,69 @@ result.
 
 ### Acceptance criteria
 
-- [ ] Agent cannot run a Draft outside persisted approval and budget.
-- [ ] External side-effect risk is visible before approval.
-- [ ] Execution errors are normalized and sensitive values are redacted.
-- [ ] Repair uses Patch IR and the normal validation chain.
-- [ ] The same error is not retried more than the configured limit.
-- [ ] Budget exhaustion returns a reviewable partial result.
-- [ ] At least one fixed evaluation case repairs a variable reference and
+- [x] Agent cannot run a Draft outside persisted approval and budget.
+- [x] External side-effect risk is visible before approval.
+- [x] Execution errors are normalized and sensitive values are redacted.
+- [x] Repair uses Patch IR and the normal validation chain.
+- [x] The same error is not retried more than the configured limit.
+- [x] Budget exhaustion returns a reviewable partial result.
+- [x] At least one fixed evaluation case repairs a variable reference and
       succeeds on a subsequent approved run.
-- [ ] Targeted Phase 3 tests and full existing suite pass.
-- [ ] `git diff --check` passes.
+- [x] Targeted Phase 3 tests and full existing suite pass.
+- [x] `git diff --check` passes.
 
 ### Completion record
 
-- Started:
-- Completed:
+- Started: 2026-07-26
+- Completed: 2026-07-26
 - Tests:
+  - Dedicated deterministic Phase 3 backend tests: `17 passed`.
+  - Phase 3 plus directly affected Agent domain/store/API and Phase 1/2
+    regressions: `64 passed`.
+  - Standalone Workbench protocol/SSE/UI-domain tests: `8 passed`.
+  - Full repository suite: `435 passed, 4 skipped`.
+  - All four skips are the existing opt-in localhost-only live Dify Phase 1/2
+    acceptance cases.
+  - `python -m compileall -q app tests`: passed.
+  - JavaScript syntax checks for the Workbench controller and reusable core:
+    passed.
+  - `git diff --check`: passed.
+  - Pytest reported one existing upstream Starlette deprecation warning for
+    `fastapi.testclient`; no test failures or unhandled warnings occurred.
 - Decisions/deviations:
+  - Draft side effects are classified as local, model cost, HTTP, Tool,
+    notification/human, or unknown. Unknown and external behavior is
+    conservative and requires a per-Run approval; local/model-only behavior
+    can consume an explicit Session-scoped allowance.
+  - Draft approvals persist sanitized input previews, input/request
+    fingerprints, expiry, side-effect scope, allowed count, and remaining
+    count. The Store atomically reserves both the Approval allowance and the
+    Run test budget before the adapter can execute.
+  - Draft test observations persist only stable status/error fields, failed
+    node identity/type, input/output shapes, aggregate stream counts, and
+    redacted messages. Raw SSE, raw node inputs/outputs, credentials, and
+    model chain-of-thought are not stored or returned to the decision model.
+  - The Runtime automatically executes only the pending Draft Tool Call that
+    a user just approved. Reservation happens before the side effect; after a
+    restart, an already reserved/in-flight Draft Run is not replayed.
+  - Dify `1.14.2` Draft Run endpoints do not accept a candidate Graph. The
+    built-in adapter therefore tests only an unchanged persisted Workspace
+    baseline and fails closed with
+    `DRAFT_TEST_CANDIDATE_GRAPH_UNSUPPORTED` after a Patch. It never
+    temporarily syncs the target draft or creates/deletes a hidden test app.
+    The deterministic acceptance uses a workspace-aware Fake Adapter to prove
+    the full Test → Inspect → Patch → Validate → Re-test loop. This boundary is
+    documented in the architecture and can accept a future isolated Dify
+    candidate-execution Adapter without changing Tool permissions.
 - Remaining limitations:
+  - With the built-in Dify `1.14.2` adapter, a repaired uncommitted Workspace
+    cannot be re-run against Dify because the upstream API always executes the
+    persisted draft. Real post-repair verification therefore requires the
+    existing version-bound Review/Commit approval and a new explicit Run.
+  - Sensitive values whose input names identify credentials/secrets are never
+    persisted in Approval scope. Such inputs remain an explicit user-provided
+    boundary until encrypted one-shot secret transport is designed; ordinary
+    file inputs require user upload metadata or an explicit fixture.
 
 ## 9. Phase 4 — Config apps, Skills, evals, and hardening
 
@@ -963,3 +1008,4 @@ the plan.
 | 2026-07-25 | Phase 1B | Represent new-app work as an explicit create Session and null-Hash Snapshot with a stable server-generated scaffold, then promote the Session to modify mode after import | Reuses the Phase 1A Runtime, Workspace, tools, validation, review, and approval chain without pretending a Dify app or base Hash exists before approval | `app/agent/state.py`, `app/agent/snapshot.py`, `app/agent/service.py`, `app/agent/workspace.py` |
 | 2026-07-25 | Phase 1B | Persist an import checkpoint before the Dify call and a successful-import receipt before draft recovery; fail closed on ambiguous outcomes | Makes duplicate Commit retries idempotent and separates a definitive import failure from recovery of an app that Dify already created | `app/agent/commit.py`, `app/agent/store.py`, `app/dify/client.py` |
 | 2026-07-26 | Phase 2 supplemental | Keep live Dify acceptance opt-in and exercise selection-bound modification plus reviewed compensating Undo for both Workflow and Chatflow; validate the host protocol in the exact Dify 1.14.2 Web build | Closes the real-environment gaps without making the deterministic default suite depend on Dify or broadening scope into Phase 3 Draft Run behavior | `tests/test_agent_phase2_live.py`, `tests/test_agent_phase1a_live.py`, `deploy/dify/web-adapter/`, `docs/tasks.md` |
+| 2026-07-26 | Phase 3 | Put Draft execution behind a workspace-aware Adapter; make the built-in Dify 1.14.2 Adapter fail closed for patched candidates instead of testing stale state or temporarily writing Dify | The upstream Draft Run payload accepts inputs but no candidate Graph/DSL. Temporary sync or hidden app import would violate the modeled write/Hash/approval boundary | `app/agent/execution.py`, `app/agent/tools/draft_run.py`, architecture Section 10.5 |

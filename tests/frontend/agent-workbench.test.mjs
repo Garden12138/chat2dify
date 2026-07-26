@@ -10,6 +10,7 @@ import {
   parseSse,
   reviewDiffRows,
   runControlState,
+  testPresentation,
   timelinePresentation,
   undoPresentation,
 } from "../../app/static/agent-workbench-core.mjs";
@@ -185,4 +186,31 @@ test("Resume affordances and Undo results preserve explicit Run boundaries", () 
   assert.match(preCommit.message, /Dify 未发生写入/);
   assert.equal(postCommit.run.id, "run-2");
   assert.match(postCommit.message, /重新审阅和批准/);
+});
+
+test("Draft Test presentation exposes sanitized scope, remaining execution result, and stop control", () => {
+  assert.equal(
+    runControlState({ phase: "testing", head_version_id: "v2" }).canPause,
+    true,
+  );
+  const presentation = testPresentation({
+    side_effects: {
+      highest_risk: "external",
+      counts: { http: 1, model_cost: 1 },
+    },
+    test_result: {
+      input_preview: {
+        inputs: { query: "test", api_key: "[REDACTED]" },
+      },
+      execution: {
+        status: "failed",
+        failed_node_id: "http-1",
+        error_code: "EXECUTION_HTTP_FAILED",
+      },
+    },
+  });
+  assert.match(presentation.scope, /external/);
+  assert.equal(presentation.inputs.inputs.api_key, "[REDACTED]");
+  assert.match(presentation.result, /http-1/);
+  assert.match(presentation.result, /EXECUTION_HTTP_FAILED/);
 });

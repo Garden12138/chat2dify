@@ -9,6 +9,7 @@ from typing import Any, Iterator
 
 from app.agent.state import (
     AgentApproval,
+    AgentBudgetUsage,
     AgentRun,
     AgentSession,
     ApprovalStatus,
@@ -628,6 +629,7 @@ class AgentStore:
                 UPDATE agent_approvals
                 SET status = ?, resolved_at = ?
                 WHERE run_id = ? AND status IN (?, ?)
+                  AND (action != ? OR status = ?)
                 """,
                 (
                     ApprovalStatus.EXPIRED.value,
@@ -635,6 +637,8 @@ class AgentStore:
                     version.run_id,
                     ApprovalStatus.PENDING.value,
                     ApprovalStatus.APPROVED.value,
+                    "draft_run",
+                    ApprovalStatus.PENDING.value,
                 ),
             )
             event = _append_event_in_connection(
@@ -712,6 +716,7 @@ class AgentStore:
                 UPDATE agent_approvals
                 SET status = ?, resolved_at = ?
                 WHERE run_id = ? AND status IN (?, ?)
+                  AND (action != ? OR status = ?)
                 """,
                 (
                     ApprovalStatus.EXPIRED.value,
@@ -719,6 +724,8 @@ class AgentStore:
                     run.id,
                     ApprovalStatus.PENDING.value,
                     ApprovalStatus.APPROVED.value,
+                    "draft_run",
+                    ApprovalStatus.PENDING.value,
                 ),
             )
             event = _append_event_in_connection(
@@ -872,6 +879,165 @@ class AgentStore:
                 (run_id, limit),
             ).fetchall()
         return [_approval_from_row(row) for row in rows]
+
+    def list_session_approvals(
+        self,
+        session_id: str,
+        *,
+        action: str | None = None,
+        limit: int = 100,
+    ) -> list[AgentApproval]:
+        _validate_limit(limit, maximum=10_000)
+        with self._reader() as connection:
+            if action is None:
+                rows = connection.execute(
+                    """
+                    SELECT approvals.*
+                    FROM agent_approvals AS approvals
+                    JOIN agent_runs AS runs ON runs.id = approvals.run_id
+                    WHERE runs.session_id = ?
+                    ORDER BY approvals.created_at DESC
+                    LIMIT ?
+                    """,
+                    (session_id, limit),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT approvals.*
+                    FROM agent_approvals AS approvals
+                    JOIN agent_runs AS runs ON runs.id = approvals.run_id
+                    WHERE runs.session_id = ? AND approvals.action = ?
+                    ORDER BY approvals.created_at DESC
+                    LIMIT ?
+                    """,
+                    (session_id, action, limit),
+                ).fetchall()
+        return [_approval_from_row(row) for row in rows]
+
+    def reserve_draft_run(
+        self,
+        *,
+        run_id: str,
+        approval_id: str,
+        request_fingerprint: str,
+    ) -> tuple[AgentRun, AgentApproval]:
+        now = datetime.now(timezone.utc)
+        with self._transaction(immediate=True) as connection:
+            run_row = connection.execute(
+                "SELECT * FROM agent_runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+            approval_row = connection.execute(
+                "SELECT * FROM agent_approvals WHERE id = ?",
+                (approval_id,),
+            ).fetchone()
+            if run_row is None:
+                raise AgentRecordNotFound(run_id)
+            if approval_row is None:
+                raise AgentRecordNotFound(approval_id)
+            run = _run_from_row(run_row)
+            approval = _approval_from_row(approval_row)
+            if run.terminal or run.phase != RunPhase.TESTING:
+                raise AgentStoreConflict(
+                    "Draft Run allowance can be reserved only in the testing phase."
+                )
+            if approval.action != "draft_run":
+                raise AgentStoreConflict("Approval is not a Draft Run allowance.")
+            if approval.status != ApprovalStatus.APPROVED:
+                raise AgentStoreConflict("Draft Run Approval is not approved.")
+            if approval.expires_at <= now:
+                raise AgentStoreConflict("Draft Run Approval has expired.")
+            if approval.scope.get("session_id") != run.session_id:
+                raise AgentStoreConflict(
+                    "Draft Run Approval is not bound to this Agent Session."
+                )
+            if (
+                approval.scope.get("request_fingerprint")
+                != request_fingerprint
+            ):
+                raise AgentStoreConflict(
+                    "Draft Run Approval does not match the effective test request."
+                )
+            if bool(approval.scope.get("per_run")) and approval.run_id != run.id:
+                raise AgentStoreConflict(
+                    "External-side-effect Approval is bound to another Agent Run."
+                )
+            remaining = int(approval.scope.get("remaining_test_runs") or 0)
+            if remaining < 1:
+                raise AgentStoreConflict("Draft Run Approval allowance is exhausted.")
+            if run.budget_usage.test_runs >= run.budget.max_test_runs:
+                raise AgentStoreConflict("Agent Draft Run budget is exhausted.")
+            usage = AgentBudgetUsage.model_validate(
+                {
+                    **run.budget_usage.model_dump(),
+                    "test_runs": run.budget_usage.test_runs + 1,
+                }
+            )
+            updated_run = AgentRun.model_validate(
+                {
+                    **run.model_dump(),
+                    "budget_usage": usage.model_dump(),
+                    "updated_at": now,
+                }
+            )
+            scope = {
+                **approval.scope,
+                "remaining_test_runs": remaining - 1,
+                "pending": False,
+                "last_consumed_run_id": run.id,
+                "last_consumed_at": now.isoformat(),
+            }
+            updated_approval = AgentApproval.model_validate(
+                {
+                    **approval.model_dump(),
+                    "scope": scope,
+                    "status": (
+                        ApprovalStatus.CONSUMED
+                        if remaining == 1
+                        else ApprovalStatus.APPROVED
+                    ),
+                }
+            )
+            _update_run_row(connection, updated_run)
+            _update_approval_row(connection, updated_approval)
+        return self.get_run(run_id), self.get_approval(approval_id)
+
+    def record_draft_run_cost(
+        self,
+        run_id: str,
+        *,
+        total_tokens: int,
+    ) -> AgentRun:
+        if total_tokens < 0:
+            raise ValueError("Draft Run token usage cannot be negative.")
+        if total_tokens == 0:
+            return self.get_run(run_id)
+        with self._transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM agent_runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise AgentRecordNotFound(run_id)
+            run = _run_from_row(row)
+            usage = AgentBudgetUsage.model_validate(
+                {
+                    **run.budget_usage.model_dump(),
+                    "test_total_tokens": (
+                        run.budget_usage.test_total_tokens + total_tokens
+                    ),
+                }
+            )
+            updated = AgentRun.model_validate(
+                {
+                    **run.model_dump(),
+                    "budget_usage": usage.model_dump(),
+                    "updated_at": datetime.now(timezone.utc),
+                }
+            )
+            _update_run_row(connection, updated)
+        return self.get_run(run_id)
 
     def finish_commit(
         self,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from typing import Protocol
+from typing import Any, Protocol
 
 from app.agent.approval import AgentApprovalService
 from app.agent.commit import (
@@ -319,12 +319,83 @@ class AgentApplicationService:
         approval_id: str,
         *,
         approved: bool,
+        allowed_test_runs: int | None = None,
+        test_inputs: dict[str, Any] | None = None,
+        test_query: str | None = None,
+        test_files: list[dict[str, Any]] | None = None,
     ):
-        return self.approval.resolve(
+        resolved, next_approval = self.approval.resolve(
             run_id,
             approval_id,
             approved=approved,
+            allowed_test_runs=allowed_test_runs,
+            test_inputs=test_inputs,
+            test_query=test_query,
+            test_files=test_files,
         )
+        if resolved.action == "draft_run":
+            run = self.store.get_run(run_id)
+            if run.phase == RunPhase.WAITING_APPROVAL:
+                constraints = run.constraints
+                if not approved:
+                    constraints = RunConstraints.model_validate(
+                        {
+                            **constraints.model_dump(),
+                            "allow_draft_test": False,
+                        }
+                    )
+                observations = [
+                    *run.observations,
+                    Observation(
+                        kind=(
+                            "test.approval.approved"
+                            if approved
+                            else "test.approval.rejected"
+                        ),
+                        summary=(
+                            "User approved the bounded Draft Run."
+                            if approved
+                            else "User stopped automatic Draft testing."
+                        ),
+                        data={
+                            "approval_id": resolved.id,
+                            "input_preview": resolved.scope.get("input_preview"),
+                            "remaining_test_runs": resolved.scope.get(
+                                "remaining_test_runs", 0
+                            ),
+                        },
+                    ),
+                ][-200:]
+                resumed = run.transition_to(RunPhase.PLANNING)
+                resumed = AgentRun.model_validate(
+                    {
+                        **resumed.model_dump(),
+                        "constraints": constraints.model_dump(),
+                        "observations": [
+                            item.model_dump(mode="json")
+                            for item in observations
+                        ],
+                        "updated_at": utc_now(),
+                    }
+                )
+                resumed = self.store.update_run(resumed)
+                self.store.append_event(
+                    run_id=run.id,
+                    event_type="agent.resumed",
+                    phase=resumed.phase.value,
+                    message=(
+                        "Agent Run resumed with an approved Draft Run allowance."
+                        if approved
+                        else "Agent Run resumed with automatic Draft testing disabled."
+                    ),
+                    data={
+                        "approval_id": resolved.id,
+                        "approved": approved,
+                        "side_effect_replay": False,
+                    },
+                )
+                self.dispatcher.submit(run.id)
+        return resolved, next_approval
 
     def commit(
         self,
