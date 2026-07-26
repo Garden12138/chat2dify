@@ -620,8 +620,28 @@ review, approve, undo, and resume Agent work through a durable UI.
     v3 main tests: `119 passed`.
   - Standalone Workbench protocol/SSE/UI-domain tests under Node's test
     runner: `7 passed`.
-  - Full repository suite: `418 passed, 2 skipped`. The skips are the
-    opt-in, localhost-only Dify live acceptance tests.
+  - Initial completion full repository suite: `418 passed, 2 skipped`. The
+    skips were the opt-in, localhost-only Phase 1A Dify live acceptance tests.
+  - 2026-07-26 supplemental live Dify 1.14.2 / DSL 0.6.0 acceptance:
+    `2 passed in 7.66s` across one isolated Workflow and one isolated
+    Chatflow. The goal referred only to the selected LLM node, the Runtime
+    resolved that selection from the canvas constraints, Commit preserved
+    unrelated graph and application state, and post-Commit Undo created a
+    separately reviewed and approved compensating Run that restored the exact
+    baseline Dify draft Hash. Both temporary applications were deleted and
+    deletion was verified independently.
+  - The default full repository suite after adding those opt-in cases:
+    `418 passed, 4 skipped`. All four skips are localhost-only live Dify
+    acceptance cases.
+  - The adapter was applied to the local Dify 1.14.2 checkout and its
+    production Web image, Chat2Dify sidecar, and nginx were rebuilt. The
+    sidecar health endpoint reported Agent v4 enabled and DSL 0.6.0.
+  - Dify host-component tests in the actual 1.14.2 Web build:
+    `3 test files passed, 30 tests passed` (panel protocol, new-app entry, and
+    Workflow header entry).
+  - In-app browser smoke: Agent Workbench replaced the legacy UI, rendered
+    Timeline, Goal Plan, Diff, and Approval regions, and kept its composer
+    disabled while waiting for the nonce-bound Dify canvas handshake.
   - JavaScript syntax checks for the Workbench controller, its reusable core,
     and the legacy controller: passed.
   - `python3 -m compileall -q app tests`: passed.
@@ -656,11 +676,13 @@ review, approve, undo, and resume Agent work through a durable UI.
     creates a separate modification Run containing a deterministically
     validated, reviewed compensating version that requires a new Approval.
 - Remaining limitations:
-  - The repository-level Workbench core and backend acceptance suites are
-    self-contained and passed. A host-component Vitest fixture was also added
-    to the vendored Dify adapter, but the adjacent Dify checkout has no
-    installed web `node_modules`, so that optional host-repository fixture was
-    not executed here.
+  - The in-app browser had no authenticated Dify Console session, so the
+    signed-in canvas drawer was not clicked manually and no stored credentials
+    were entered into the browser. The exact Dify 1.14.2 production build and
+    its 30 passing host-component tests cover the host/iframe handshake,
+    origin, source-window, nonce, and context-update boundaries; the live
+    Workflow/Chatflow API acceptance covers the authoritative Snapshot,
+    selected-node, Approval, Commit, and compensating Undo boundaries.
   - Draft Run approval, execution inspection, repair, and all related
     side-effect budgets remain Phase 3 and were not started.
 
@@ -940,3 +962,4 @@ the plan.
 | 2026-07-26 | Phase 1A supplemental | Keep the default suite deterministic and add an explicitly enabled localhost-only real Dify acceptance that creates and deletes isolated Workflow/Chatflow fixtures | Real Dify 1.14.2 evidence closes the protocol gap for draft Hash, metadata-preserving writeback, duplicate Commit, and conflict behavior without introducing a default external dependency or publishing an app | `tests/test_agent_phase1a_live.py`, `pyproject.toml`, `docs/tasks.md` |
 | 2026-07-25 | Phase 1B | Represent new-app work as an explicit create Session and null-Hash Snapshot with a stable server-generated scaffold, then promote the Session to modify mode after import | Reuses the Phase 1A Runtime, Workspace, tools, validation, review, and approval chain without pretending a Dify app or base Hash exists before approval | `app/agent/state.py`, `app/agent/snapshot.py`, `app/agent/service.py`, `app/agent/workspace.py` |
 | 2026-07-25 | Phase 1B | Persist an import checkpoint before the Dify call and a successful-import receipt before draft recovery; fail closed on ambiguous outcomes | Makes duplicate Commit retries idempotent and separates a definitive import failure from recovery of an app that Dify already created | `app/agent/commit.py`, `app/agent/store.py`, `app/dify/client.py` |
+| 2026-07-26 | Phase 2 supplemental | Keep live Dify acceptance opt-in and exercise selection-bound modification plus reviewed compensating Undo for both Workflow and Chatflow; validate the host protocol in the exact Dify 1.14.2 Web build | Closes the real-environment gaps without making the deterministic default suite depend on Dify or broadening scope into Phase 3 Draft Run behavior | `tests/test_agent_phase2_live.py`, `tests/test_agent_phase1a_live.py`, `deploy/dify/web-adapter/`, `docs/tasks.md` |

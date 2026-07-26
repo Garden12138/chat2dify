@@ -25,6 +25,7 @@ from app.agent.snapshot import WorkflowSnapshotService
 from app.agent.state import FinishDecision, RunPhase, ToolCallDecision
 from app.agent.store import AgentStore
 from app.agent.tools import register_phase1a_tools
+from app.agent.undo import AgentUndoService
 from app.agent.validation import WorkflowValidationService
 from app.agent.workspace import VersionedWorkflowWorkspace
 from app.compiler.dify import DifyDslCompiler
@@ -366,11 +367,19 @@ def _stack(
         compiler=compiler,
         client_factory=client_factory,
     )
+    undo = AgentUndoService(
+        store=store,
+        snapshot=snapshot,
+        workspace=workspace,
+        review=review,
+        approval=approval,
+    )
     service = AgentApplicationService(
         store=store,
         dispatcher=InlineRunDispatcher(runtime),
         approval=approval,
         commit_service=commit,
+        undo_service=undo,
     )
     return LivePhase1AStack(store=store, service=service)
 
