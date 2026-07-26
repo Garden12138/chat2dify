@@ -1,0 +1,33 @@
+{
+  "id": "add-knowledge-retrieval",
+  "version": "1.0.0",
+  "goal": "Add knowledge retrieval using only an explicitly allowed dataset.",
+  "app_mode": "workflow",
+  "fixture": {
+    "snapshot_id": "workflow-without-retrieval",
+    "snapshot_version": "1.0.0",
+    "allowed_resources": ["dataset:repair-manual"]
+  },
+  "allowed_capabilities": ["knowledge-retrieval", "workflow.patch", "skill:knowledge-retrieval"],
+  "invariants": ["dataset-from-pinned-capabilities", "preserve-unrelated-paths"],
+  "required_changes": ["node.knowledge-retrieval.added", "dataset.repair-manual.bound"],
+  "forbidden_changes": ["dataset.unapproved.bound", "credential.read"],
+  "expected_validation": "valid",
+  "required_skill": "knowledge-retrieval",
+  "expected_result": {
+    "status": "completed",
+    "reviewable": true,
+    "final_valid": true,
+    "changes": ["node.knowledge-retrieval.added", "dataset.repair-manual.bound"],
+    "unrelated_total": 10,
+    "unrelated_preserved": 10,
+    "unapproved_writes": 0,
+    "incorrect_conflict_overwrites": 0,
+    "trace": [
+      {"type": "tool.completed", "message": "Loaded the knowledge-retrieval Skill."},
+      {"type": "workspace.version.created", "message": "Bound the approved dataset."},
+      {"type": "validation.passed", "message": "Dataset and variable bindings are valid."},
+      {"type": "review.ready", "message": "Retrieval changes are reviewable."}
+    ]
+  }
+}

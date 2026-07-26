@@ -156,6 +156,16 @@ class VersionedWorkflowWorkspace:
                 "AGENT_SNAPSHOT_MISSING",
                 "Workspace Patch requires a persisted Run Snapshot.",
             )
+        if not bool(
+            run.snapshot.compatibility.get("mutation_supported", True)
+        ):
+            raise WorkspaceOperationError(
+                "DIFY_VERSION_MUTATION_UNSUPPORTED",
+                str(
+                    run.snapshot.compatibility.get("reason")
+                    or "This Dify/DSL version is diagnostic-only."
+                ),
+            )
         if run.snapshot.operation == "modify" and run.base_hash is None:
             raise WorkspaceOperationError(
                 "WORKSPACE_BASE_HASH_MISSING",

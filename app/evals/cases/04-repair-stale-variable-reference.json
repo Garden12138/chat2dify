@@ -1,0 +1,34 @@
+{
+  "id": "repair-stale-variable-reference",
+  "version": "1.0.0",
+  "goal": "Repair a stale variable reference through the normal Patch and validation chain.",
+  "app_mode": "workflow",
+  "fixture": {
+    "snapshot_id": "workflow-stale-variable",
+    "snapshot_version": "1.0.0",
+    "allowed_resources": ["model:openai:gpt-4o-mini"]
+  },
+  "allowed_capabilities": ["workflow.inspect", "workflow.patch", "workflow.validate"],
+  "invariants": ["failed-patch-does-not-change-head", "bounded-repair-retries"],
+  "required_changes": ["reference.stale.repaired"],
+  "forbidden_changes": ["node.unrelated.removed", "dify.write.before-approval"],
+  "expected_validation": "valid",
+  "expected_result": {
+    "status": "completed",
+    "reviewable": true,
+    "final_valid": true,
+    "changes": ["reference.stale.repaired"],
+    "unrelated_total": 10,
+    "unrelated_preserved": 10,
+    "repairable_failure": true,
+    "auto_repaired": true,
+    "unapproved_writes": 0,
+    "incorrect_conflict_overwrites": 0,
+    "trace": [
+      {"type": "validation.failed", "message": "Normalized the stale reference error."},
+      {"type": "repair.started", "message": "Started one bounded repair attempt."},
+      {"type": "workspace.version.created", "message": "Applied the repair Patch."},
+      {"type": "validation.passed", "message": "The repaired candidate is valid."}
+    ]
+  }
+}

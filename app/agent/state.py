@@ -363,6 +363,7 @@ class AgentWorkflowSnapshot(StrictModel):
     conversation_variables: list[dict[str, Any]] = Field(default_factory=list)
     dify_version: dict[str, str] = Field(default_factory=dict)
     capabilities: list[dict[str, Any]] = Field(default_factory=list)
+    compatibility: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)
 
     @model_validator(mode="after")
@@ -378,6 +379,23 @@ class AgentWorkflowSnapshot(StrictModel):
                 "Create Snapshots must not contain an app_id or base Hash before import."
             )
         return self
+
+
+class AgentConfigSnapshot(StrictModel):
+    operation: Literal["modify"] = "modify"
+    app_id: str = Field(min_length=1, max_length=256)
+    app_name: str = Field(min_length=1, max_length=512)
+    app_description: str = Field(default="", max_length=8_000)
+    app_mode: Literal["chat", "completion", "agent-chat"]
+    base_hash: str = Field(min_length=1, max_length=512)
+    base_config: dict[str, Any]
+    dify_version: dict[str, str] = Field(default_factory=dict)
+    capabilities: list[dict[str, Any]] = Field(default_factory=list)
+    compatibility: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+AgentSnapshot = AgentWorkflowSnapshot | AgentConfigSnapshot
 
 
 class AgentSession(StrictModel):
@@ -417,7 +435,7 @@ class AgentRun(StrictModel):
     budget: AgentBudget = Field(default_factory=AgentBudget)
     budget_usage: AgentBudgetUsage = Field(default_factory=AgentBudgetUsage)
     constraints: RunConstraints = Field(default_factory=RunConstraints)
-    snapshot: AgentWorkflowSnapshot | None = None
+    snapshot: AgentSnapshot | None = None
     goal_plan: GoalPlan | None = None
     observations: list[Observation] = Field(default_factory=list, max_length=200)
     review: dict[str, Any] | None = None

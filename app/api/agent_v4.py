@@ -67,7 +67,13 @@ class AgentEventResponse(AgentEvent):
 
 class CreateAgentSessionRequest(StrictModel):
     app_id: str | None = Field(default=None, min_length=1, max_length=256)
-    app_mode: Literal["workflow", "advanced-chat"]
+    app_mode: Literal[
+        "workflow",
+        "advanced-chat",
+        "chat",
+        "completion",
+        "agent-chat",
+    ]
     app_name: str | None = Field(default=None, min_length=1, max_length=512)
     app_description: str = Field(default="", max_length=8_000)
 

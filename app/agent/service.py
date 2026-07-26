@@ -11,6 +11,8 @@ from app.agent.commit import (
     CreationCommitService,
     ModificationCommitService,
 )
+from app.agent.config_app import CONFIG_APP_MODES
+from app.agent.config_commit import ConfigCommitResult, ConfigCommitService
 from app.agent.runtime import AgentRuntime
 from app.agent.state import (
     AgentBudget,
@@ -69,6 +71,7 @@ class AgentApplicationService:
         approval: AgentApprovalService,
         commit_service: ModificationCommitService,
         creation_commit_service: CreationCommitService | None = None,
+        config_commit_service: ConfigCommitService | None = None,
         undo_service: AgentUndoService | None = None,
     ) -> None:
         self.store = store
@@ -76,6 +79,7 @@ class AgentApplicationService:
         self.approval = approval
         self.commit_service = commit_service
         self.creation_commit_service = creation_commit_service
+        self.config_commit_service = config_commit_service
         self.undo_service = undo_service
 
     def close(self) -> None:
@@ -89,11 +93,23 @@ class AgentApplicationService:
         app_name: str | None = None,
         app_description: str = "",
     ) -> AgentSession:
-        if app_mode not in {"workflow", "advanced-chat"}:
+        supported_modes = {
+            "workflow",
+            "advanced-chat",
+            "chat",
+            "completion",
+            "agent-chat",
+        }
+        if app_mode not in supported_modes:
             raise ValueError(
-                "Builder Agent supports only workflow and advanced-chat in Phase 1."
+                "Builder Agent received an unsupported Dify application mode."
             )
         normalized_app_id = (app_id or "").strip() or None
+        if app_mode in CONFIG_APP_MODES and normalized_app_id is None:
+            raise ValueError(
+                "Configured-app Builder sessions require an existing app_id; "
+                "new configured apps remain on the v3 fallback path."
+            )
         return self.store.create_session(
             AgentSession(
                 operation="modify" if normalized_app_id else "create",
@@ -116,6 +132,18 @@ class AgentApplicationService:
         if session.status != SessionStatus.ACTIVE:
             raise ValueError("Agent Session is closed.")
         effective_constraints = constraints or RunConstraints()
+        if session.app_mode in CONFIG_APP_MODES and (
+            effective_constraints.allow_draft_test
+            or effective_constraints.selected_node_ids
+            or effective_constraints.selected_edge_ids
+            or effective_constraints.viewport is not None
+            or effective_constraints.canvas_draft_hash is not None
+            or effective_constraints.dirty_state
+        ):
+            raise ValueError(
+                "Configured-app Runs do not accept Graph canvas context or "
+                "Workflow Draft testing."
+            )
         if (
             session.operation == "create"
             and self.store.list_runs(session_id=session.id, limit=1)
@@ -260,7 +288,10 @@ class AgentApplicationService:
     ) -> AgentRun:
         run = self.store.get_run(run_id)
         session = self.store.get_session(run.session_id)
-        if session.operation != "modify":
+        if (
+            session.operation != "modify"
+            or session.app_mode not in {"workflow", "advanced-chat"}
+        ):
             raise ValueError("Create Runs cannot consume existing-canvas context.")
         constraints = RunConstraints(
             allow_draft_test=run.constraints.allow_draft_test,
@@ -403,9 +434,21 @@ class AgentApplicationService:
         *,
         workspace_version_id: str,
         approval_id: str,
-    ) -> CommitResult | CreationCommitResult:
+    ) -> CommitResult | CreationCommitResult | ConfigCommitResult:
         run = self.store.get_run(run_id)
         session = self.store.get_session(run.session_id)
+        if session.app_mode in CONFIG_APP_MODES:
+            if self.config_commit_service is None:
+                raise CommitServiceError(
+                    "CONFIG_COMMIT_ADAPTER_UNAVAILABLE",
+                    "The configured-app Commit adapter is unavailable.",
+                    status_code=503,
+                )
+            return self.config_commit_service.commit(
+                run_id,
+                workspace_version_id=workspace_version_id,
+                approval_id=approval_id,
+            )
         if (
             session.operation == "create"
             or (

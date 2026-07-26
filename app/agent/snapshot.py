@@ -6,6 +6,7 @@ from typing import Callable, Protocol
 from uuid import NAMESPACE_URL, uuid5
 
 from app.agent.catalog import NodeCapabilityCatalog
+from app.agent.compatibility import DifyCompatibilityMatrix
 from app.agent.state import AgentSession, AgentWorkflowSnapshot
 from app.dify.client import DifyAppDetail, DifyDraftWorkflow
 from app.dify.graph import decompile_dify_graph
@@ -32,10 +33,12 @@ class WorkflowSnapshotService:
         client_factory: Callable[[], AbstractContextManager[SnapshotClient]],
         catalog: NodeCapabilityCatalog,
         dify_version: DifyVersionInfo,
+        compatibility: DifyCompatibilityMatrix | None = None,
     ) -> None:
         self.client_factory = client_factory
         self.catalog = catalog
         self.dify_version = dify_version
+        self.compatibility = compatibility
 
     def capture(self, session: AgentSession) -> AgentWorkflowSnapshot:
         if session.operation == "create":
@@ -70,6 +73,24 @@ class WorkflowSnapshotService:
             app_mode=app_mode,
             conversation_variables=deepcopy(draft.conversation_variables),
         )
+        capabilities = [
+            definition.model_dump(mode="json")
+            for definition in self.catalog.list()
+            if app_mode in definition.supported_app_modes
+        ]
+        compatibility = (
+            self.compatibility.decide(
+                self.dify_version,
+                app_mode=app_mode,
+            )
+            if self.compatibility is not None
+            else None
+        )
+        if compatibility is not None:
+            capabilities = self.compatibility.pin_capabilities(
+                capabilities,
+                decision=compatibility,
+            )
         return AgentWorkflowSnapshot(
             operation="modify",
             app_id=session.app_id,
@@ -88,11 +109,12 @@ class WorkflowSnapshotService:
                 "app_dsl_version": self.dify_version.app_dsl_version,
                 "draft_version": draft.version,
             },
-            capabilities=[
-                definition.model_dump(mode="json")
-                for definition in self.catalog.list()
-                if app_mode in definition.supported_app_modes
-            ],
+            capabilities=capabilities,
+            compatibility=(
+                compatibility.model_dump(mode="json")
+                if compatibility is not None
+                else {}
+            ),
         )
 
     def _create_scaffold_snapshot(
@@ -110,6 +132,24 @@ class WorkflowSnapshotService:
                 "Phase 1B supports only new Workflow and Chatflow apps.",
             )
         plan = _create_scaffold_plan(session)
+        capabilities = [
+            definition.model_dump(mode="json")
+            for definition in self.catalog.list()
+            if session.app_mode in definition.supported_app_modes
+        ]
+        compatibility = (
+            self.compatibility.decide(
+                self.dify_version,
+                app_mode=session.app_mode,
+            )
+            if self.compatibility is not None
+            else None
+        )
+        if compatibility is not None:
+            capabilities = self.compatibility.pin_capabilities(
+                capabilities,
+                decision=compatibility,
+            )
         return AgentWorkflowSnapshot(
             operation="create",
             app_id=None,
@@ -128,11 +168,12 @@ class WorkflowSnapshotService:
                 "app_dsl_version": self.dify_version.app_dsl_version,
                 "draft_version": "not-imported",
             },
-            capabilities=[
-                definition.model_dump(mode="json")
-                for definition in self.catalog.list()
-                if session.app_mode in definition.supported_app_modes
-            ],
+            capabilities=capabilities,
+            compatibility=(
+                compatibility.model_dump(mode="json")
+                if compatibility is not None
+                else {}
+            ),
         )
 
 

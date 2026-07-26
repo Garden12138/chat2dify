@@ -76,6 +76,11 @@ chat2dify Dify 风格对话工作台，对话中完成创建、运行、修改�
 [v4.0.0 AI Chat Agent 架构升级与实现方案](docs/architecture/v4-agent-architecture-and-implementation-plan.md)。
 阶段任务、验收标准和可复制的 `/goal` 指令见
 [v4.0.0 开发任务清单](docs/tasks.md)。
+Builder Agent 的
+[配置、审批、保留、恢复与扩展指南](docs/agent-v4-operations.md)、
+[v3 → v4 迁移/回滚步骤](docs/migration-v4.md)和
+[Dify 兼容矩阵](docs/compatibility/dify-v4.md)
+也分别维护为可操作文档。
 
 ## 能做什么
 
@@ -186,6 +191,7 @@ OPENAI_COMPATIBLE_RESPONSE_FORMAT=true
 
 CHAT2DIFY_TASK_DB=data/tasks.sqlite3
 CHAT2DIFY_TASK_WORKERS=2
+CHAT2DIFY_AGENT_V4_ENABLED=false
 ```
 
 重要配置说明：
@@ -199,6 +205,9 @@ CHAT2DIFY_TASK_WORKERS=2
 - `OPENAI_COMPATIBLE_*`：独立的 OpenAI Chat Completions 风格 Planner 入口，适合 OneAPI、NewAPI、LiteLLM、自建大模型网关等兼容 `/v1/chat/completions` 的服务；`PLANNER_DEFAULT_PROVIDER` 或 fallback 中使用 `openai-compatible`。
 - `OPENAI_COMPATIBLE_RESPONSE_FORMAT=false`：当兼容服务不支持 OpenAI `response_format` 参数时关闭，Planner 仍会通过提示词和校验器要求 JSON 输出。
 - `DIFY_DEFAULT_DATASET_IDS`：可选，生成知识检索节点时使用的默认数据集 ID，多个 ID 用逗号分隔。
+- `CHAT2DIFY_AGENT_V4_ENABLED`：默认 `false`。启用后注册 v4 Builder Agent
+  Session/Run/SSE/Approval API，并在同一个 SQLite 文件中初始化独立的
+  `agent_*` 表；不会关闭 v3 API。
 
 如果没有配置任何 Planner key，创建草稿会退化为简单确定性模板；修改预览仍需要至少一个可用 Planner。
 
@@ -410,6 +419,13 @@ Planner 请求会按 provider 做网络重试和 fallback。NVIDIA 默认使用�
 
 ```bash
 pytest
+```
+
+运行默认离线、可重复的 Builder Agent 评测并生成机器可读报告：
+
+```bash
+python -m app.evals.runner \
+  --output app/evals/reports/phase4-release.json
 ```
 
 检查前端脚本语法：

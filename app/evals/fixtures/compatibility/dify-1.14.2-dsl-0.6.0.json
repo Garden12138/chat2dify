@@ -1,0 +1,8 @@
+{
+  "dify_version": "1.14.2",
+  "dsl_version": "0.6.0",
+  "expected_rule_id": "dify-1.14-dsl-0.6",
+  "mutation_supported": true,
+  "diagnostic_supported": true,
+  "notes": "Console Draft Run cannot execute an uncommitted candidate Graph."
+}

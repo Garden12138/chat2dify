@@ -106,6 +106,7 @@ test("SSE replay and reconnect cursor deduplicate by Run and sequence", () => {
   assert.equal(cursor.accept(parsed[0].data), false);
   assert.equal(cursor.accept(parsed[1].data), true);
   assert.equal(cursor.sequence, 2);
+  assert.equal(cursor.accept(parsed[0].data), false);
   assert.equal(cursor.accept({ ...parsed[1].data, run_id: "run-2", seq: 3 }), false);
 });
 

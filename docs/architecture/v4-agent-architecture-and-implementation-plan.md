@@ -525,6 +525,40 @@ Patch IR
 
 Patch IR 是 Agent 与确定性内核之间的边界，不是 Dify API 的传输格式。
 
+### 7.5 配置型应用的独立 Config Patch 边界
+
+Phase 4 的实现证据确认，Chatbot、Completion 和 Dify Agent 的权威状态是
+`model_config`，不是 Graph。v4 因此新增独立的 `ConfigPatchDocument`，不扩展
+Graph `PatchDocument`，也不允许两个 Operation Union 互相解析。
+
+首个配置型应用范围为**修改现有应用**：
+
+- `chat`
+- `completion`
+- `agent-chat`
+
+新配置型应用继续使用 v3 创建入口。这样可以先复用已经存在的配置预览、运行和
+创建行为，而不把未经独立验收的创建 Adapter 放进 v4 Runtime。
+
+`ConfigPatchDocument` 显式支持：
+
+```text
+config.prompt.set
+config.model.set
+config.experience.set
+config.agent.set
+```
+
+每个操作只能写固定领域字段，可带字段级前置条件，并产生低、中、高风险。模型
+不能传 JSON Pointer 或任意配置路径。`config.agent.set` 写 Tool 绑定属于高风险，
+必须先通过破坏性变更审批。
+
+配置型 Snapshot 固定完整 `model_config`、应用类型、Dify/DSL 版本和
+`base_hash`。Hash 优先使用 Dify 返回的 `hash`、`updated_at` 或 `version`；
+若上游未提供这些字段，服务端对完整配置做规范化 SHA-256 指纹。Commit 前立即
+重新读取配置并比较同一规则产生的 Hash/指纹，冲突时不调用
+`update_model_config`。Commit 仍不作为模型 Tool。
+
 ## 8. Typed Tool Registry
 
 ### 8.1 Tool 契约
@@ -591,6 +625,21 @@ credential.availability
 ```
 
 Credential 明文读取不应成为 Tool。
+
+### 8.4 Skill Registry
+
+Phase 4 的 Skill 是服务端版本化元数据，不是新的执行权限。每个 Skill 声明：
+
+- 适用 app mode；
+- 按 app mode 区分的 required Tools；
+- 确定性验证规则；
+- 常见稳定错误；
+- 示例与安全说明。
+
+`skill.search` 只返回当前 app mode 和服务端 Policy 已可见 Tool 能满足的 Skill。
+Skill 加载不会注册 Tool、修改 `ToolSpec.side_effect`、创建 Approval 或扩大
+`visible_specs`。初始 Skill 为错误处理、人工兜底、JSON 输出、文件上传/文档
+提取和知识检索。
 
 ## 9. Capability Catalog
 
@@ -1256,6 +1305,30 @@ approval_for_vN_cannot_commit_vN+1
 - v3 现有测试全部通过。
 
 “最终 Plan/DSL 有效率 100%”是指无效结果不能进入 Review/Commit，不代表模型每次首轮都成功。
+
+### 18.4 Phase 4 离线评测执行决策
+
+默认发布评测使用版本化 JSON Case 和确定性 Fixture Replay，不调用真实 Provider
+或 Dify。每个 Case 固定 Goal、Snapshot 版本、允许能力/资源、不变量、
+必须/禁止变更、预算、副作用策略、预期验证、Trace 和终止原因。Runner 按 Case
+ID 排序并生成无时间戳、键顺序固定的机器可读报告，因此同一版本输入可逐字节
+复现。
+
+Live-provider 评测通过 `EvaluationExecutor` 边界注入，并要求显式
+`allow_live_provider=True`。默认 CI 不会因为存在 Provider 配置而自动切换成
+Live 模式。
+
+Phase 4 固定集保留一个预期失败：文件提取 Case 在没有用户文件或批准 Fixture
+时以 `DRAFT_TEST_FILE_REQUIRED` 终止。它验证系统不会伪造用户文件，同时仍满足
+目标完成率门槛；该失败必须包含可读 Trace 和结构化终止原因。
+
+### 18.5 Dify 兼容矩阵
+
+Capability 和可变更行为按 Run Snapshot 固定到 Dify/DSL 兼容决策。v4.0.0 的
+生产支持矩阵为 Dify `1.14.x`（实际验收 `1.14.2`）和 App DSL `0.6.0`。
+未知组合保留有界 Inspect/Validate 诊断，但 Graph/Config Patch 和 Commit
+返回 `DIFY_VERSION_MUTATION_UNSUPPORTED`。仓库中的 `test` / `9.9.9` 规则只用于
+确定性测试，不属于生产兼容声明。
 
 ## 19. 风险与对策
 

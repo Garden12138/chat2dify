@@ -1,0 +1,32 @@
+{
+  "id": "add-classification-branch",
+  "version": "1.0.0",
+  "goal": "Add a classification branch to an existing Workflow while preserving all other paths.",
+  "app_mode": "workflow",
+  "fixture": {
+    "snapshot_id": "existing-support-workflow",
+    "snapshot_version": "1.0.0",
+    "allowed_resources": ["model:openai:gpt-4o-mini"]
+  },
+  "allowed_capabilities": ["workflow.inspect", "if-else", "workflow.patch"],
+  "invariants": ["preserve-unrelated-nodes", "hash-bound-commit"],
+  "required_changes": ["node.classifier.added", "edge.classification.added"],
+  "forbidden_changes": ["node.unrelated.removed", "dify.write.before-approval"],
+  "expected_validation": "valid",
+  "expected_result": {
+    "status": "completed",
+    "reviewable": true,
+    "final_valid": true,
+    "changes": ["node.classifier.added", "edge.classification.added"],
+    "unrelated_total": 10,
+    "unrelated_preserved": 9,
+    "unapproved_writes": 0,
+    "incorrect_conflict_overwrites": 0,
+    "trace": [
+      {"type": "context.loaded", "message": "Loaded the authoritative Workflow Snapshot."},
+      {"type": "workspace.version.created", "message": "Added the classification branch transactionally."},
+      {"type": "validation.passed", "message": "The candidate passed deterministic validation."},
+      {"type": "review.ready", "message": "Review exposes the bounded branch Diff."}
+    ]
+  }
+}

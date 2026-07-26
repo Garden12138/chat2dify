@@ -5,7 +5,13 @@ from typing import Any
 
 from pydantic import Field
 
-from app.agent.state import AgentRun, Observation, StrictModel, utc_now
+from app.agent.state import (
+    AgentConfigSnapshot,
+    AgentRun,
+    Observation,
+    StrictModel,
+    utc_now,
+)
 from app.agent.store import AgentStore
 from app.agent.trace import redact_sensitive_data
 from app.models import PlanEdge, WorkflowPlan
@@ -55,7 +61,16 @@ class BuilderContextBuilder:
         if run.snapshot is None or run.goal_plan is None:
             raise ValueError("Builder Context requires Snapshot and Goal Plan checkpoints.")
         head = self.store.get_workspace_head(run.id)
-        plan = WorkflowPlan.model_validate(head.snapshot)
+        config_snapshot = (
+            run.snapshot
+            if isinstance(run.snapshot, AgentConfigSnapshot)
+            else None
+        )
+        plan = (
+            None
+            if config_snapshot is not None
+            else WorkflowPlan.model_validate(head.snapshot)
+        )
         recent = run.observations[-self.max_recent_observations :]
         older = run.observations[: -self.max_recent_observations]
         events = self.store.list_events(run.id, limit=10_000)
@@ -72,37 +87,63 @@ class BuilderContextBuilder:
                 "base_hash": run.snapshot.base_hash,
                 "dify_version": run.snapshot.dify_version,
             },
-            workspace={
-                "version": head.id,
-                "node_count": len(plan.nodes),
-                "edge_count": len(plan.edges),
-                "conversation_variable_count": len(plan.conversation_variables),
-                "nodes": [
-                    {
-                        "id": node.id,
-                        "type": node.type,
-                        "title": node.title,
-                    }
-                    for node in plan.nodes[: self.max_node_summaries]
-                ],
-            },
-            selection={
-                "node_ids": run.constraints.selected_node_ids,
-                "edge_ids": run.constraints.selected_edge_ids,
-                "viewport": (
-                    run.constraints.viewport.model_dump(mode="json")
-                    if run.constraints.viewport is not None
-                    else None
-                ),
-                "current_panel": run.constraints.current_panel,
-                "context_revision": run.constraints.canvas_context_revision,
-                **_selected_graph_context(
-                    plan,
-                    run,
-                    max_nodes=min(self.max_node_summaries, 20),
-                    max_edges=40,
-                ),
-            },
+            workspace=(
+                _config_workspace_summary(
+                    head.id,
+                    head.snapshot,
+                )
+                if config_snapshot is not None
+                else {
+                    "version": head.id,
+                    "domain": "graph",
+                    "node_count": len(plan.nodes),
+                    "edge_count": len(plan.edges),
+                    "conversation_variable_count": len(
+                        plan.conversation_variables
+                    ),
+                    "nodes": [
+                        {
+                            "id": node.id,
+                            "type": node.type,
+                            "title": node.title,
+                        }
+                        for node in plan.nodes[
+                            : self.max_node_summaries
+                        ]
+                    ],
+                }
+            ),
+            selection=(
+                {
+                    "node_ids": [],
+                    "edge_ids": [],
+                    "viewport": None,
+                    "current_panel": run.constraints.current_panel,
+                    "context_revision": (
+                        run.constraints.canvas_context_revision
+                    ),
+                }
+                if config_snapshot is not None
+                else {
+                    "node_ids": run.constraints.selected_node_ids,
+                    "edge_ids": run.constraints.selected_edge_ids,
+                    "viewport": (
+                        run.constraints.viewport.model_dump(mode="json")
+                        if run.constraints.viewport is not None
+                        else None
+                    ),
+                    "current_panel": run.constraints.current_panel,
+                    "context_revision": (
+                        run.constraints.canvas_context_revision
+                    ),
+                    **_selected_graph_context(
+                        plan,
+                        run,
+                        max_nodes=min(self.max_node_summaries, 20),
+                        max_edges=40,
+                    ),
+                }
+            ),
             capabilities=run.snapshot.capabilities[: self.max_capabilities],
             latest_validation=head.validation,
             latest_execution=head.test_result,
@@ -143,7 +184,30 @@ class BuilderContextBuilder:
                     - run.budget_usage.context_tokens,
                 ),
             ),
-        )
+    )
+
+
+def _config_workspace_summary(
+    version_id: str,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    model = config.get("model") if isinstance(config.get("model"), dict) else {}
+    return {
+        "version": version_id,
+        "domain": "config",
+        "field_count": len(config),
+        "fields": sorted(str(key) for key in config)[:100],
+        "model": {
+            "provider": model.get("provider"),
+            "name": model.get("name"),
+            "mode": model.get("mode"),
+        },
+        "has_prompt": bool(config.get("pre_prompt")),
+        "agent_enabled": bool(
+            isinstance(config.get("agent_mode"), dict)
+            and config["agent_mode"].get("enabled")
+        ),
+    }
 
 
 def _selected_graph_context(

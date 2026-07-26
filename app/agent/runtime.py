@@ -13,10 +13,10 @@ from app.agent.decision import (
 )
 from app.agent.policy import AgentToolPolicy
 from app.agent.registry import ToolRegistry, ToolResult
-from app.agent.review import WorkflowReviewService
-from app.agent.snapshot import WorkflowSnapshotService
+from app.agent.skills import visible_tool_specs_for_mode
 from app.agent.state import (
     AgentBudgetUsage,
+    AgentConfigSnapshot,
     AgentRun,
     ApprovalStatus,
     GoalPlan,
@@ -28,7 +28,6 @@ from app.agent.state import (
 )
 from app.agent.store import AgentStore, AgentStoreConflict
 from app.agent.trace import redact_sensitive_data
-from app.agent.workspace import VersionedWorkflowWorkspace
 
 
 class RepeatedAgentError(RuntimeError):
@@ -40,9 +39,9 @@ class AgentRuntime:
         self,
         *,
         store: AgentStore,
-        snapshot: WorkflowSnapshotService,
-        workspace: VersionedWorkflowWorkspace,
-        review: WorkflowReviewService,
+        snapshot: Any,
+        workspace: Any,
+        review: Any,
         approval: AgentApprovalService,
         registry: ToolRegistry,
         context_builder: BuilderContextBuilder,
@@ -86,6 +85,7 @@ class AgentRuntime:
         goal_plan = _initial_goal_plan(
             run.goal,
             operation=snapshot.operation,
+            app_mode=snapshot.app_mode,
             allow_draft_test=run.constraints.allow_draft_test,
         )
         try:
@@ -113,9 +113,28 @@ class AgentRuntime:
                 "app_mode": snapshot.app_mode,
                 "base_hash": snapshot.base_hash,
                 "workspace_version_id": version.id,
-                "node_count": len(snapshot.base_plan.get("nodes") or []),
-                "edge_count": len(snapshot.base_plan.get("edges") or []),
+                "workspace_domain": (
+                    "config"
+                    if isinstance(snapshot, AgentConfigSnapshot)
+                    else "graph"
+                ),
+                "node_count": (
+                    0
+                    if isinstance(snapshot, AgentConfigSnapshot)
+                    else len(snapshot.base_plan.get("nodes") or [])
+                ),
+                "edge_count": (
+                    0
+                    if isinstance(snapshot, AgentConfigSnapshot)
+                    else len(snapshot.base_plan.get("edges") or [])
+                ),
+                "config_field_count": (
+                    len(snapshot.base_config)
+                    if isinstance(snapshot, AgentConfigSnapshot)
+                    else 0
+                ),
                 "capability_count": len(snapshot.capabilities),
+                "compatibility": snapshot.compatibility,
             },
         )
         self.store.append_event(
@@ -160,7 +179,14 @@ class AgentRuntime:
             try:
                 raw_decision = self.decision_provider.decide(
                     context,
-                    self.registry.visible_specs(),
+                    visible_tool_specs_for_mode(
+                        self.registry,
+                        (
+                            run.snapshot.app_mode
+                            if run.snapshot is not None
+                            else None
+                        ),
+                    ),
                 )
             except DecisionProviderError as exc:
                 used_calls = max(1, exc.model_calls)
@@ -283,7 +309,7 @@ class AgentRuntime:
                 return self._record_tool_result(run, decision, result)
         patch_operation_count = (
             len(decision.arguments.get("operations") or [])
-            if decision.tool_name == "workflow.patch"
+            if decision.tool_name in {"workflow.patch", "config.patch"}
             else 0
         )
         if (
@@ -405,7 +431,7 @@ class AgentRuntime:
                 message="Updated Goal Plan evidence from the Tool result.",
                 data=run.goal_plan.model_dump(mode="json"),
             )
-        if decision.tool_name == "workflow.patch":
+        if decision.tool_name in {"workflow.patch", "config.patch"}:
             if result.ok:
                 validating = self.store.update_run(
                     run.transition_to(RunPhase.VALIDATING)
@@ -490,6 +516,8 @@ class AgentRuntime:
         self,
         run: AgentRun,
     ) -> ToolCallDecision | None:
+        if isinstance(run.snapshot, AgentConfigSnapshot):
+            return None
         for approval in self.store.list_approvals(run.id):
             scope = approval.scope
             if (
@@ -664,9 +692,13 @@ def _initial_goal_plan(
     goal: str,
     *,
     operation: str = "modify",
+    app_mode: str = "workflow",
     allow_draft_test: bool = False,
 ) -> GoalPlan:
     create_mode = operation == "create"
+    config_mode = app_mode in {"chat", "completion", "agent-chat"}
+    if config_mode:
+        allow_draft_test = False
     return GoalPlan(
         goal=goal,
         constraints=[
@@ -676,10 +708,21 @@ def _initial_goal_plan(
                 if create_mode
                 else "Keep Dify unchanged before persisted approval."
             ),
-            "Preserve unrelated nodes, edges, metadata, features, and variables.",
+            (
+                "Preserve unrelated model-config fields and metadata."
+                if config_mode
+                else (
+                    "Preserve unrelated nodes, edges, metadata, features, "
+                    "and variables."
+                )
+            ),
         ],
         success_criteria=[
-            "The requested relevant nodes and edges are changed.",
+            (
+                "Only the requested configured-app fields are changed."
+                if config_mode
+                else "The requested relevant nodes and edges are changed."
+            ),
             "The deterministic validation chain passes.",
             (
                 "Review and risk data are ready before any Dify app exists."
@@ -691,15 +734,23 @@ def _initial_goal_plan(
             GoalStep(
                 id="observe",
                 description=(
-                    "Inspect the deterministic new-app scaffold."
-                    if create_mode
-                    else "Inspect the authoritative Workflow Snapshot."
+                    "Inspect the authoritative configured-app Snapshot."
+                    if config_mode
+                    else (
+                        "Inspect the deterministic new-app scaffold."
+                        if create_mode
+                        else "Inspect the authoritative Workflow Snapshot."
+                    )
                 ),
                 status="in_progress",
             ),
             GoalStep(
                 id="patch",
-                description="Apply the smallest transactional Patch.",
+                description=(
+                    "Apply the smallest transactional Config Patch."
+                    if config_mode
+                    else "Apply the smallest transactional Graph Patch."
+                ),
                 depends_on=["observe"],
             ),
             GoalStep(

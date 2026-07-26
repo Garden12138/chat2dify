@@ -1,0 +1,33 @@
+{
+  "id": "create-after-sales-workflow",
+  "version": "1.0.0",
+  "goal": "Create an after-sales analysis Workflow with structured classification and a professional response.",
+  "app_mode": "workflow",
+  "fixture": {
+    "snapshot_id": "workflow-create-scaffold",
+    "snapshot_version": "1.0.0",
+    "allowed_resources": ["model:openai:gpt-4o-mini"]
+  },
+  "allowed_capabilities": ["llm", "if-else", "end", "skill:json-output"],
+  "invariants": ["no-write-before-approval", "server-generated-node-ids"],
+  "required_changes": ["node.classifier.added", "node.response.added", "prompt.json-contract"],
+  "forbidden_changes": ["dify.write.before-approval", "credential.read"],
+  "expected_validation": "valid",
+  "required_skill": "json-output",
+  "expected_result": {
+    "status": "completed",
+    "reviewable": true,
+    "final_valid": true,
+    "changes": ["node.classifier.added", "node.response.added", "prompt.json-contract"],
+    "unrelated_total": 10,
+    "unrelated_preserved": 10,
+    "unapproved_writes": 0,
+    "incorrect_conflict_overwrites": 0,
+    "trace": [
+      {"type": "agent.started", "message": "Initialized the deterministic creation scaffold."},
+      {"type": "workspace.version.created", "message": "Applied a typed Graph Patch."},
+      {"type": "validation.passed", "message": "The final Plan and DSL are valid."},
+      {"type": "review.ready", "message": "Review is ready before import."}
+    ]
+  }
+}

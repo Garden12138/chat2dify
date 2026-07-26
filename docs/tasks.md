@@ -40,7 +40,7 @@ Rules:
 | Phase 1B | New-app create adapter | Phase 1A | `completed` |
 | Phase 2 | Canvas context and Agent Workbench | Phase 1 | `completed` |
 | Phase 3 | Draft Test, Inspect, and Repair | Phase 2 | `completed` |
-| Phase 4 | Config apps, Skills, evals, and hardening | Phase 3 | `pending` |
+| Phase 4 | Config apps, Skills, evals, and hardening | Phase 3 | `completed` |
 | Release gate | v4.0.0 release readiness | Phases 0–3; selected Phase 4 gates | `pending` |
 
 Dependency flow:
@@ -827,7 +827,7 @@ result.
 
 ## 9. Phase 4 — Config apps, Skills, evals, and hardening
 
-Status: `pending`
+Status: `completed`
 
 Dependencies: Phase 3 `completed`
 
@@ -836,25 +836,25 @@ Skills, then measure and harden it against a fixed evaluation suite.
 
 ### Tasks
 
-- [ ] **P4-01 — `ConfigPatchIR` domain**
+- [x] **P4-01 — `ConfigPatchIR` domain**
   - Define a separate typed patch model for `chat`, `completion`, and
     `agent-chat`.
   - Keep it separate from Graph Patch IR.
   - Add field-level risk and precondition rules.
 
-- [ ] **P4-02 — Config-app tools and adapters**
+- [x] **P4-02 — Config-app tools and adapters**
   - Add inspect, patch, validate, diff, review, approval, and commit behavior
     for Chatbot, Completion, and Dify Agent apps.
   - Reuse existing model-config Hash behavior.
   - Preserve v3 configured-app paths as fallback.
 
-- [ ] **P4-03 — Skill Registry**
+- [x] **P4-03 — Skill Registry**
   - Define Skill metadata, applicability, required tools, validation rules,
     common errors, and examples.
   - Add `skill.search` and deterministic Skill loading.
   - Skills guide tool use; they do not gain extra permissions.
 
-- [ ] **P4-04 — Initial Skills**
+- [x] **P4-04 — Initial Skills**
   - Add error handling.
   - Add human fallback.
   - Add JSON output.
@@ -862,13 +862,13 @@ Skills, then measure and harden it against a fixed evaluation suite.
   - Add knowledge retrieval.
   - Add tests and evaluation cases for each.
 
-- [ ] **P4-05 — Evaluation framework**
+- [x] **P4-05 — Evaluation framework**
   - Add versioned fixtures, cases, runner, graders, and reports.
   - Fix goal, Snapshot, allowed capabilities, invariants, required/forbidden
     changes, budgets, side-effect policy, and expected validation per case.
   - Run without live providers by default; allow explicit live-provider runs.
 
-- [ ] **P4-06 — Required evaluation cases**
+- [x] **P4-06 — Required evaluation cases**
   - Create after-sales analysis Workflow.
   - Add a classification branch.
   - Add a Chatflow conversation variable.
@@ -880,21 +880,21 @@ Skills, then measure and harden it against a fixed evaluation suite.
   - Add file extraction.
   - Recover from a run error.
 
-- [ ] **P4-07 — Dify compatibility matrix**
+- [x] **P4-07 — Dify compatibility matrix**
   - Record supported Dify versions/DSL versions.
   - Pin Capability Catalog behavior to Dify version.
   - Add fixtures for supported version differences.
   - Fail closed for unsupported mutation while preserving read/diagnostic
     behavior where safe.
 
-- [ ] **P4-08 — Security and reliability hardening**
+- [x] **P4-08 — Security and reliability hardening**
   - Add prompt-injection fixtures.
   - Add secret-redaction fixtures.
   - Add SQLite concurrency/load tests.
   - Add long Trace/context-compaction tests.
   - Add duplicate/reordered SSE and restart tests.
 
-- [ ] **P4-09 — Product and operator documentation**
+- [x] **P4-09 — Product and operator documentation**
   - Document configuration, data retention, approvals, side effects, recovery,
     troubleshooting, and compatibility.
   - Document migration and v3 fallback.
@@ -902,23 +902,83 @@ Skills, then measure and harden it against a fixed evaluation suite.
 
 ### Acceptance criteria
 
-- [ ] Graph Patch IR and Config Patch IR remain separate typed domains.
-- [ ] Config apps cannot bypass approval or Hash checks.
-- [ ] Skills cannot expand Tool permissions.
-- [ ] Evaluation suite produces a reproducible machine-readable report.
-- [ ] Security fixtures cannot expose test secrets or elevate permissions.
-- [ ] Dify compatibility behavior is explicit and tested.
-- [ ] Selected release metrics in Section 10 are met.
-- [ ] Targeted Phase 4 tests and full existing suite pass.
-- [ ] `git diff --check` passes.
+- [x] Graph Patch IR and Config Patch IR remain separate typed domains.
+- [x] Config apps cannot bypass approval or Hash checks.
+- [x] Skills cannot expand Tool permissions.
+- [x] Evaluation suite produces a reproducible machine-readable report.
+- [x] Security fixtures cannot expose test secrets or elevate permissions.
+- [x] Dify compatibility behavior is explicit and tested.
+- [x] Selected release metrics in Section 10 are met.
+- [x] Targeted Phase 4 tests and full existing suite pass.
+- [x] `git diff --check` passes.
 
 ### Completion record
 
-- Started:
-- Completed:
+- Started: 2026-07-26
+- Completed: 2026-07-26
 - Tests:
+  - Dedicated Phase 4 configured-app, Skill, evaluation, compatibility,
+    security, SQLite load, context-compaction, and restart tests:
+    `16 passed`.
+  - Phase 4 plus directly affected Agent Runtime/store/API, Phase 1–3, v3
+    assistant/configured-app, Dify client, and main regressions:
+    `227 passed`; the final full suite below also includes the last two
+    Phase 4 hardening assertions.
+  - Standalone Workbench protocol/SSE/UI-domain tests: `8 passed`, including a
+    reordered-event rejection assertion.
+  - Full repository suite: `451 passed, 4 skipped`. All four skips are the
+    existing opt-in localhost-only Dify Phase 1/2 acceptance cases.
+  - Deterministic evaluation runner: passed; a second report generated under
+    `/tmp` was byte-identical to
+    `app/evals/reports/phase4-release.json`.
+  - Evaluation metrics: final reviewable Plan/DSL/config validity `100%`;
+    goal completion `90%`; unrelated preservation `98%`; designated
+    auto-repair `100%`; readable structured failure Trace `100%`;
+    unapproved writes `0`; incorrect Hash-conflict overwrites `0`.
+  - `python -m compileall -q app tests`: passed.
+  - JavaScript syntax check and Node test runner: passed.
+  - `git diff --check`: passed.
+  - Pytest reported one upstream Starlette `fastapi.testclient` deprecation
+    warning; no test failures or unhandled warnings occurred.
 - Decisions/deviations:
+  - Configured-app v4 scope modifies existing `chat`, `completion`, and
+    `agent-chat` apps. New configured-app creation remains on the preserved v3
+    path for v4.0.0; this selected scope is explicit in product and migration
+    documentation.
+  - `ConfigPatchDocument` is a separate discriminated operation union for
+    prompt, model, experience, and Agent settings. It cannot parse Graph Patch
+    operations or arbitrary paths. Whole-config Workspace snapshots preserve
+    unrelated fields, while field preconditions and per-operation risk are
+    deterministic.
+  - Config Commit uses Dify `hash`, `updated_at`, or `version` with the same
+    precedence as the v3 configured-app path, and falls back to a canonical
+    full-config SHA-256 fingerprint when Dify provides no token. Commit
+    re-reads immediately, requires persisted version-bound approval, and stops
+    without a write on mismatch.
+  - Skills are versioned server metadata. `skill.search` loads only Skills
+    whose mode-specific required Tools are already visible under Policy;
+    loading a Skill cannot register, reveal, approve, or authorize a Tool.
+  - The production mutation matrix supports Dify `1.14.x` (tested `1.14.2`)
+    with App DSL `0.6.0`. Unknown pairs keep bounded read/validation
+    diagnostics but fail closed for Graph/Config mutation. The `test` /
+    `9.9.9` rule is a deterministic repository fixture only.
+  - Default evaluation is versioned offline Fixture Replay with stable ordering
+    and no timestamp, Provider call, Dify call, or write. Live-provider
+    executors require explicit API opt-in. The fixed file-extraction case
+    intentionally ends with `DRAFT_TEST_FILE_REQUIRED` when no user file or
+    approved fixture exists; that negative invariant yields the measured
+    `90%` goal-completion rate while preserving a readable structured failure.
 - Remaining limitations:
+  - New Chatbot, Completion, and Agent creation, configured-app compensating
+    Undo, and configured-app Draft testing remain on explicit v3 paths in
+    v4.0.0.
+  - Phase 4 did not run a live configured-app Commit against Dify; default
+    acceptance remains deterministic with fake clients. The existing
+    localhost-only live cases continue to cover Workflow/Chatflow Hash,
+    Approval, Commit, conflict, and Undo boundaries.
+  - The formal v4.0.0 Release Gate remains a separate `/goal`. Version
+    consistency, release-candidate packaging, and final rollout sign-off were
+    not changed in Phase 4.
 
 ## 10. v4.0.0 Release Gate
 
@@ -926,6 +986,13 @@ Status: `pending`
 
 The release gate is verification and hardening, not a place to add unrelated
 features.
+
+Phase 4 metric snapshot (not a Release Gate completion): the reproducible
+offline report at `app/evals/reports/phase4-release.json` records reviewable
+validity `100%`, goal completion `90%`, unrelated preservation `98%`,
+designated auto-repair `100%`, readable structured failure Trace `100%`,
+unapproved writes `0`, and incorrect Hash-conflict overwrites `0`. The separate
+Release Gate `/goal` must still re-run and sign off every item below.
 
 ### Safety gates
 
@@ -1009,3 +1076,8 @@ the plan.
 | 2026-07-25 | Phase 1B | Persist an import checkpoint before the Dify call and a successful-import receipt before draft recovery; fail closed on ambiguous outcomes | Makes duplicate Commit retries idempotent and separates a definitive import failure from recovery of an app that Dify already created | `app/agent/commit.py`, `app/agent/store.py`, `app/dify/client.py` |
 | 2026-07-26 | Phase 2 supplemental | Keep live Dify acceptance opt-in and exercise selection-bound modification plus reviewed compensating Undo for both Workflow and Chatflow; validate the host protocol in the exact Dify 1.14.2 Web build | Closes the real-environment gaps without making the deterministic default suite depend on Dify or broadening scope into Phase 3 Draft Run behavior | `tests/test_agent_phase2_live.py`, `tests/test_agent_phase1a_live.py`, `deploy/dify/web-adapter/`, `docs/tasks.md` |
 | 2026-07-26 | Phase 3 | Put Draft execution behind a workspace-aware Adapter; make the built-in Dify 1.14.2 Adapter fail closed for patched candidates instead of testing stale state or temporarily writing Dify | The upstream Draft Run payload accepts inputs but no candidate Graph/DSL. Temporary sync or hidden app import would violate the modeled write/Hash/approval boundary | `app/agent/execution.py`, `app/agent/tools/draft_run.py`, architecture Section 10.5 |
+| 2026-07-26 | Phase 4 | Keep configured-app v4 scope to modification of existing Chatbot, Completion, and Agent apps; leave new configured-app creation on v3 | Existing model-config read/preview/write behavior is reusable, while a new create/import Adapter would need separate idempotency and live acceptance beyond the selected Phase 4 scope | `app/agent/config_app.py`, `app/agent/config_commit.py`, `docs/agent-v4-operations.md` |
+| 2026-07-26 | Phase 4 | Use a separate typed `ConfigPatchDocument` and versioned full-config Workspace, with field preconditions, deterministic risk, persisted approval, and immediate model-config Hash/fingerprint re-read | Graph and configured-app states have different invariants; keeping their Patch unions separate prevents arbitrary config paths and stale approval/Hash writes | `app/agent/config_patch.py`, `app/agent/config_app.py`, architecture Section 7.5 |
+| 2026-07-26 | Phase 4 | Treat Skills as versioned server metadata whose required Tools must already be visible under Policy | Reusable guidance must not become a second permission system or expose Commit/Dify write capabilities | `app/agent/skills.py`, `app/agent/runtime.py` |
+| 2026-07-26 | Phase 4 | Pin capabilities and mutation behavior to a tested Dify/DSL compatibility decision; unmatched versions remain diagnostic-only | Dify schema/API drift should fail closed for writes while preserving safe inspection needed for troubleshooting | `app/agent/compatibility.py`, `docs/compatibility/dify-v4.md` |
+| 2026-07-26 | Phase 4 | Make default release evaluation a versioned, timestamp-free offline Fixture Replay; require explicit opt-in for injected live-provider executors | CI and release metrics must be reproducible and must not silently make Provider, Dify, cost, or external-side-effect calls | `app/evals/`, architecture Section 18.4 |

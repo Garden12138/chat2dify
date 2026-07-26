@@ -1,0 +1,32 @@
+{
+  "id": "replace-model-provider",
+  "version": "1.0.0",
+  "goal": "Replace the model provider in a Completion app through ConfigPatchIR.",
+  "app_mode": "completion",
+  "fixture": {
+    "snapshot_id": "completion-config-openai",
+    "snapshot_version": "1.0.0",
+    "allowed_resources": ["model:anthropic:claude-3-5-sonnet"]
+  },
+  "allowed_capabilities": ["config.inspect", "config.model", "config.validate"],
+  "invariants": ["config-and-graph-domains-separate", "model-config-hash-bound-commit"],
+  "required_changes": ["config.model.provider.replaced"],
+  "forbidden_changes": ["graph.node.added", "dify.write.before-approval"],
+  "expected_validation": "valid",
+  "expected_result": {
+    "status": "completed",
+    "reviewable": true,
+    "final_valid": true,
+    "changes": ["config.model.provider.replaced"],
+    "unrelated_total": 10,
+    "unrelated_preserved": 10,
+    "unapproved_writes": 0,
+    "incorrect_conflict_overwrites": 0,
+    "trace": [
+      {"type": "context.loaded", "message": "Loaded the authoritative Completion model config."},
+      {"type": "workspace.version.created", "message": "Applied config.model.set."},
+      {"type": "validation.passed", "message": "The Config Workspace is valid."},
+      {"type": "review.ready", "message": "The model replacement is ready for approval."}
+    ]
+  }
+}

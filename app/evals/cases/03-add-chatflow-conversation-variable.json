@@ -1,0 +1,32 @@
+{
+  "id": "add-chatflow-conversation-variable",
+  "version": "1.0.0",
+  "goal": "Add a typed conversation variable to a Chatflow and preserve existing conversation behavior.",
+  "app_mode": "advanced-chat",
+  "fixture": {
+    "snapshot_id": "existing-support-chatflow",
+    "snapshot_version": "1.0.0",
+    "allowed_resources": ["conversation-variable:string"]
+  },
+  "allowed_capabilities": ["workflow.inspect", "conversation_variable.add", "workflow.validate"],
+  "invariants": ["preserve-existing-conversation-variables", "no-raw-graph-from-browser"],
+  "required_changes": ["conversation-variable.customer-tier.added"],
+  "forbidden_changes": ["conversation-variable.existing.removed", "dify.write.before-approval"],
+  "expected_validation": "valid",
+  "expected_result": {
+    "status": "completed",
+    "reviewable": true,
+    "final_valid": true,
+    "changes": ["conversation-variable.customer-tier.added"],
+    "unrelated_total": 10,
+    "unrelated_preserved": 10,
+    "unapproved_writes": 0,
+    "incorrect_conflict_overwrites": 0,
+    "trace": [
+      {"type": "context.loaded", "message": "Loaded the Chatflow and its variables."},
+      {"type": "workspace.version.created", "message": "Added one typed conversation variable."},
+      {"type": "validation.passed", "message": "Variable references and DSL are valid."},
+      {"type": "review.ready", "message": "The variable Diff is reviewable."}
+    ]
+  }
+}

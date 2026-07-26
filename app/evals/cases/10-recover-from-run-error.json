@@ -1,0 +1,39 @@
+{
+  "id": "recover-from-run-error",
+  "version": "1.0.0",
+  "goal": "Inspect a normalized Draft Run failure, repair it once, and return a valid reviewed candidate.",
+  "app_mode": "advanced-chat",
+  "fixture": {
+    "snapshot_id": "chatflow-runtime-failure",
+    "snapshot_version": "1.0.0",
+    "allowed_resources": ["model:openai:gpt-4o-mini"]
+  },
+  "allowed_capabilities": ["workflow.test_draft", "execution.inspect", "workflow.patch"],
+  "invariants": ["draft-run-within-approval-budget", "raw-sse-not-persisted"],
+  "required_changes": ["runtime.error.repaired"],
+  "forbidden_changes": ["draft-run.unapproved", "raw-secret.persisted"],
+  "expected_validation": "valid",
+  "side_effect_policy": {
+    "allow_draft_run": true,
+    "allowed_kinds": ["model_cost"],
+    "max_draft_runs": 2
+  },
+  "expected_result": {
+    "status": "completed",
+    "reviewable": true,
+    "final_valid": true,
+    "changes": ["runtime.error.repaired"],
+    "unrelated_total": 10,
+    "unrelated_preserved": 10,
+    "repairable_failure": true,
+    "auto_repaired": true,
+    "unapproved_writes": 0,
+    "incorrect_conflict_overwrites": 0,
+    "trace": [
+      {"type": "test.completed", "message": "The approved Draft Run returned a normalized failure."},
+      {"type": "repair.started", "message": "Started one bounded repair."},
+      {"type": "validation.passed", "message": "The repaired candidate passed validation."},
+      {"type": "review.ready", "message": "The repaired result is reviewable."}
+    ]
+  }
+}

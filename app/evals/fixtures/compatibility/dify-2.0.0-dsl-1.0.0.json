@@ -1,0 +1,8 @@
+{
+  "dify_version": "2.0.0",
+  "dsl_version": "1.0.0",
+  "expected_rule_id": null,
+  "mutation_supported": false,
+  "diagnostic_supported": true,
+  "notes": "Unsupported mutations fail closed while bounded diagnostics remain available."
+}

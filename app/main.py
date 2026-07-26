@@ -16,17 +16,34 @@ from app import __version__
 from app.agent.approval import AgentApprovalService
 from app.agent.catalog import NodeCapabilityCatalog
 from app.agent.commit import CreationCommitService, ModificationCommitService
+from app.agent.compatibility import DifyCompatibilityMatrix
+from app.agent.config_app import (
+    ConfigAppSnapshotService,
+    ConfigReviewService,
+    VersionedConfigWorkspace,
+)
+from app.agent.config_commit import ConfigCommitService
 from app.agent.context import BuilderContextBuilder
 from app.agent.decision import OpenAICompatibleDecisionProvider
 from app.agent.execution import DifyDraftExecutionAdapter, DraftRunService
 from app.agent.policy import AgentToolPolicy
 from app.agent.registry import ToolRegistry
 from app.agent.review import WorkflowReviewService
+from app.agent.routing import (
+    AgentReviewRouter,
+    AgentSnapshotRouter,
+    AgentWorkspaceRouter,
+)
 from app.agent.runtime import AgentRuntime
 from app.agent.service import AgentApplicationService, ThreadedRunDispatcher
+from app.agent.skills import SkillRegistry, register_skill_tool
 from app.agent.snapshot import WorkflowSnapshotService
 from app.agent.store import AgentStore
-from app.agent.tools import register_phase1a_tools, register_phase3_tools
+from app.agent.tools import (
+    register_config_tools,
+    register_phase1a_tools,
+    register_phase3_tools,
+)
 from app.agent.undo import AgentUndoService
 from app.agent.validation import WorkflowValidationService
 from app.agent.workspace import VersionedWorkflowWorkspace
@@ -122,6 +139,7 @@ async def lifespan(application: FastAPI):
             default_dataset_ids=settings.dify_default_dataset_ids,
         )
         catalog = NodeCapabilityCatalog()
+        compatibility = DifyCompatibilityMatrix()
         validation = WorkflowValidationService(
             compiler=compiler,
             expected_dsl_version=version_info.app_dsl_version,
@@ -132,6 +150,11 @@ async def lifespan(application: FastAPI):
             catalog=catalog,
         )
         review = WorkflowReviewService(store=agent_store, workspace=workspace)
+        config_workspace = VersionedConfigWorkspace(store=agent_store)
+        config_review = ConfigReviewService(
+            store=agent_store,
+            workspace=config_workspace,
+        )
         approval = AgentApprovalService(store=agent_store)
         registry = ToolRegistry()
         def client_factory():
@@ -142,6 +165,12 @@ async def lifespan(application: FastAPI):
             workspace=workspace,
             review=review,
         )
+        register_config_tools(
+            registry,
+            store=agent_store,
+            workspace=config_workspace,
+            review=config_review,
+        )
         draft_adapter = DifyDraftExecutionAdapter(client_factory)
         register_phase3_tools(
             registry,
@@ -151,16 +180,40 @@ async def lifespan(application: FastAPI):
                 adapter=draft_adapter,
             ),
         )
-        snapshot_service = WorkflowSnapshotService(
+        skills = SkillRegistry()
+        register_skill_tool(
+            registry,
+            store=agent_store,
+            skills=skills,
+        )
+        workflow_snapshot_service = WorkflowSnapshotService(
             client_factory=client_factory,
             catalog=catalog,
             dify_version=version_info,
+            compatibility=compatibility,
+        )
+        config_snapshot_service = ConfigAppSnapshotService(
+            client_factory=client_factory,
+            dify_version=version_info,
+            compatibility=compatibility,
+        )
+        snapshot_service = AgentSnapshotRouter(
+            workflow=workflow_snapshot_service,
+            config=config_snapshot_service,
+        )
+        workspace_router = AgentWorkspaceRouter(
+            workflow=workspace,
+            config=config_workspace,
+        )
+        review_router = AgentReviewRouter(
+            workflow=review,
+            config=config_review,
         )
         runtime = AgentRuntime(
             store=agent_store,
             snapshot=snapshot_service,
-            workspace=workspace,
-            review=review,
+            workspace=workspace_router,
+            review=review_router,
             approval=approval,
             registry=registry,
             context_builder=BuilderContextBuilder(store=agent_store),
@@ -188,9 +241,15 @@ async def lifespan(application: FastAPI):
             compiler=compiler,
             client_factory=client_factory,
         )
+        config_commit_service = ConfigCommitService(
+            store=agent_store,
+            workspace=config_workspace,
+            approval=approval,
+            client_factory=client_factory,
+        )
         undo_service = AgentUndoService(
             store=agent_store,
-            snapshot=snapshot_service,
+            snapshot=workflow_snapshot_service,
             workspace=workspace,
             review=review,
             approval=approval,
@@ -204,6 +263,7 @@ async def lifespan(application: FastAPI):
             approval=approval,
             commit_service=commit_service,
             creation_commit_service=creation_commit_service,
+            config_commit_service=config_commit_service,
             undo_service=undo_service,
         )
         application.state.agent_store = agent_store
