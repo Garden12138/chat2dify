@@ -29,7 +29,7 @@
         </nav>
       </aside>
 
-      <main class="chat-shell" aria-labelledby="app-title">
+      <main id="legacy-workbench" class="chat-shell" aria-labelledby="app-title">
         <header class="chat-header">
           <div class="header-title">
             <h1 id="app-title">对话工作台</h1>
@@ -60,11 +60,96 @@
           <button id="chat-submit" type="submit">发送</button>
         </form>
       </main>
+
+      <main id="agent-workbench" class="agent-workbench" aria-labelledby="agent-title" hidden>
+        <header class="agent-header">
+          <div>
+            <p class="eyebrow">Chat2Dify Builder Agent</p>
+            <h1 id="agent-title">Agent Workbench</h1>
+          </div>
+          <div class="agent-header-meta">
+            <span id="agent-selection" class="selection-summary">未选择画布元素</span>
+            <span id="agent-context-status" class="status-pill status-muted">等待上下文</span>
+            <span id="agent-phase" class="status-pill status-muted">idle</span>
+          </div>
+        </header>
+
+        <p id="agent-notice" class="agent-notice" role="status" data-tone="neutral"></p>
+
+        <div class="agent-grid">
+          <section class="agent-column agent-trace-column" aria-labelledby="timeline-title">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Live trace</p>
+                <h2 id="timeline-title">执行时间线</h2>
+              </div>
+              <div class="run-actions">
+                <button id="agent-pause" type="button" class="secondary" hidden>暂停</button>
+                <button id="agent-resume" type="button" class="secondary" hidden>继续</button>
+                <button id="agent-undo" type="button" class="secondary" hidden>撤销</button>
+                <button id="agent-cancel" type="button" class="danger-button" hidden>取消</button>
+              </div>
+            </div>
+            <ol id="agent-timeline" class="agent-timeline" aria-live="polite"></ol>
+          </section>
+
+          <aside class="agent-review-column">
+            <section class="workbench-card" aria-labelledby="goal-plan-title">
+              <div class="section-heading">
+                <div>
+                  <p class="eyebrow">Goal Plan</p>
+                  <h2 id="goal-plan-title">目标计划</h2>
+                </div>
+              </div>
+              <ol id="agent-goal-plan" class="goal-plan"></ol>
+            </section>
+
+            <section class="workbench-card" aria-labelledby="diff-title">
+              <div class="section-heading">
+                <div>
+                  <p class="eyebrow">Review</p>
+                  <h2 id="diff-title">业务 Diff</h2>
+                </div>
+              </div>
+              <p id="agent-validation" class="review-summary">等待确定性校验</p>
+              <p id="agent-risk" class="review-summary">风险：尚未评估</p>
+              <ul id="agent-diff" class="diff-list"></ul>
+            </section>
+
+            <section class="workbench-card" aria-labelledby="approval-title">
+              <div class="section-heading">
+                <div>
+                  <p class="eyebrow">Approval</p>
+                  <h2 id="approval-title">审批与提交</h2>
+                </div>
+              </div>
+              <div id="agent-approvals" class="approval-list"></div>
+            </section>
+
+            <details class="workbench-card technical-card">
+              <summary>技术详情（Tool / Patch / Event）</summary>
+              <pre id="agent-technical">[]</pre>
+            </details>
+          </aside>
+        </div>
+
+        <form id="agent-form" class="agent-composer">
+          <textarea
+            id="agent-input"
+            rows="3"
+            autocomplete="off"
+            placeholder="描述修改目标"
+            required
+          ></textarea>
+          <button id="agent-submit" type="submit">交给 Agent</button>
+        </form>
+      </main>
     </div>
 
     <script>
-      window.CHAT2DIFY_CONFIG = {"basePath":"","version":"3.0.0"};
+      window.CHAT2DIFY_CONFIG = {"basePath":"","version":"3.0.0","agentV4Enabled":false};
     </script>
     <script src="static/app.js?v=chat-v3.0.0" defer></script>
+    <script type="module" src="static/agent-workbench.js?v=chat-v4.0.0"></script>
   </body>
 </html>

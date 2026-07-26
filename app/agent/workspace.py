@@ -14,6 +14,7 @@ from app.agent.state import (
     AgentRun,
     AgentWorkflowSnapshot,
     GoalPlan,
+    RunPhase,
     StrictModel,
     WorkspaceVersion,
     utc_now,
@@ -44,6 +45,21 @@ class PatchApplyResult(StrictModel):
     temp_ref_map: dict[str, str] = Field(default_factory=dict)
     validation: AgentValidationReport
     normalization_changes: list[str] = Field(default_factory=list)
+
+
+class WorkspaceUndoResult(StrictModel):
+    run_id: str
+    from_version_id: str
+    workspace_version_id: str
+
+
+class CompensatingPreviewResult(StrictModel):
+    run_id: str
+    source_run_id: str
+    source_version_id: str
+    workspace_version_id: str
+    parent_version_id: str
+    validation: AgentValidationReport
 
 
 class VersionedWorkflowWorkspace:
@@ -105,6 +121,24 @@ class VersionedWorkflowWorkspace:
         patch: PatchDocument,
     ) -> PatchApplyResult:
         run = self.store.get_run(run_id)
+        creation_commit = run.commit_result or {}
+        if (
+            creation_commit.get("kind") == "create"
+            and creation_commit.get("status")
+            in {
+                "import_started",
+                "import_succeeded_recovery_pending",
+                "import_outcome_unknown",
+                "created",
+            }
+        ):
+            raise WorkspaceOperationError(
+                "WORKSPACE_CREATE_COMMIT_PENDING",
+                (
+                    "Workspace cannot change after a creation import may have "
+                    "started; recover or reconcile that result first."
+                ),
+            )
         head = self.store.get_workspace_head(run_id)
         if patch.workspace_version != head.id:
             raise WorkspaceOperationError(
@@ -117,10 +151,25 @@ class VersionedWorkflowWorkspace:
                     }
                 ],
             )
-        if not run.base_hash or patch.expected_base_hash != run.base_hash:
+        if run.snapshot is None:
+            raise WorkspaceOperationError(
+                "AGENT_SNAPSHOT_MISSING",
+                "Workspace Patch requires a persisted Run Snapshot.",
+            )
+        if run.snapshot.operation == "modify" and run.base_hash is None:
+            raise WorkspaceOperationError(
+                "WORKSPACE_BASE_HASH_MISSING",
+                "Modify-mode Workspace requires a pinned Dify base Hash.",
+            )
+        if run.snapshot.operation == "create" and run.base_hash is not None:
+            raise WorkspaceOperationError(
+                "WORKSPACE_CREATE_BASE_HASH_INVALID",
+                "Create-mode Workspace cannot acquire a base Hash before import.",
+            )
+        if patch.expected_base_hash != run.base_hash:
             raise WorkspaceOperationError(
                 "WORKSPACE_BASE_HASH_MISMATCH",
-                "Patch expected_base_hash does not match the pinned Dify base Hash.",
+                "Patch expected_base_hash does not match the Run base Hash boundary.",
                 details=[
                     {
                         "expected": run.base_hash,
@@ -223,6 +272,157 @@ class VersionedWorkflowWorkspace:
             validation=report.model_dump(mode="json"),
         )
         return report
+
+    def undo_head(
+        self,
+        run_id: str,
+        *,
+        expected_head_id: str,
+    ) -> WorkspaceUndoResult:
+        run = self.store.get_run(run_id)
+        if run.commit_result is not None:
+            raise WorkspaceOperationError(
+                "WORKSPACE_UNDO_REQUIRES_COMPENSATION",
+                "A committed Run must use a reviewed compensating Undo.",
+            )
+        if run.phase not in {
+            RunPhase.WAITING_USER,
+            RunPhase.WAITING_APPROVAL,
+            RunPhase.PAUSED,
+            RunPhase.INTERRUPTED,
+        }:
+            raise WorkspaceOperationError(
+                "WORKSPACE_UNDO_RUN_STATE_INVALID",
+                "Pause the Agent Run before moving its Workspace head.",
+            )
+        if run.head_version_id != expected_head_id:
+            raise WorkspaceOperationError(
+                "WORKSPACE_VERSION_MISMATCH",
+                "Undo must target the current visible Workspace version.",
+            )
+        current = self.store.get_workspace_version(expected_head_id)
+        if current.run_id != run.id or current.parent_id is None:
+            raise WorkspaceOperationError(
+                "WORKSPACE_UNDO_ROOT",
+                "The current Workspace version has no parent to restore.",
+            )
+        if run.phase != RunPhase.INTERRUPTED:
+            updated = run.transition_to(RunPhase.INTERRUPTED)
+        else:
+            updated = run
+        updated = AgentRun.model_validate(
+            {
+                **updated.model_dump(),
+                "head_version_id": current.parent_id,
+                "review": None,
+                "error": None,
+                "updated_at": utc_now(),
+            }
+        )
+        try:
+            self.store.move_workspace_head(
+                updated,
+                expected_head_id=expected_head_id,
+                target_head_id=current.parent_id,
+                event_message="Workspace Undo restored the parent version without writing to Dify.",
+                event_data={"kind": "pre_commit"},
+            )
+        except AgentStoreConflict as exc:
+            raise WorkspaceOperationError(
+                "WORKSPACE_VERSION_CONFLICT",
+                str(exc),
+                retryable=True,
+            ) from exc
+        return WorkspaceUndoResult(
+            run_id=run.id,
+            from_version_id=expected_head_id,
+            workspace_version_id=current.parent_id,
+        )
+
+    def create_compensating_preview(
+        self,
+        run_id: str,
+        *,
+        source_version: WorkspaceVersion,
+    ) -> CompensatingPreviewResult:
+        run = self.store.get_run(run_id)
+        if run.snapshot is None or run.snapshot.operation != "modify":
+            raise WorkspaceOperationError(
+                "WORKSPACE_COMPENSATION_SNAPSHOT_INVALID",
+                "Compensating Undo requires a fresh existing-app Snapshot.",
+            )
+        head = self.store.get_workspace_head(run_id)
+        current_plan = WorkflowPlan.model_validate(head.snapshot)
+        committed_plan = WorkflowPlan.model_validate(source_version.snapshot)
+        if (
+            current_plan.model_dump(mode="json")
+            != committed_plan.model_dump(mode="json")
+        ):
+            raise WorkspaceOperationError(
+                "WORKSPACE_COMPENSATION_BASE_CHANGED",
+                "The current Dify draft no longer matches the committed Workspace version.",
+            )
+        target_plan = self.reverse_plan(source_version)
+        if (
+            target_plan.model_dump(mode="json")
+            == current_plan.model_dump(mode="json")
+        ):
+            raise WorkspaceOperationError(
+                "WORKSPACE_UNDO_NO_CHANGES",
+                "The committed Workspace version has no change to compensate.",
+            )
+        report = self.validation.validate(target_plan)
+        if not report.ok:
+            raise WorkspaceOperationError(
+                "WORKSPACE_COMPENSATION_INVALID",
+                "The compensating Plan failed deterministic validation.",
+                details=[
+                    issue.model_dump(mode="json")
+                    for issue in report.issues
+                ],
+            )
+        version = WorkspaceVersion(
+            run_id=run.id,
+            parent_id=head.id,
+            base_hash=run.base_hash,
+            patch={
+                "type": "workspace.compensating.restore",
+                "source_run_id": source_version.run_id,
+                "source_version_id": source_version.id,
+            },
+            reverse_patch={
+                "type": "workspace.snapshot.restore",
+                "from_version": head.id,
+                "snapshot": current_plan.model_dump(mode="json"),
+            },
+            snapshot=target_plan.model_dump(mode="json"),
+            validation=report.model_dump(mode="json"),
+        )
+        try:
+            self.store.commit_workspace_version(
+                version,
+                expected_head_id=head.id,
+                event_message="Created a reviewed compensating Workspace preview.",
+                event_data={
+                    "kind": "post_commit_compensation",
+                    "source_run_id": source_version.run_id,
+                    "source_version_id": source_version.id,
+                },
+            )
+        except AgentStoreConflict as exc:
+            raise WorkspaceOperationError(
+                "WORKSPACE_VERSION_CONFLICT",
+                str(exc),
+                retryable=True,
+            ) from exc
+        return CompensatingPreviewResult(
+            run_id=run.id,
+            source_run_id=source_version.run_id,
+            source_version_id=source_version.id,
+            workspace_version_id=version.id,
+            parent_version_id=head.id,
+            validation=report,
+        )
 
     def precommit_plan(
         self,

@@ -5,7 +5,7 @@
 > - Architecture:
 >   [v4 Agent architecture and implementation plan](architecture/v4-agent-architecture-and-implementation-plan.md)
 > - Agent instructions: [`AGENTS.md`](../AGENTS.md)
-> - Last updated: 2026-07-25
+> - Last updated: 2026-07-26
 
 ## 1. How to use this file
 
@@ -37,8 +37,8 @@ Rules:
 | --- | --- | --- | --- |
 | Phase 0 | Architecture foundation | None | `completed` |
 | Phase 1A | Existing-app modify vertical slice | Phase 0 | `completed` |
-| Phase 1B | New-app create adapter | Phase 1A | `pending` |
-| Phase 2 | Canvas context and Agent Workbench | Phase 1 | `pending` |
+| Phase 1B | New-app create adapter | Phase 1A | `completed` |
+| Phase 2 | Canvas context and Agent Workbench | Phase 1 | `completed` |
 | Phase 3 | Draft Test, Inspect, and Repair | Phase 2 | `pending` |
 | Phase 4 | Config apps, Skills, evals, and hardening | Phase 3 | `pending` |
 | Release gate | v4.0.0 release readiness | Phases 0–3; selected Phase 4 gates | `pending` |
@@ -200,6 +200,21 @@ exist behind a disabled-by-default feature flag without changing v3 behavior.
   - `git diff --check`: passed.
   - Both pytest runs reported one upstream Starlette deprecation warning for
     `fastapi.testclient`; no test failures or unhandled warnings occurred.
+  - 2026-07-26 supplemental verification against the local Dify environment:
+    - Dify core containers were running; the public read-only version API and
+      source checkout both reported Dify `1.14.2`, with DSL `0.6.0`.
+    - With v4 disabled, Chat2Dify `/health` returned `200`, identified the real
+      Dify source/version, the v3 panel manifest returned `200`, and the v4
+      route returned the stable `AGENT_V4_DISABLED` response.
+    - With v4 enabled, startup created the five `agent_*` tables alongside
+      `workflow_tasks` in WAL mode; Run polling returned `200`.
+    - SSE reconnect from `Last-Event-ID: 1` returned only event sequence `2`
+      and redacted a persisted Authorization test value.
+    - Current Phase 0 targeted regression: `50 passed`; current full repository
+      suite: `407 passed, 2 skipped`. The skips are opt-in Phase 1A live tests,
+      not Phase 0 acceptance tests.
+    - The smoke test was read-only with respect to Dify: it did not authenticate,
+      read an application draft, run a workflow, or call any Dify write API.
 - Decisions/deviations:
   - The v4 store reuses `CHAT2DIFY_TASK_DB` but creates only separately named
     `agent_*` tables. Startup initializes those tables only when the v4 feature
@@ -209,12 +224,14 @@ exist behind a disabled-by-default feature flag without changing v3 behavior.
     `AGENT_V4_DISABLED` response while the flag is off. Its current surface is
     intentionally read-only Session/Run polling plus resumable SSE; no Runtime,
     Patch execution, approval resolution, or Dify write path was started.
-  - Full-suite verification used a temporary minimal Dify DSL-version fixture
-    because the local checkout has no adjacent Dify source tree. This changed
-    no repository files and does not alter production behavior.
+  - The initial 2026-07-25 full-suite verification used a temporary minimal
+    Dify DSL-version fixture because no adjacent Dify source tree was available
+    then. The 2026-07-26 supplemental smoke closed that deployment-evidence gap
+    against the real local Dify source and running services.
 - Remaining limitations:
-  - Workspace mutation, Runtime execution, review/approval behavior, and Dify
-    Commit remain Phase 1 scope by design.
+  - At the Phase 0 boundary, Workspace mutation, Runtime execution,
+    review/approval behavior, and Dify Commit were intentionally deferred to
+    Phase 1 and were not exercised by this supplemental acceptance.
 
 ## 5. Phase 1A — Existing-app modify vertical slice
 
@@ -346,6 +363,24 @@ unchanged before approval.
     `fastapi.testclient` deprecation warning. The full run also reported one
     pytest assertion-rewrite warning because the local verification command
     injected the temporary Dify-version fixture in-process; no tests failed.
+  - 2026-07-26 live Dify supplemental acceptance:
+    - Dify source and running image: `1.14.2`; app DSL: `0.6.0`.
+    - Opt-in localhost Workflow and Chatflow cases:
+      `2 passed in 10.62s`.
+    - Each case imported a uniquely named temporary baseline app, captured the
+      real app detail/draft Graph/base Hash, and completed the deterministic
+      Observe → Patch → Validate → Review → Approval → Commit path.
+    - Before approval, a second real draft read returned the exact original
+      Hash and Graph. After approval, Commit returned a new Hash, the Graph
+      changed from three to six nodes, and no `temp_ref` leaked into Dify.
+    - A duplicate Commit preserved the same Hash and Graph. A separately
+      approved change then encountered an externally advanced Dify Hash,
+      returned `conflicted`, and left the external Graph unchanged.
+    - Both temporary applications were deleted in test cleanup and independently
+      verified absent: total app count `0`, matching temporary app count `0`.
+    - Current deterministic Phase 1A regression:
+      `12 passed, 2 live skipped`; current full repository suite:
+      `416 passed, 2 live skipped`.
 - Decisions/deviations:
   - The authoritative existing-app Snapshot is a private Run checkpoint that
     stores the base Graph, features, environment/conversation variables, app
@@ -368,12 +403,15 @@ unchanged before approval.
     `destructive_change` Approval before Commit Approval. Any Workspace Head
     change expires both pending and already-approved records for the old
     version.
-  - Full-suite verification used a temporary minimal Dify DSL-version fixture
-    because the checkout has no adjacent Dify source tree. The fixture changed
-    no repository files or production behavior.
+  - The initial full-suite verification used a temporary minimal Dify
+    DSL-version fixture because no adjacent Dify source tree was available at
+    that time. The opt-in supplemental test now restricts mutation to
+    localhost, requires explicit credentials and enablement, creates isolated
+    disposable apps, never publishes, and verifies cleanup after each case.
 - Remaining limitations:
-  - Phase 1A supports modification of existing Workflow/Chatflow apps only.
-    New-app scaffolds/imports remain Phase 1B and were not started.
+  - Phase 1A itself supports modification of existing Workflow/Chatflow apps
+    only. New-app scaffolds/imports were subsequently delivered in Phase 1B
+    through a separate adapter.
   - The pinned capability Snapshot intentionally uses the Phase 0 MVP node
     catalog (`llm`, `if-else`, `end`, `answer`); broader live resource
     capabilities remain later scoped work.
@@ -382,7 +420,7 @@ unchanged before approval.
 
 ## 6. Phase 1B — New-app create adapter
 
-Status: `pending`
+Status: `completed`
 
 Dependencies: Phase 1A `completed`
 
@@ -391,32 +429,32 @@ deterministic minimal scaffold and import it only after approval.
 
 ### Tasks
 
-- [ ] **P1B-01 — Create Session initialization**
+- [x] **P1B-01 — Create Session initialization**
   - Allow Session creation without `app_id`.
   - Require explicit `app_mode`.
   - Initialize Workflow as `start → end`.
   - Initialize Chatflow as `start → answer`.
   - Generate scaffold IDs server-side.
 
-- [ ] **P1B-02 — Creation context and policy**
+- [x] **P1B-02 — Creation context and policy**
   - Use the same Goal Plan, tools, Patch Engine, validation, and review.
   - Represent the absence of a base Hash explicitly.
   - Prevent modification-only operations from running in create mode.
 
-- [ ] **P1B-03 — Creation Commit Adapter**
+- [x] **P1B-03 — Creation Commit Adapter**
   - Bind approval to the exact Workspace version.
   - Compile and validate DSL using the existing creation path.
   - Import only after approval.
   - Fetch and persist resulting `app_id`, URL, app mode, and draft Hash.
   - Add an idempotency key so retries cannot import duplicate successful apps.
 
-- [ ] **P1B-04 — Creation failure recovery**
+- [x] **P1B-04 — Creation failure recovery**
   - Keep Workspace and Trace after a failed import.
   - Allow correction and a new approval.
   - Distinguish “import failed” from “import succeeded but response recovery
     failed.”
 
-- [ ] **P1B-05 — Creation tests**
+- [x] **P1B-05 — Creation tests**
   - Cover Workflow and Chatflow creation.
   - Cover invalid scaffold mutation, approval/version mismatch, failed import,
     retry, duplicate request, and successful result recovery.
@@ -428,27 +466,78 @@ deterministic minimal scaffold and import it only after approval.
 
 ### Acceptance criteria
 
-- [ ] New-app mode uses a valid deterministic scaffold.
-- [ ] Runtime and tool behavior are shared with Phase 1A.
-- [ ] Review is available before any Dify app exists.
-- [ ] No app is imported before valid approval.
-- [ ] Successful import is not duplicated by request retry.
-- [ ] Returned app ID and draft Hash are persisted.
-- [ ] Workflow and Chatflow create tests pass.
-- [ ] Full existing suite passes.
-- [ ] `git diff --check` passes.
+- [x] New-app mode uses a valid deterministic scaffold.
+- [x] Runtime and tool behavior are shared with Phase 1A.
+- [x] Review is available before any Dify app exists.
+- [x] No app is imported before valid approval.
+- [x] Successful import is not duplicated by request retry.
+- [x] Returned app ID and draft Hash are persisted.
+- [x] Workflow and Chatflow create tests pass.
+- [x] Full existing suite passes.
+- [x] `git diff --check` passes.
 
 ### Completion record
 
-- Started:
-- Completed:
+- Started: 2026-07-25
+- Completed: 2026-07-25
 - Tests:
+  - Dedicated Phase 1B create-adapter tests: `9 passed`.
+  - Phase 1B plus directly affected Phase 1A, Agent domain/store/API,
+    Dify client, compiler, preflight, graph, diff, guard, and v3 main tests:
+    `253 passed`.
+  - Full repository suite: `407 passed`.
+  - `python3 -m compileall -q app tests`: passed.
+  - `git diff --check`: passed.
+  - Supplemental localhost Dify acceptance on 2026-07-26:
+    - Dify `1.14.2` / app DSL `0.6.0` accepted both deterministic
+      scaffolds; Workflow compiled as `start → end` and Chatflow as
+      `start → answer`, with validation, graph compilation, and DSL
+      round-trip all passing.
+    - The full create Runtime was exercised against the real Console API for
+      both `workflow` and `advanced-chat`: review completed while the exact
+      test app name was absent, approval imported exactly one app, the
+      returned app ID/mode/draft Hash matched Dify, and the imported graphs
+      contained `start`, `if-else`, `llm`, and the correct terminal node.
+    - Repeating each approved Commit returned its persisted result and left
+      exactly one matching Dify app. Both uniquely named temporary apps were
+      then deleted by their verified app IDs, and absence was confirmed.
+    - Post-acceptance Phase 1B plus Dify-client regression:
+      `46 passed`; current full repository suite:
+      `416 passed, 2 opt-in live tests skipped`.
+    - `python3 -m compileall -q app tests` and `git diff --check`: passed.
+  - Pytest reported one upstream Starlette deprecation warning for
+    `fastapi.testclient`; no test failures or unhandled warnings occurred.
 - Decisions/deviations:
+  - Agent Sessions now persist an explicit `modify` or `create` operation.
+    A create Session accepts no `app_id`, requires Workflow/Chatflow mode, and
+    permits one durable creation Run until import resolves. After successful
+    import, the same Session is atomically bound to the returned `app_id` and
+    promoted to modify mode so later goals reuse the Phase 1A path.
+  - Create Snapshots carry an explicit null base Hash and use stable,
+    server-generated UUID5 scaffold node IDs derived from the Session. The
+    shared Patch schema still requires the `expected_base_hash` field; create
+    Patches send null while modify Patches must match the pinned Dify Hash.
+  - Creation Commit persists an idempotency checkpoint before calling Dify,
+    forwards the key on the import request, and records a successful import
+    before reading its draft Hash. Duplicate completed requests return the
+    persisted result; known successful imports retry only result recovery and
+    never import again.
+  - A definitive Dify import failure expires the used Approval and leaves the
+    Run interrupted with its Workspace and Trace intact for correction,
+    resume, and a new version-bound Approval. An ambiguous import response
+    fails closed and blocks automatic re-import because Dify may already have
+    created the app.
 - Remaining limitations:
+  - An ambiguous import outcome without a returned import/app ID requires
+    manual Dify reconciliation and, if needed, a new create Session; the
+    current Run intentionally cannot auto-retry the import.
+  - At the Phase 1B completion boundary, Canvas context, Workbench UI, Undo,
+    and richer resume UX were intentionally deferred; they are now delivered
+    by Phase 2.
 
 ## 7. Phase 2 — Canvas context and Agent Workbench
 
-Status: `pending`
+Status: `completed`
 
 Dependencies: Phase 1A and Phase 1B `completed`
 
@@ -457,49 +546,49 @@ review, approve, undo, and resume Agent work through a durable UI.
 
 ### Tasks
 
-- [ ] **P2-01 — Host/iframe context protocol**
+- [x] **P2-01 — Host/iframe context protocol**
   - Define versioned `chat2dify.ready`, `dify.context.init`,
     `dify.selection.changed`, `dify.draft.changed`, and context-refresh
     messages.
   - Include selected node/edge IDs, viewport, panel, dirty state, canvas Hash,
     and nonce.
 
-- [ ] **P2-02 — Context-channel security**
+- [x] **P2-02 — Context-channel security**
   - Validate origin and per-panel nonce.
   - Reject malformed or stale context messages.
   - Never use browser-supplied raw Graph as an authoritative Snapshot.
   - Block Commit on dirty canvas or mismatched canvas Hash.
 
-- [ ] **P2-03 — Selected graph context**
+- [x] **P2-03 — Selected graph context**
   - Add selected nodes, edges, and bounded neighborhood to Context Builder.
   - Update context on live selection changes.
   - Make “这个节点/这两个节点之间” resolvable without copying full Graph to
     every model turn.
 
-- [ ] **P2-04 — SSE client and fallback**
+- [x] **P2-04 — SSE client and fallback**
   - Subscribe with reconnect and last-event cursor.
   - Deduplicate by Run/sequence.
   - Show terminal state consistently.
   - Preserve polling fallback.
 
-- [ ] **P2-05 — Agent Timeline and Goal Plan UI**
+- [x] **P2-05 — Agent Timeline and Goal Plan UI**
   - Render business-readable phases and tool outcomes.
   - Render Goal Plan step state and evidence.
   - Keep raw Tool/Patch data in a technical detail view.
 
-- [ ] **P2-06 — Diff and approval UI**
+- [x] **P2-06 — Diff and approval UI**
   - Render added/updated/removed nodes and edges.
   - Render validation, test status, and risk.
   - Bind approval actions to the exact visible Workspace version.
   - Distinguish normal, destructive, Draft Run, and Commit approval.
 
-- [ ] **P2-07 — Undo, pause, and resume**
+- [x] **P2-07 — Undo, pause, and resume**
   - Move Workspace head to a parent version before Dify commit.
   - Generate a compensating Preview for post-commit undo.
   - Resume `waiting_user`, interrupted, and explicitly paused Runs.
   - Never automatically replay side effects.
 
-- [ ] **P2-08 — Workbench tests**
+- [x] **P2-08 — Workbench tests**
   - Add frontend tests for URL/context handshake, origin/nonce rejection,
     selection updates, SSE reconnect/dedup, Timeline, Diff, approval version,
     dirty-state blocking, Undo, and Resume.
@@ -511,23 +600,69 @@ review, approve, undo, and resume Agent work through a durable UI.
 
 ### Acceptance criteria
 
-- [ ] Agent resolves the selected node without requiring its ID in user text.
-- [ ] Invalid origin or nonce cannot change context.
-- [ ] Dirty or changed canvas blocks stale Commit.
-- [ ] Timeline survives refresh and reconnect without duplicate events.
-- [ ] Visible approval is tied to the visible Workspace version.
-- [ ] Pre-commit Undo changes only Workspace state.
-- [ ] Post-commit Undo produces a new reviewed compensating change.
-- [ ] Targeted frontend/backend tests and full existing suite pass.
-- [ ] `git diff --check` passes.
+- [x] Agent resolves the selected node without requiring its ID in user text.
+- [x] Invalid origin or nonce cannot change context.
+- [x] Dirty or changed canvas blocks stale Commit.
+- [x] Timeline survives refresh and reconnect without duplicate events.
+- [x] Visible approval is tied to the visible Workspace version.
+- [x] Pre-commit Undo changes only Workspace state.
+- [x] Post-commit Undo produces a new reviewed compensating change.
+- [x] Targeted frontend/backend tests and full existing suite pass.
+- [x] `git diff --check` passes.
 
 ### Completion record
 
-- Started:
-- Completed:
+- Started: 2026-07-25
+- Completed: 2026-07-25
 - Tests:
+  - Dedicated Phase 2 backend acceptance tests: `11 passed`.
+  - Phase 2 plus directly affected Agent state/store/API, Phase 1A/1B, and
+    v3 main tests: `119 passed`.
+  - Standalone Workbench protocol/SSE/UI-domain tests under Node's test
+    runner: `7 passed`.
+  - Full repository suite: `418 passed, 2 skipped`. The skips are the
+    opt-in, localhost-only Dify live acceptance tests.
+  - JavaScript syntax checks for the Workbench controller, its reusable core,
+    and the legacy controller: passed.
+  - `python3 -m compileall -q app tests`: passed.
+  - `git diff --check`: passed.
+  - Pytest reported one upstream Starlette deprecation warning for
+    `fastapi.testclient`; no test failures or unhandled warnings occurred.
 - Decisions/deviations:
+  - The Dify adapter owns selection, viewport, panel, dirty state, and its
+    currently visible draft Hash. It sends only bounded identifiers and
+    state through a versioned, nonce-bound protocol. The Sidecar continues to
+    load the authoritative persisted Graph from Dify and rejects browser
+    context that contains a raw Graph.
+  - The Context Builder resolves selected nodes and edges against the
+    authoritative Snapshot, includes full redacted parameters only for the
+    selection, and limits surrounding context to one-hop neighbors.
+  - The Workbench replays persisted SSE history on load, reconnects from the
+    last sequence, deduplicates by Run and sequence, and falls back to Run
+    polling. Business Timeline and Goal Plan views are separate from
+    collapsible technical event/Patch data.
+  - Canvas context updates are revision-checked atomic store writes so they
+    cannot overwrite concurrent Run state. Modification Commit fails closed
+    when the canvas is dirty, lacks a verifiable Hash after handshake, or its
+    Hash differs from the Run's pinned base Hash.
+  - Pause is a durable Run state. Resume is explicit for `waiting_user`,
+    `interrupted`, and paused Runs, and resumes the decision loop without
+    replaying a completed side-effecting tool or Dify write. Workspace
+    initialization also verifies the current phase atomically so a concurrent
+    Snapshot capture cannot overwrite an explicit pause.
+  - Before Commit, Undo atomically moves the Workspace head to its direct
+    parent and invalidates approvals without creating another version. After
+    Commit, Undo re-reads the Dify draft, verifies the committed Hash, and
+    creates a separate modification Run containing a deterministically
+    validated, reviewed compensating version that requires a new Approval.
 - Remaining limitations:
+  - The repository-level Workbench core and backend acceptance suites are
+    self-contained and passed. A host-component Vitest fixture was also added
+    to the vendored Dify adapter, but the adjacent Dify checkout has no
+    installed web `node_modules`, so that optional host-repository fixture was
+    not executed here.
+  - Draft Run approval, execution inspection, repair, and all related
+    side-effect budgets remain Phase 3 and were not started.
 
 ## 8. Phase 3 — Draft Test, Inspect, and Repair
 
@@ -798,6 +933,10 @@ the plan.
 | 2026-07-25 | Planning | Implement existing-app modification before new-app creation | Validates Hash, diff, guard, approval, and conflict boundaries first | Architecture document |
 | 2026-07-25 | Phase 0 | Gate the registered v4 router and initialize its store only when `CHAT2DIFY_AGENT_V4_ENABLED` is true | Keeps v3 as the effective default path while making flag-on startup deterministic | `app/main.py`, `app/api/agent_v4.py` |
 | 2026-07-25 | Phase 0 | Keep the Phase 0 API read-only and limit it to persisted Session/Run reads plus resumable SSE | Establishes API and event primitives without starting Phase 1 Runtime or mutation behavior | `app/api/agent_v4.py` |
+| 2026-07-26 | Phase 0 supplemental | Keep formal Phase 0 tests deterministic and use the running Dify instance only for read-only deployment smoke | Phase 0 has no Dify mutation boundary; real-environment startup, version recognition, flag gating, persistence, and SSE can still be verified without credentials or draft writes | `docs/tasks.md` |
 | 2026-07-25 | Phase 1A | Persist the authoritative base Graph in a private Run Snapshot and expose only bounded Plan summaries/tools to the model and public Run API | Commit needs exact Graph metadata, while credentials and environment values must not cross the model/public boundary | `app/agent/snapshot.py`, `app/agent/context.py`, `app/api/agent_v4.py` |
 | 2026-07-25 | Phase 1A | Use transactional full-Plan Workspace versions with an internal snapshot-restore reverse Patch while keeping the model-visible Patch union limited to the four Phase 1A operations | Guarantees exact reversal and atomic Head movement without prematurely exposing `node.remove` or arbitrary JSON Patch | `app/agent/workspace.py`, `app/agent/store.py` |
 | 2026-07-25 | Phase 1A | Keep Commit outside the Tool Registry and require version/base-Hash-bound persisted approval, plus a separate destructive approval when Guard reports high risk | Prevents prompt injection, stale approval, and Hash races from authorizing a Dify write | `app/agent/approval.py`, `app/agent/commit.py`, `app/agent/policy.py` |
+| 2026-07-26 | Phase 1A supplemental | Keep the default suite deterministic and add an explicitly enabled localhost-only real Dify acceptance that creates and deletes isolated Workflow/Chatflow fixtures | Real Dify 1.14.2 evidence closes the protocol gap for draft Hash, metadata-preserving writeback, duplicate Commit, and conflict behavior without introducing a default external dependency or publishing an app | `tests/test_agent_phase1a_live.py`, `pyproject.toml`, `docs/tasks.md` |
+| 2026-07-25 | Phase 1B | Represent new-app work as an explicit create Session and null-Hash Snapshot with a stable server-generated scaffold, then promote the Session to modify mode after import | Reuses the Phase 1A Runtime, Workspace, tools, validation, review, and approval chain without pretending a Dify app or base Hash exists before approval | `app/agent/state.py`, `app/agent/snapshot.py`, `app/agent/service.py`, `app/agent/workspace.py` |
+| 2026-07-25 | Phase 1B | Persist an import checkpoint before the Dify call and a successful-import receipt before draft recovery; fail closed on ambiguous outcomes | Makes duplicate Commit retries idempotent and separates a definitive import failure from recovery of an app that Dify already created | `app/agent/commit.py`, `app/agent/store.py`, `app/dify/client.py` |

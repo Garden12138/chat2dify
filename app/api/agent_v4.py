@@ -20,6 +20,7 @@ from app.agent.state import (
     AgentBudgetUsage,
     AgentRun,
     AgentSession,
+    CanvasViewport,
     GoalPlan,
     RunConstraints,
     RunPhase,
@@ -28,6 +29,7 @@ from app.agent.state import (
 )
 from app.agent.store import AgentRecordNotFound, AgentStore
 from app.agent.trace import AgentEvent, public_event_payload
+from app.agent.undo import UndoServiceError
 
 
 router = APIRouter(prefix="/api/v4/agent", tags=["agent-v4"])
@@ -64,8 +66,10 @@ class AgentEventResponse(AgentEvent):
 
 
 class CreateAgentSessionRequest(StrictModel):
-    app_id: str = Field(min_length=1, max_length=256)
+    app_id: str | None = Field(default=None, min_length=1, max_length=256)
     app_mode: Literal["workflow", "advanced-chat"]
+    app_name: str | None = Field(default=None, min_length=1, max_length=512)
+    app_description: str = Field(default="", max_length=8_000)
 
 
 class SubmitAgentGoalRequest(StrictModel):
@@ -76,6 +80,17 @@ class SubmitAgentGoalRequest(StrictModel):
 
 class ResumeAgentRunRequest(StrictModel):
     message: str | None = Field(default=None, max_length=8_000)
+
+
+class CanvasContextUpdateRequest(StrictModel):
+    protocol_version: Literal["1.0"] = "1.0"
+    revision: int = Field(ge=1)
+    selected_node_ids: list[str] = Field(default_factory=list, max_length=100)
+    selected_edge_ids: list[str] = Field(default_factory=list, max_length=100)
+    viewport: CanvasViewport | None = None
+    current_panel: str | None = Field(default=None, max_length=128)
+    dirty_state: bool = False
+    canvas_draft_hash: str | None = Field(default=None, max_length=512)
 
 
 class ResolveApprovalRequest(StrictModel):
@@ -90,6 +105,18 @@ class ResolveApprovalResponse(StrictModel):
 class CommitAgentRunRequest(StrictModel):
     workspace_version_id: str = Field(min_length=1, max_length=128)
     approval_id: str = Field(min_length=1, max_length=128)
+
+
+class UndoAgentRunRequest(StrictModel):
+    workspace_version_id: str = Field(min_length=1, max_length=128)
+
+
+class UndoAgentRunResponse(StrictModel):
+    kind: Literal["pre_commit", "post_commit"]
+    source_run_id: str
+    run: AgentRunResponse
+    from_version_id: str
+    workspace_version_id: str
 
 
 def require_agent_store(request: Request) -> AgentStore:
@@ -136,6 +163,8 @@ def create_session(
         return service.create_session(
             app_id=payload.app_id,
             app_mode=payload.app_mode,
+            app_name=payload.app_name,
+            app_description=payload.app_description,
         )
     except ValueError as exc:
         raise _api_error(422, "AGENT_SESSION_INVALID", str(exc)) from exc
@@ -221,6 +250,19 @@ def cancel_run(
         raise _api_error(409, "AGENT_RUN_CANCEL_INVALID", str(exc)) from exc
 
 
+@router.post("/runs/{run_id}/pause", response_model=AgentRunResponse)
+def pause_run(
+    run_id: str,
+    service: AgentApplicationService = Depends(require_agent_service),
+) -> AgentRun:
+    try:
+        return service.pause(run_id)
+    except AgentRecordNotFound as exc:
+        raise _not_found("AGENT_RUN_NOT_FOUND", "Agent Run", run_id) from exc
+    except ValueError as exc:
+        raise _api_error(409, "AGENT_RUN_PAUSE_INVALID", str(exc)) from exc
+
+
 @router.post("/runs/{run_id}/resume", response_model=AgentRunResponse, status_code=202)
 def resume_run(
     run_id: str,
@@ -233,6 +275,44 @@ def resume_run(
         raise _not_found("AGENT_RUN_NOT_FOUND", "Agent Run", run_id) from exc
     except ValueError as exc:
         raise _api_error(409, "AGENT_RUN_RESUME_INVALID", str(exc)) from exc
+
+
+@router.post("/runs/{run_id}/context", response_model=AgentRunResponse)
+def update_run_canvas_context(
+    run_id: str,
+    payload: CanvasContextUpdateRequest,
+    service: AgentApplicationService = Depends(require_agent_service),
+) -> AgentRun:
+    try:
+        return service.update_canvas_context(
+            run_id,
+            selected_node_ids=payload.selected_node_ids,
+            selected_edge_ids=payload.selected_edge_ids,
+            viewport=payload.viewport,
+            current_panel=payload.current_panel,
+            dirty_state=payload.dirty_state,
+            canvas_draft_hash=payload.canvas_draft_hash,
+            revision=payload.revision,
+        )
+    except AgentRecordNotFound as exc:
+        raise _not_found("AGENT_RUN_NOT_FOUND", "Agent Run", run_id) from exc
+    except ValueError as exc:
+        raise _api_error(409, "AGENT_CANVAS_CONTEXT_INVALID", str(exc)) from exc
+
+
+@router.get(
+    "/runs/{run_id}/approvals",
+    response_model=list[AgentApproval],
+)
+def list_run_approvals(
+    run_id: str,
+    store: AgentStore = Depends(require_agent_store),
+) -> list[AgentApproval]:
+    try:
+        store.get_run(run_id)
+    except AgentRecordNotFound as exc:
+        raise _not_found("AGENT_RUN_NOT_FOUND", "Agent Run", run_id) from exc
+    return store.list_approvals(run_id)
 
 
 @router.post(
@@ -280,6 +360,33 @@ def commit_run(
     except AgentRecordNotFound as exc:
         raise _not_found("AGENT_RUN_NOT_FOUND", "Agent Run", run_id) from exc
     except CommitServiceError as exc:
+        raise _api_error(exc.status_code, exc.code, str(exc)) from exc
+
+
+@router.post("/runs/{run_id}/undo", response_model=UndoAgentRunResponse)
+def undo_run(
+    run_id: str,
+    payload: UndoAgentRunRequest,
+    service: AgentApplicationService = Depends(require_agent_service),
+) -> UndoAgentRunResponse:
+    try:
+        result = service.undo(
+            run_id,
+            workspace_version_id=payload.workspace_version_id,
+        )
+        run_payload = result.run.model_dump(
+            include=set(AgentRunResponse.model_fields),
+        )
+        return UndoAgentRunResponse(
+            kind=result.kind,
+            source_run_id=result.source_run_id,
+            run=AgentRunResponse.model_validate(run_payload),
+            from_version_id=result.from_version_id,
+            workspace_version_id=result.workspace_version_id,
+        )
+    except AgentRecordNotFound as exc:
+        raise _not_found("AGENT_RUN_NOT_FOUND", "Agent Run", run_id) from exc
+    except UndoServiceError as exc:
         raise _api_error(exc.status_code, exc.code, str(exc)) from exc
 
 

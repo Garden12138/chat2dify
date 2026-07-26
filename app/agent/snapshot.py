@@ -3,12 +3,14 @@ from __future__ import annotations
 from contextlib import AbstractContextManager
 from copy import deepcopy
 from typing import Callable, Protocol
+from uuid import NAMESPACE_URL, uuid5
 
 from app.agent.catalog import NodeCapabilityCatalog
 from app.agent.state import AgentSession, AgentWorkflowSnapshot
 from app.dify.client import DifyAppDetail, DifyDraftWorkflow
 from app.dify.graph import decompile_dify_graph
 from app.dify.version import DifyVersionInfo
+from app.models import WorkflowPlan
 
 
 class SnapshotClient(Protocol):
@@ -36,6 +38,8 @@ class WorkflowSnapshotService:
         self.dify_version = dify_version
 
     def capture(self, session: AgentSession) -> AgentWorkflowSnapshot:
+        if session.operation == "create":
+            return self._create_scaffold_snapshot(session)
         if not session.app_id:
             raise WorkflowSnapshotError(
                 "AGENT_EXISTING_APP_REQUIRED",
@@ -67,6 +71,7 @@ class WorkflowSnapshotService:
             conversation_variables=deepcopy(draft.conversation_variables),
         )
         return AgentWorkflowSnapshot(
+            operation="modify",
             app_id=session.app_id,
             app_name=plan.name,
             app_description=app.description,
@@ -90,6 +95,46 @@ class WorkflowSnapshotService:
             ],
         )
 
+    def _create_scaffold_snapshot(
+        self,
+        session: AgentSession,
+    ) -> AgentWorkflowSnapshot:
+        if session.app_id is not None:
+            raise WorkflowSnapshotError(
+                "AGENT_CREATE_APP_ALREADY_BOUND",
+                "A create Session cannot initialize after it is bound to a Dify app.",
+            )
+        if session.app_mode not in {"workflow", "advanced-chat"}:
+            raise WorkflowSnapshotError(
+                "AGENT_APP_MODE_UNSUPPORTED",
+                "Phase 1B supports only new Workflow and Chatflow apps.",
+            )
+        plan = _create_scaffold_plan(session)
+        return AgentWorkflowSnapshot(
+            operation="create",
+            app_id=None,
+            app_name=plan.name,
+            app_description=plan.description,
+            app_mode=session.app_mode,
+            base_hash=None,
+            base_plan=plan.model_dump(mode="json"),
+            base_graph={},
+            features={},
+            environment_variables=[],
+            conversation_variables=[],
+            dify_version={
+                "source_dir": self.dify_version.source_dir,
+                "git_describe": self.dify_version.git_describe,
+                "app_dsl_version": self.dify_version.app_dsl_version,
+                "draft_version": "not-imported",
+            },
+            capabilities=[
+                definition.model_dump(mode="json")
+                for definition in self.catalog.list()
+                if session.app_mode in definition.supported_app_modes
+            ],
+        )
+
 
 def _resolve_graph_app_mode(
     app: DifyAppDetail,
@@ -106,3 +151,83 @@ def _resolve_graph_app_mode(
     ):
         return "advanced-chat"
     return app.mode or "workflow"
+
+
+def _create_scaffold_plan(session: AgentSession) -> WorkflowPlan:
+    app_mode = session.app_mode
+    if app_mode not in {"workflow", "advanced-chat"}:
+        raise WorkflowSnapshotError(
+            "AGENT_APP_MODE_UNSUPPORTED",
+            "Create scaffold requires Workflow or Chatflow mode.",
+        )
+    start_id = _scaffold_node_id(session.id, "start")
+    terminal_kind = "answer" if app_mode == "advanced-chat" else "end"
+    terminal_id = _scaffold_node_id(session.id, terminal_kind)
+    if app_mode == "advanced-chat":
+        terminal = {
+            "id": terminal_id,
+            "type": "answer",
+            "title": "返回用户问题",
+            "params": {"answer": "{{#sys.query#}}"},
+        }
+        start_params = {"variables": []}
+        default_name = "New Chatflow"
+    else:
+        terminal = {
+            "id": terminal_id,
+            "type": "end",
+            "title": "返回用户输入",
+            "params": {
+                "outputs": [
+                    {
+                        "variable": "answer",
+                        "value_selector": [start_id, "query"],
+                    }
+                ]
+            },
+        }
+        start_params = {
+            "variables": [
+                {
+                    "name": "query",
+                    "type": "paragraph",
+                    "required": True,
+                    "label": "用户输入",
+                }
+            ]
+        }
+        default_name = "New Workflow"
+    return WorkflowPlan.model_validate(
+        {
+            "name": session.app_name or default_name,
+            "description": (
+                session.app_description
+                or "Created from a deterministic Chat2Dify Builder Agent scaffold."
+            ),
+            "app_mode": app_mode,
+            "nodes": [
+                {
+                    "id": start_id,
+                    "type": "start",
+                    "title": "接收用户输入",
+                    "params": start_params,
+                },
+                terminal,
+            ],
+            "edges": [
+                {
+                    "source": start_id,
+                    "target": terminal_id,
+                }
+            ],
+        }
+    )
+
+
+def _scaffold_node_id(session_id: str, role: str) -> str:
+    return str(
+        uuid5(
+            NAMESPACE_URL,
+            f"chat2dify:v4:create:{session_id}:{role}",
+        )
+    )

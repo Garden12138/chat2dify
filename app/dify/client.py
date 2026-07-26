@@ -675,14 +675,28 @@ class DifyClient:
         self._raise_for_response(response)
         return response.json().get("result") == "success"
 
-    def import_yaml(self, yaml_content: str, *, name: str | None = None) -> DifyImportResult:
+    def import_yaml(
+        self,
+        yaml_content: str,
+        *,
+        name: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> DifyImportResult:
         self._ensure_logged_in()
         payload = {
             "mode": "yaml-content",
             "yaml_content": yaml_content,
             "name": name,
         }
-        response = self._post_with_auth_retry("/apps/imports", payload)
+        response = self._post_with_auth_retry(
+            "/apps/imports",
+            payload,
+            headers=(
+                {"Idempotency-Key": idempotency_key}
+                if idempotency_key
+                else None
+            ),
+        )
         result = self._result_from_response(response)
         if result.status == "pending" and result.id:
             result = self.confirm_import(result.id)
@@ -1210,14 +1224,23 @@ class DifyClient:
         token = self.csrf_token
         return {CSRF_HEADER_NAME: token} if token else {}
 
-    def _post_with_auth_retry(self, path: str, payload: dict[str, Any]) -> httpx.Response:
-        response = self._post(path, json=payload, headers=self._csrf_headers())
+    def _post_with_auth_retry(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> httpx.Response:
+        request_headers = {**self._csrf_headers(), **(headers or {})}
+        response = self._post(path, json=payload, headers=request_headers)
         if response.status_code != 401:
             return response
         if self.refresh_token():
-            return self._post(path, json=payload, headers=self._csrf_headers())
+            request_headers = {**self._csrf_headers(), **(headers or {})}
+            return self._post(path, json=payload, headers=request_headers)
         self.login()
-        return self._post(path, json=payload, headers=self._csrf_headers())
+        request_headers = {**self._csrf_headers(), **(headers or {})}
+        return self._post(path, json=payload, headers=request_headers)
 
     def _run_draft_workflow_once(
         self,

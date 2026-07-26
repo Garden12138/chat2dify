@@ -92,7 +92,10 @@ PatchOperation = Annotated[
 
 class PatchDocument(StrictModel):
     workspace_version: str = Field(min_length=1, max_length=128)
-    expected_base_hash: str = Field(min_length=1, max_length=512)
+    expected_base_hash: str | None = Field(
+        min_length=1,
+        max_length=512,
+    )
     operations: list[PatchOperation] = Field(min_length=1, max_length=MAX_PATCH_OPERATIONS)
     rationale: str = Field(min_length=1, max_length=2_000)
 

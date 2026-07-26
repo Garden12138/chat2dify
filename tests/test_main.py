@@ -48,6 +48,8 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
         index = client.get("/")
         script = client.get("/static/app.js")
         styles = client.get("/static/styles.css")
+        agent_script = client.get("/static/agent-workbench.js")
+        agent_core = client.get("/static/agent-workbench-core.mjs")
 
     assert index.status_code == 200
     assert "chat2dify" in index.text
@@ -61,6 +63,11 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert 'id="chat-input"' in index.text
     assert 'id="chat-submit"' in index.text
     assert 'id="planner-select"' in index.text
+    assert 'id="agent-workbench"' in index.text
+    assert 'id="agent-timeline"' in index.text
+    assert 'id="agent-goal-plan"' in index.text
+    assert 'id="agent-approvals"' in index.text
+    assert 'static/agent-workbench.js?v=chat-v4.0.0' in index.text
     assert 'id="create-form"' not in index.text
     assert 'id="modify-form"' not in index.text
     assert 'id="run-form"' not in index.text
@@ -75,6 +82,7 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert script.status_code == 200
     assert script.headers["cache-control"] == "no-store"
     assert "handleUserMessage" in script.text
+    assert "CHAT2DIFY_AGENT_WORKBENCH" in script.text
     assert "executePendingAction" in script.text
     assert "/api/assistant/plan" in script.text
     assert "/api/assistant/execute" in script.text
@@ -104,6 +112,12 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert ".message-user" in styles.text
     assert ".message-card" in styles.text
     assert ".result-rows" in styles.text
+    assert ".agent-workbench" in styles.text
+    assert ".agent-timeline" in styles.text
+    assert agent_script.status_code == 200
+    assert agent_core.status_code == 200
+    assert "CanvasContextChannel" in agent_core.text
+    assert "/api/v4/agent" in agent_script.text
 
 
 def test_health_returns_configured_dataset_count(monkeypatch) -> None:

@@ -23,7 +23,7 @@ from app.agent.state import (
     RunPhase,
     utc_now,
 )
-from app.agent.store import AgentStore
+from app.agent.store import AgentStore, AgentStoreConflict
 from app.agent.trace import redact_sensitive_data
 from app.agent.workspace import VersionedWorkflowWorkspace
 
@@ -59,10 +59,7 @@ class AgentRuntime:
     def run(self, run_id: str) -> dict[str, Any]:
         try:
             run = self.store.get_run(run_id)
-            if run.terminal or run.phase in {
-                RunPhase.WAITING_USER,
-                RunPhase.WAITING_APPROVAL,
-            }:
+            if run.terminal or run.paused:
                 return _run_summary(run)
             run = self._observe_if_needed(run)
             return self._decision_loop(run)
@@ -76,21 +73,35 @@ class AgentRuntime:
                 run_id=run.id,
                 event_type="agent.started",
                 phase=run.phase.value,
-                message="Builder Agent started observing the existing Dify app.",
+                message="Builder Agent started initializing its Workflow context.",
                 data={"goal": run.goal},
             )
         if run.phase != RunPhase.OBSERVING:
             return run
         session = self.store.get_session(run.session_id)
         snapshot = self.snapshot.capture(session)
-        goal_plan = _initial_goal_plan(run.goal)
-        run, version = self.workspace.initialize(run, snapshot, goal_plan)
+        goal_plan = _initial_goal_plan(run.goal, operation=snapshot.operation)
+        try:
+            run, version = self.workspace.initialize(run, snapshot, goal_plan)
+        except AgentStoreConflict:
+            current = self.store.get_run(run.id)
+            if current.terminal or current.paused:
+                return current
+            raise
         self.store.append_event(
             run_id=run.id,
             event_type="context.loaded",
             phase=run.phase.value,
-            message="Loaded the authoritative Dify Snapshot and pinned capabilities.",
+            message=(
+                "Loaded the authoritative Dify Snapshot and pinned capabilities."
+                if snapshot.operation == "modify"
+                else (
+                    "Initialized the deterministic new-app scaffold and pinned "
+                    "capabilities."
+                )
+            ),
             data={
+                "operation": snapshot.operation,
                 "app_id": snapshot.app_id,
                 "app_mode": snapshot.app_mode,
                 "base_hash": snapshot.base_hash,
@@ -113,10 +124,7 @@ class AgentRuntime:
         run = initial
         while True:
             run = self.store.get_run(run.id)
-            if run.terminal or run.phase in {
-                RunPhase.WAITING_USER,
-                RunPhase.WAITING_APPROVAL,
-            }:
+            if run.terminal or run.paused:
                 return _run_summary(run)
             exhaustion = _budget_exhaustion(run)
             if exhaustion:
@@ -167,6 +175,8 @@ class AgentRuntime:
                 message=f"Agent selected decision type {decision.type}.",
                 data=redact_sensitive_data(decision.model_dump(mode="json")),
             )
+            if run.phase == RunPhase.PAUSED:
+                return _run_summary(run)
             if decision.type == "ask_user":
                 paused = run.transition_to(RunPhase.WAITING_USER)
                 paused = _with_observation(
@@ -196,7 +206,7 @@ class AgentRuntime:
 
     def _execute_tool(self, run: AgentRun, decision) -> AgentRun:
         current = self.store.get_run(run.id)
-        if current.terminal:
+        if current.terminal or current.phase == RunPhase.PAUSED:
             return current
         run = current
         if run.phase == RunPhase.PLANNING:
@@ -298,6 +308,8 @@ class AgentRuntime:
         else:
             run = _record_same_error(run, _tool_error_signature(result))
         run = self.store.update_run(run)
+        if run.phase == RunPhase.PAUSED:
+            return run
         if (
             run.goal_plan is not None
             and previous_goal_revision is not None
@@ -481,23 +493,40 @@ class AgentRuntime:
         raise RepeatedAgentError(f"Repeated identical Tool error: {code}")
 
 
-def _initial_goal_plan(goal: str) -> GoalPlan:
+def _initial_goal_plan(
+    goal: str,
+    *,
+    operation: str = "modify",
+) -> GoalPlan:
+    create_mode = operation == "create"
     return GoalPlan(
         goal=goal,
         constraints=[
             "Use only registered Typed Tools.",
-            "Keep Dify unchanged before persisted approval.",
+            (
+                "Do not import a Dify app before persisted approval."
+                if create_mode
+                else "Keep Dify unchanged before persisted approval."
+            ),
             "Preserve unrelated nodes, edges, metadata, features, and variables.",
         ],
         success_criteria=[
             "The requested relevant nodes and edges are changed.",
             "The deterministic validation chain passes.",
-            "Review and risk data are ready before Commit.",
+            (
+                "Review and risk data are ready before any Dify app exists."
+                if create_mode
+                else "Review and risk data are ready before Commit."
+            ),
         ],
         steps=[
             GoalStep(
                 id="observe",
-                description="Inspect the authoritative Workflow Snapshot.",
+                description=(
+                    "Inspect the deterministic new-app scaffold."
+                    if create_mode
+                    else "Inspect the authoritative Workflow Snapshot."
+                ),
                 status="in_progress",
             ),
             GoalStep(

@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Annotated, Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models import AppMode
 
@@ -27,6 +27,9 @@ class SessionStatus(str, Enum):
     CLOSED = "closed"
 
 
+AgentOperation = Literal["modify", "create"]
+
+
 class RunStatus(str, Enum):
     QUEUED = "queued"
     RUNNING = "running"
@@ -45,6 +48,7 @@ class RunPhase(str, Enum):
     ACTING = "acting"
     VALIDATING = "validating"
     TESTING = "testing"
+    PAUSED = "paused"
     WAITING_USER = "waiting_user"
     WAITING_APPROVAL = "waiting_approval"
     COMMITTING = "committing"
@@ -67,6 +71,7 @@ PAUSED_RUN_PHASES = frozenset(
     {
         RunPhase.WAITING_USER,
         RunPhase.WAITING_APPROVAL,
+        RunPhase.PAUSED,
         RunPhase.INTERRUPTED,
     }
 )
@@ -74,20 +79,34 @@ RECOVERABLE_RUN_PHASES = frozenset(
     {
         RunPhase.WAITING_USER,
         RunPhase.WAITING_APPROVAL,
+        RunPhase.PAUSED,
         RunPhase.INTERRUPTED,
     }
 )
 
 _RUN_PHASE_TRANSITIONS: dict[RunPhase, frozenset[RunPhase]] = {
     RunPhase.QUEUED: frozenset(
-        {RunPhase.OBSERVING, RunPhase.CANCELLED, RunPhase.FAILED, RunPhase.INTERRUPTED}
+        {
+            RunPhase.OBSERVING,
+            RunPhase.PAUSED,
+            RunPhase.CANCELLED,
+            RunPhase.FAILED,
+            RunPhase.INTERRUPTED,
+        }
     ),
     RunPhase.OBSERVING: frozenset(
-        {RunPhase.PLANNING, RunPhase.CANCELLED, RunPhase.FAILED, RunPhase.INTERRUPTED}
+        {
+            RunPhase.PLANNING,
+            RunPhase.PAUSED,
+            RunPhase.CANCELLED,
+            RunPhase.FAILED,
+            RunPhase.INTERRUPTED,
+        }
     ),
     RunPhase.PLANNING: frozenset(
         {
             RunPhase.ACTING,
+            RunPhase.PAUSED,
             RunPhase.WAITING_USER,
             RunPhase.CANCELLED,
             RunPhase.FAILED,
@@ -97,6 +116,7 @@ _RUN_PHASE_TRANSITIONS: dict[RunPhase, frozenset[RunPhase]] = {
     RunPhase.ACTING: frozenset(
         {
             RunPhase.VALIDATING,
+            RunPhase.PAUSED,
             RunPhase.WAITING_USER,
             RunPhase.CANCELLED,
             RunPhase.FAILED,
@@ -107,6 +127,7 @@ _RUN_PHASE_TRANSITIONS: dict[RunPhase, frozenset[RunPhase]] = {
         {
             RunPhase.ACTING,
             RunPhase.TESTING,
+            RunPhase.PAUSED,
             RunPhase.WAITING_APPROVAL,
             RunPhase.CANCELLED,
             RunPhase.FAILED,
@@ -116,6 +137,7 @@ _RUN_PHASE_TRANSITIONS: dict[RunPhase, frozenset[RunPhase]] = {
     RunPhase.TESTING: frozenset(
         {
             RunPhase.ACTING,
+            RunPhase.PAUSED,
             RunPhase.WAITING_APPROVAL,
             RunPhase.CANCELLED,
             RunPhase.FAILED,
@@ -127,6 +149,15 @@ _RUN_PHASE_TRANSITIONS: dict[RunPhase, frozenset[RunPhase]] = {
     ),
     RunPhase.WAITING_APPROVAL: frozenset(
         {RunPhase.COMMITTING, RunPhase.CANCELLED, RunPhase.FAILED, RunPhase.INTERRUPTED}
+    ),
+    RunPhase.PAUSED: frozenset(
+        {
+            RunPhase.OBSERVING,
+            RunPhase.PLANNING,
+            RunPhase.CANCELLED,
+            RunPhase.FAILED,
+            RunPhase.INTERRUPTED,
+        }
     ),
     RunPhase.COMMITTING: frozenset(
         {
@@ -141,6 +172,7 @@ _RUN_PHASE_TRANSITIONS: dict[RunPhase, frozenset[RunPhase]] = {
         {
             RunPhase.OBSERVING,
             RunPhase.PLANNING,
+            RunPhase.COMMITTING,
             RunPhase.CANCELLED,
             RunPhase.FAILED,
         }
@@ -164,7 +196,11 @@ class IllegalRunTransition(ValueError):
 def run_status_for_phase(phase: RunPhase) -> RunStatus:
     if phase == RunPhase.QUEUED:
         return RunStatus.QUEUED
-    if phase in {RunPhase.WAITING_USER, RunPhase.WAITING_APPROVAL}:
+    if phase in {
+        RunPhase.PAUSED,
+        RunPhase.WAITING_USER,
+        RunPhase.WAITING_APPROVAL,
+    }:
         return RunStatus.PAUSED
     if phase == RunPhase.INTERRUPTED:
         return RunStatus.INTERRUPTED
@@ -269,23 +305,47 @@ class AgentBudgetUsage(StrictModel):
     latest_error_signature: str | None = Field(default=None, max_length=1_000)
 
 
+class CanvasViewport(StrictModel):
+    x: float = Field(ge=-10_000_000, le=10_000_000)
+    y: float = Field(ge=-10_000_000, le=10_000_000)
+    zoom: float = Field(gt=0, le=100)
+
+
 class RunConstraints(StrictModel):
     allow_draft_test: bool = False
     allow_destructive: bool = False
     selected_node_ids: list[str] = Field(default_factory=list, max_length=100)
     selected_edge_ids: list[str] = Field(default_factory=list, max_length=100)
+    viewport: CanvasViewport | None = None
+    current_panel: str | None = Field(default=None, max_length=128)
     canvas_draft_hash: str | None = Field(default=None, max_length=512)
     dirty_state: bool = False
+    canvas_context_revision: int = Field(default=0, ge=0)
+
+    @field_validator("selected_node_ids", "selected_edge_ids")
+    @classmethod
+    def validate_canvas_ids(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            item = value.strip()
+            if not item or len(item) > 256:
+                raise ValueError("Canvas selection IDs must contain 1 to 256 characters.")
+            if item not in seen:
+                seen.add(item)
+                normalized.append(item)
+        return normalized
 
 
 class AgentWorkflowSnapshot(StrictModel):
-    app_id: str = Field(min_length=1, max_length=256)
+    operation: AgentOperation = "modify"
+    app_id: str | None = Field(default=None, min_length=1, max_length=256)
     app_name: str = Field(min_length=1, max_length=512)
     app_description: str = Field(default="", max_length=8_000)
     app_mode: Literal["workflow", "advanced-chat"]
-    base_hash: str = Field(min_length=1, max_length=512)
+    base_hash: str | None = Field(default=None, min_length=1, max_length=512)
     base_plan: dict[str, Any]
-    base_graph: dict[str, Any]
+    base_graph: dict[str, Any] = Field(default_factory=dict)
     features: dict[str, Any] = Field(default_factory=dict)
     environment_variables: list[dict[str, Any]] = Field(default_factory=list)
     conversation_variables: list[dict[str, Any]] = Field(default_factory=list)
@@ -293,14 +353,43 @@ class AgentWorkflowSnapshot(StrictModel):
     capabilities: list[dict[str, Any]] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
 
+    @model_validator(mode="after")
+    def validate_operation_boundary(self) -> "AgentWorkflowSnapshot":
+        if self.operation == "modify" and (not self.app_id or not self.base_hash):
+            raise ValueError(
+                "Modify Snapshots require an existing app_id and base Hash."
+            )
+        if self.operation == "create" and (
+            self.app_id is not None or self.base_hash is not None
+        ):
+            raise ValueError(
+                "Create Snapshots must not contain an app_id or base Hash before import."
+            )
+        return self
+
 
 class AgentSession(StrictModel):
     id: str = Field(default_factory=new_id, min_length=1, max_length=128)
-    app_id: str | None = Field(default=None, max_length=256)
+    operation: AgentOperation = "modify"
+    app_id: str | None = Field(default=None, min_length=1, max_length=256)
     app_mode: AppMode | None = None
+    app_name: str | None = Field(default=None, min_length=1, max_length=512)
+    app_description: str = Field(default="", max_length=8_000)
     status: SessionStatus = SessionStatus.ACTIVE
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+    @model_validator(mode="after")
+    def validate_operation_boundary(self) -> "AgentSession":
+        if self.operation == "modify" and not self.app_id:
+            raise ValueError("Modify Sessions require an existing app_id.")
+        if self.operation == "create" and self.app_mode is None:
+            raise ValueError("Create Sessions require an explicit app_mode.")
+        if self.operation == "create" and self.app_id is not None:
+            raise ValueError(
+                "Create Sessions cannot contain an app_id before import."
+            )
+        return self
 
 
 class AgentRun(StrictModel):

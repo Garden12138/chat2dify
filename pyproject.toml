@@ -19,3 +19,6 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "live_dify: destructive localhost-only Dify integration acceptance; disabled unless explicitly enabled",
+]

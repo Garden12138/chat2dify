@@ -4,20 +4,28 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Protocol
 
 from app.agent.approval import AgentApprovalService
-from app.agent.commit import CommitResult, ModificationCommitService
+from app.agent.commit import (
+    CommitResult,
+    CommitServiceError,
+    CreationCommitResult,
+    CreationCommitService,
+    ModificationCommitService,
+)
 from app.agent.runtime import AgentRuntime
 from app.agent.state import (
     AgentBudget,
     AgentRun,
     AgentSession,
+    CanvasViewport,
     Observation,
     RunConstraints,
     RunPhase,
     SessionStatus,
     utc_now,
 )
-from app.agent.store import AgentStore
+from app.agent.store import AgentStore, AgentStoreConflict
 from app.agent.trace import redact_sensitive_data
+from app.agent.undo import AgentUndoService, UndoResult, UndoServiceError
 
 
 class RunDispatcher(Protocol):
@@ -60,11 +68,15 @@ class AgentApplicationService:
         dispatcher: RunDispatcher,
         approval: AgentApprovalService,
         commit_service: ModificationCommitService,
+        creation_commit_service: CreationCommitService | None = None,
+        undo_service: AgentUndoService | None = None,
     ) -> None:
         self.store = store
         self.dispatcher = dispatcher
         self.approval = approval
         self.commit_service = commit_service
+        self.creation_commit_service = creation_commit_service
+        self.undo_service = undo_service
 
     def close(self) -> None:
         self.dispatcher.close()
@@ -72,13 +84,24 @@ class AgentApplicationService:
     def create_session(
         self,
         *,
-        app_id: str,
+        app_id: str | None,
         app_mode: str,
+        app_name: str | None = None,
+        app_description: str = "",
     ) -> AgentSession:
         if app_mode not in {"workflow", "advanced-chat"}:
-            raise ValueError("Phase 1A supports only workflow and advanced-chat.")
+            raise ValueError(
+                "Builder Agent supports only workflow and advanced-chat in Phase 1."
+            )
+        normalized_app_id = (app_id or "").strip() or None
         return self.store.create_session(
-            AgentSession(app_id=app_id, app_mode=app_mode)
+            AgentSession(
+                operation="modify" if normalized_app_id else "create",
+                app_id=normalized_app_id,
+                app_mode=app_mode,
+                app_name=app_name,
+                app_description=app_description,
+            )
         )
 
     def submit_goal(
@@ -92,11 +115,30 @@ class AgentApplicationService:
         session = self.store.get_session(session_id)
         if session.status != SessionStatus.ACTIVE:
             raise ValueError("Agent Session is closed.")
+        effective_constraints = constraints or RunConstraints()
+        if (
+            session.operation == "create"
+            and self.store.list_runs(session_id=session.id, limit=1)
+        ):
+            raise ValueError(
+                "Create Sessions use one recoverable Agent Run; resume the "
+                "existing Run instead of submitting another creation goal."
+            )
+        if session.operation == "create" and (
+            effective_constraints.selected_node_ids
+            or effective_constraints.selected_edge_ids
+            or effective_constraints.canvas_draft_hash is not None
+            or effective_constraints.dirty_state
+        ):
+            raise ValueError(
+                "Create Sessions cannot use existing-canvas selection, dirty state, "
+                "or draft Hash constraints."
+            )
         run = self.store.create_run(
             AgentRun(
                 session_id=session.id,
                 goal=str(redact_sensitive_data(message)),
-                constraints=constraints or RunConstraints(),
+                constraints=effective_constraints,
                 budget=budget or AgentBudget(),
             )
         )
@@ -126,6 +168,27 @@ class AgentApplicationService:
         )
         return cancelled
 
+    def pause(self, run_id: str) -> AgentRun:
+        run = self.store.get_run(run_id)
+        if run.terminal or run.phase == RunPhase.PAUSED:
+            return run
+        if run.phase in {
+            RunPhase.WAITING_USER,
+            RunPhase.WAITING_APPROVAL,
+        }:
+            return run
+        if run.phase == RunPhase.COMMITTING:
+            raise ValueError("A Commit already in progress cannot be paused.")
+        paused = self.store.update_run(run.transition_to(RunPhase.PAUSED))
+        self.store.append_event(
+            run_id=run.id,
+            event_type="agent.paused",
+            phase=paused.phase.value,
+            message="Agent Run was paused explicitly.",
+            data={"from_phase": run.phase.value, "side_effect_replay": False},
+        )
+        return paused
+
     def resume(
         self,
         run_id: str,
@@ -133,8 +196,14 @@ class AgentApplicationService:
         message: str | None = None,
     ) -> AgentRun:
         run = self.store.get_run(run_id)
-        if run.phase not in {RunPhase.WAITING_USER, RunPhase.INTERRUPTED}:
-            raise ValueError("Only waiting_user or interrupted Runs can resume.")
+        if run.phase not in {
+            RunPhase.WAITING_USER,
+            RunPhase.PAUSED,
+            RunPhase.INTERRUPTED,
+        }:
+            raise ValueError(
+                "Only waiting_user, paused, or interrupted Runs can resume."
+            )
         if run.phase == RunPhase.WAITING_USER and not (message or "").strip():
             raise ValueError("Resuming a waiting_user Run requires a message.")
         observations = list(run.observations)
@@ -166,13 +235,83 @@ class AgentApplicationService:
         resumed = self.store.update_run(resumed)
         self.store.append_event(
             run_id=run.id,
-            event_type="agent.started",
+            event_type="agent.resumed",
             phase=resumed.phase.value,
             message="Agent Run resumed explicitly.",
-            data={"from_phase": run.phase.value},
+            data={
+                "from_phase": run.phase.value,
+                "side_effect_replay": False,
+            },
         )
         self.dispatcher.submit(run.id)
         return resumed
+
+    def update_canvas_context(
+        self,
+        run_id: str,
+        *,
+        selected_node_ids: list[str],
+        selected_edge_ids: list[str],
+        viewport: CanvasViewport | None,
+        current_panel: str | None,
+        dirty_state: bool,
+        canvas_draft_hash: str | None,
+        revision: int,
+    ) -> AgentRun:
+        run = self.store.get_run(run_id)
+        session = self.store.get_session(run.session_id)
+        if session.operation != "modify":
+            raise ValueError("Create Runs cannot consume existing-canvas context.")
+        constraints = RunConstraints(
+            allow_draft_test=run.constraints.allow_draft_test,
+            allow_destructive=run.constraints.allow_destructive,
+            selected_node_ids=selected_node_ids,
+            selected_edge_ids=selected_edge_ids,
+            viewport=viewport,
+            current_panel=current_panel,
+            canvas_draft_hash=canvas_draft_hash,
+            dirty_state=dirty_state,
+            canvas_context_revision=revision,
+        )
+        try:
+            updated = self.store.update_run_canvas_constraints(
+                run.id,
+                constraints,
+            )
+        except AgentStoreConflict as exc:
+            raise ValueError(str(exc)) from exc
+        self.store.append_event(
+            run_id=run.id,
+            event_type="context.updated",
+            phase=updated.phase.value,
+            message="Updated bounded Dify canvas context.",
+            data={
+                "selected_node_count": len(constraints.selected_node_ids),
+                "selected_edge_count": len(constraints.selected_edge_ids),
+                "current_panel": constraints.current_panel,
+                "dirty_state": constraints.dirty_state,
+                "canvas_draft_hash": constraints.canvas_draft_hash,
+                "revision": constraints.canvas_context_revision,
+            },
+        )
+        return updated
+
+    def undo(
+        self,
+        run_id: str,
+        *,
+        workspace_version_id: str,
+    ) -> UndoResult:
+        if self.undo_service is None:
+            raise UndoServiceError(
+                "UNDO_SERVICE_UNAVAILABLE",
+                "The Agent Undo service is unavailable.",
+                status_code=503,
+            )
+        return self.undo_service.undo(
+            run_id,
+            workspace_version_id=workspace_version_id,
+        )
 
     def resolve_approval(
         self,
@@ -193,7 +332,27 @@ class AgentApplicationService:
         *,
         workspace_version_id: str,
         approval_id: str,
-    ) -> CommitResult:
+    ) -> CommitResult | CreationCommitResult:
+        run = self.store.get_run(run_id)
+        session = self.store.get_session(run.session_id)
+        if (
+            session.operation == "create"
+            or (
+                run.snapshot is not None
+                and run.snapshot.operation == "create"
+            )
+        ):
+            if self.creation_commit_service is None:
+                raise CommitServiceError(
+                    "CREATE_COMMIT_ADAPTER_UNAVAILABLE",
+                    "The new-app creation Commit adapter is unavailable.",
+                    status_code=503,
+                )
+            return self.creation_commit_service.commit(
+                run_id,
+                workspace_version_id=workspace_version_id,
+                approval_id=approval_id,
+            )
         return self.commit_service.commit(
             run_id,
             workspace_version_id=workspace_version_id,

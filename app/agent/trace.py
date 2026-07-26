@@ -12,12 +12,14 @@ from app.agent.state import StrictModel, new_id, utc_now
 AgentEventType = Literal[
     "agent.started",
     "context.loaded",
+    "context.updated",
     "goal_plan.created",
     "goal_plan.updated",
     "agent.decision",
     "tool.started",
     "tool.completed",
     "workspace.version.created",
+    "workspace.head.moved",
     "validation.started",
     "validation.failed",
     "validation.passed",
@@ -31,6 +33,7 @@ AgentEventType = Literal[
     "commit.started",
     "commit.completed",
     "agent.paused",
+    "agent.resumed",
     "agent.completed",
     "agent.failed",
 ]

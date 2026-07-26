@@ -203,6 +203,9 @@ const els = {
 };
 
 document.addEventListener("DOMContentLoaded", () => {
+  if (window.CHAT2DIFY_AGENT_WORKBENCH) {
+    return;
+  }
   const boot = initializeFromUrl();
   bindEvents();
   addAssistantMessage(boot.initialMessage || "告诉我你想创建、修改或测试运行哪类 Dify 应用。");

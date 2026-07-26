@@ -40,6 +40,10 @@ def test_login_encodes_password_and_import_sends_csrf_cookie() -> None:
         if request.url.path == "/console/api/apps/imports":
             seen["csrf"] = request.headers.get(CSRF_HEADER_NAME, "")
             seen["cookie"] = request.headers.get("cookie", "")
+            seen["idempotency_key"] = request.headers.get(
+                "Idempotency-Key",
+                "",
+            )
             return httpx.Response(
                 200,
                 json={"id": "import-1", "status": "completed", "app_id": "app-1", "app_mode": "workflow"},
@@ -47,11 +51,15 @@ def test_login_encodes_password_and_import_sends_csrf_cookie() -> None:
         raise AssertionError(f"Unexpected request: {request.method} {request.url}")
 
     client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
-    result = client.import_yaml("kind: app")
+    result = client.import_yaml(
+        "kind: app",
+        idempotency_key="create-attempt-1",
+    )
 
     assert seen["password"] == DifyClient.encode_password("secret")
     assert seen["csrf"] == "csrf123"
     assert "csrf_token=csrf123" in seen["cookie"]
+    assert seen["idempotency_key"] == "create-attempt-1"
     assert result.workflow_url == "http://dify.local/app/app-1/workflow"
 
 

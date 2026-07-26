@@ -15,7 +15,7 @@ from pydantic import ValidationError
 from app import __version__
 from app.agent.approval import AgentApprovalService
 from app.agent.catalog import NodeCapabilityCatalog
-from app.agent.commit import ModificationCommitService
+from app.agent.commit import CreationCommitService, ModificationCommitService
 from app.agent.context import BuilderContextBuilder
 from app.agent.decision import OpenAICompatibleDecisionProvider
 from app.agent.policy import AgentToolPolicy
@@ -26,6 +26,7 @@ from app.agent.service import AgentApplicationService, ThreadedRunDispatcher
 from app.agent.snapshot import WorkflowSnapshotService
 from app.agent.store import AgentStore
 from app.agent.tools import register_phase1a_tools
+from app.agent.undo import AgentUndoService
 from app.agent.validation import WorkflowValidationService
 from app.agent.workspace import VersionedWorkflowWorkspace
 from app.agent.diff import diff_plans
@@ -94,7 +95,9 @@ from app.validator import has_errors, validate_dsl, validate_plan
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 INDEX_TEMPLATE = STATIC_DIR / "index.html"
-DEFAULT_INDEX_CONFIG = '{"basePath":"","version":"3.0.0"}'
+DEFAULT_INDEX_CONFIG = (
+    '{"basePath":"","version":"3.0.0","agentV4Enabled":false}'
+)
 
 
 @asynccontextmanager
@@ -138,13 +141,14 @@ async def lifespan(application: FastAPI):
         )
         def client_factory():
             return DifyClient(settings)
+        snapshot_service = WorkflowSnapshotService(
+            client_factory=client_factory,
+            catalog=catalog,
+            dify_version=version_info,
+        )
         runtime = AgentRuntime(
             store=agent_store,
-            snapshot=WorkflowSnapshotService(
-                client_factory=client_factory,
-                catalog=catalog,
-                dify_version=version_info,
-            ),
+            snapshot=snapshot_service,
             workspace=workspace,
             review=review,
             approval=approval,
@@ -161,6 +165,21 @@ async def lifespan(application: FastAPI):
             compiler=compiler,
             client_factory=client_factory,
         )
+        creation_commit_service = CreationCommitService(
+            store=agent_store,
+            workspace=workspace,
+            approval=approval,
+            validation=validation,
+            compiler=compiler,
+            client_factory=client_factory,
+        )
+        undo_service = AgentUndoService(
+            store=agent_store,
+            snapshot=snapshot_service,
+            workspace=workspace,
+            review=review,
+            approval=approval,
+        )
         agent_service = AgentApplicationService(
             store=agent_store,
             dispatcher=ThreadedRunDispatcher(
@@ -169,6 +188,8 @@ async def lifespan(application: FastAPI):
             ),
             approval=approval,
             commit_service=commit_service,
+            creation_commit_service=creation_commit_service,
+            undo_service=undo_service,
         )
         application.state.agent_store = agent_store
         application.state.agent_service = agent_service
@@ -205,6 +226,7 @@ def _render_index_html() -> str:
     config = {
         "basePath": load_public_base_path(),
         "version": __version__,
+        "agentV4Enabled": load_settings().agent_v4_enabled,
     }
     return INDEX_TEMPLATE.read_text(encoding="utf-8").replace(
         DEFAULT_INDEX_CONFIG,

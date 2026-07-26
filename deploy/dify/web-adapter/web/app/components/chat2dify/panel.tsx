@@ -10,8 +10,19 @@ import {
   DrawerTitle,
   DrawerViewport,
 } from '@langgenius/dify-ui/drawer'
-import { useMemo } from 'react'
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { useTranslation } from 'react-i18next'
+import {
+  CHAT2DIFY_CONTEXT_PROTOCOL,
+  createContextNonce,
+  isChat2DifyFrameMessage,
+} from './context-protocol'
+import type { Chat2DifyCanvasContext, Chat2DifyContextMessageType } from './context-protocol'
 
 type Chat2DifyIntent = 'create' | 'modify'
 
@@ -22,6 +33,7 @@ export type Chat2DifyPanelProps = {
   appId?: string
   appMode?: string
   appName?: string
+  canvasContext?: Chat2DifyCanvasContext
 }
 
 const CHAT2DIFY_BASE_PATH = '/chat2dify/'
@@ -31,7 +43,10 @@ export const buildChat2DifyUrl = ({
   appId,
   appMode,
   appName,
-}: Pick<Chat2DifyPanelProps, 'intent' | 'appId' | 'appMode' | 'appName'>) => {
+  contextNonce,
+}: Pick<Chat2DifyPanelProps, 'intent' | 'appId' | 'appMode' | 'appName'> & {
+  contextNonce?: string
+}) => {
   const params = new URLSearchParams({
     embed: '1',
     intent,
@@ -43,6 +58,8 @@ export const buildChat2DifyUrl = ({
     params.set('app_mode', appMode)
   if (appName)
     params.set('app_name', appName)
+  if (contextNonce)
+    params.set('context_nonce', contextNonce)
 
   return `${CHAT2DIFY_BASE_PATH}?${params.toString()}`
 }
@@ -53,16 +70,72 @@ const Chat2DifyPanel = ({
   appId,
   appMode,
   appName,
+  canvasContext,
   onOpenChange,
 }: Chat2DifyPanelProps) => {
   const { t } = useTranslation()
+  const iframeRef = useRef<HTMLIFrameElement>(null)
+  const previousCanvasContextRef = useRef<Chat2DifyCanvasContext | undefined>(undefined)
+  const [contextNonce, setContextNonce] = useState('')
   const title = intent === 'create' ? 'Chat2Dify 创建应用' : 'Chat2Dify 修改应用'
+  useEffect(() => {
+    if (open)
+      setContextNonce(createContextNonce())
+    else
+      setContextNonce('')
+  }, [open])
   const src = useMemo(() => buildChat2DifyUrl({
     intent,
     appId,
     appMode,
     appName,
-  }), [intent, appId, appMode, appName])
+    contextNonce,
+  }), [intent, appId, appMode, appName, contextNonce])
+
+  useEffect(() => {
+    if (!open || !contextNonce)
+      return
+    const postContext = (type: Chat2DifyContextMessageType) => {
+      if (!canvasContext || !iframeRef.current?.contentWindow)
+        return
+      iframeRef.current.contentWindow.postMessage({
+        protocol: CHAT2DIFY_CONTEXT_PROTOCOL,
+        type,
+        context_nonce: contextNonce,
+        payload: canvasContext,
+      }, window.location.origin)
+    }
+    const handleMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin)
+        return
+      if (event.source !== iframeRef.current?.contentWindow)
+        return
+      if (!isChat2DifyFrameMessage(event.data, contextNonce))
+        return
+      postContext('dify.context.init')
+    }
+    window.addEventListener('message', handleMessage)
+    return () => window.removeEventListener('message', handleMessage)
+  }, [open, contextNonce, canvasContext])
+
+  useEffect(() => {
+    if (!open || !contextNonce || !canvasContext || !iframeRef.current?.contentWindow)
+      return
+    const previous = previousCanvasContextRef.current
+    const type = previous && (
+      previous.dirty_state !== canvasContext.dirty_state
+      || previous.canvas_draft_hash !== canvasContext.canvas_draft_hash
+    )
+      ? 'dify.draft.changed'
+      : 'dify.selection.changed'
+    iframeRef.current.contentWindow.postMessage({
+      protocol: CHAT2DIFY_CONTEXT_PROTOCOL,
+      type,
+      context_nonce: contextNonce,
+      payload: canvasContext,
+    }, window.location.origin)
+    previousCanvasContextRef.current = canvasContext
+  }, [open, contextNonce, canvasContext])
 
   return (
     <Drawer open={open} modal swipeDirection="right" onOpenChange={onOpenChange}>
@@ -81,8 +154,9 @@ const Chat2DifyPanel = ({
                 />
               </div>
               <iframe
+                ref={iframeRef}
                 title={title}
-                src={src}
+                src={contextNonce ? src : undefined}
                 className="min-h-0 w-full flex-1 border-0 bg-background-body"
                 allow="clipboard-read; clipboard-write"
               />

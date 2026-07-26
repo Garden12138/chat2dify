@@ -20,7 +20,10 @@ What the adapter adds:
 - a `Chat2Dify 创建` action in the Studio create-app card;
 - a `Chat2Dify` action in the Workflow canvas header;
 - query parameters that pass create or modify context into chat2dify:
-  `embed=1`, `intent=create|modify`, `app_mode`, `app_id`, and `app_name`.
+  `embed=1`, `intent=create|modify`, `app_mode`, `app_id`, and `app_name`;
+- a versioned `postMessage` handshake using a cryptographic per-panel nonce;
+- bounded selection, viewport, panel, dirty-state, and draft-Hash updates without
+  sending the browser's raw Workflow graph as an authoritative source.
 
 To apply this adapter to a sibling Dify checkout:
 

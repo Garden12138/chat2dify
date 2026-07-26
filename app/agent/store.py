@@ -12,6 +12,7 @@ from app.agent.state import (
     AgentRun,
     AgentSession,
     ApprovalStatus,
+    RunConstraints,
     RunPhase,
     WorkspaceVersion,
     validate_run_transition,
@@ -71,8 +72,11 @@ class AgentStore:
                 """
                 CREATE TABLE IF NOT EXISTS agent_sessions (
                     id TEXT PRIMARY KEY,
+                    operation TEXT NOT NULL DEFAULT 'modify',
                     app_id TEXT,
                     app_mode TEXT,
+                    app_name TEXT,
+                    app_description TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL
@@ -160,6 +164,19 @@ class AgentStore:
             )
             _ensure_column(
                 connection,
+                "agent_sessions",
+                "operation",
+                "TEXT NOT NULL DEFAULT 'modify'",
+            )
+            _ensure_column(connection, "agent_sessions", "app_name", "TEXT")
+            _ensure_column(
+                connection,
+                "agent_sessions",
+                "app_description",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            _ensure_column(
+                connection,
                 "agent_runs",
                 "budget_usage_json",
                 "TEXT NOT NULL DEFAULT '{}'",
@@ -180,13 +197,17 @@ class AgentStore:
             connection.execute(
                 """
                 INSERT INTO agent_sessions (
-                    id, app_id, app_mode, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    id, operation, app_id, app_mode, app_name, app_description,
+                    status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session.id,
+                    session.operation,
                     session.app_id,
                     session.app_mode,
+                    session.app_name,
+                    session.app_description,
                     session.status.value,
                     _timestamp(session.created_at),
                     _timestamp(session.updated_at),
@@ -209,12 +230,16 @@ class AgentStore:
             cursor = connection.execute(
                 """
                 UPDATE agent_sessions
-                SET app_id = ?, app_mode = ?, status = ?, updated_at = ?
+                SET operation = ?, app_id = ?, app_mode = ?, app_name = ?,
+                    app_description = ?, status = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 (
+                    session.operation,
                     session.app_id,
                     session.app_mode,
+                    session.app_name,
+                    session.app_description,
                     session.status.value,
                     _timestamp(session.updated_at),
                     session.id,
@@ -341,6 +366,44 @@ class AgentStore:
         if cursor.rowcount == 0:
             raise AgentRecordNotFound(run.id)
         return self.get_run(run.id)
+
+    def update_run_canvas_constraints(
+        self,
+        run_id: str,
+        constraints: RunConstraints,
+    ) -> AgentRun:
+        with self._transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM agent_runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise AgentRecordNotFound(run_id)
+            current = _run_from_row(row)
+            if current.terminal or current.phase == RunPhase.COMMITTING:
+                raise AgentStoreConflict(
+                    "Canvas context cannot change for this Agent Run state."
+                )
+            if (
+                constraints.canvas_context_revision
+                <= current.constraints.canvas_context_revision
+            ):
+                raise AgentStoreConflict(
+                    "Canvas context revision is stale or duplicated."
+                )
+            connection.execute(
+                """
+                UPDATE agent_runs
+                SET constraints_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    _json_dump(constraints.model_dump(mode="json")),
+                    _timestamp(datetime.now(timezone.utc)),
+                    run_id,
+                ),
+            )
+        return self.get_run(run_id)
 
     def list_runs(
         self,
@@ -507,6 +570,10 @@ class AgentStore:
             current = _run_from_row(current_row)
             if current.head_version_id is not None:
                 raise AgentStoreConflict("Agent Run Workspace is already initialized.")
+            if current.phase != run.phase:
+                raise AgentStoreConflict(
+                    "Agent Run phase changed before Workspace initialization."
+                )
             validate_run_transition(current.phase, run.phase)
             _insert_workspace_version(connection, version)
             _update_run_row(connection, run)
@@ -588,6 +655,86 @@ class AgentStore:
             self.get_workspace_version(version.id),
             event,
         )
+
+    def move_workspace_head(
+        self,
+        run: AgentRun,
+        *,
+        expected_head_id: str,
+        target_head_id: str,
+        event_message: str,
+        event_data: dict[str, Any] | None = None,
+    ) -> tuple[AgentRun, WorkspaceVersion, AgentEvent]:
+        if run.head_version_id != target_head_id:
+            raise ValueError("Updated Agent Run must reference the target Workspace head.")
+        with self._transaction(immediate=True) as connection:
+            run_row = connection.execute(
+                "SELECT * FROM agent_runs WHERE id = ?",
+                (run.id,),
+            ).fetchone()
+            if run_row is None:
+                raise AgentRecordNotFound(run.id)
+            current = _run_from_row(run_row)
+            if current.head_version_id != expected_head_id:
+                raise AgentStoreConflict(
+                    "Workspace head changed before Undo moved it."
+                )
+            if current.phase == RunPhase.COMMITTING or current.terminal:
+                raise AgentStoreConflict(
+                    "Workspace head cannot move during Commit or after a terminal result."
+                )
+            current_version_row = connection.execute(
+                "SELECT * FROM agent_workspace_versions WHERE id = ?",
+                (expected_head_id,),
+            ).fetchone()
+            target_version_row = connection.execute(
+                "SELECT * FROM agent_workspace_versions WHERE id = ?",
+                (target_head_id,),
+            ).fetchone()
+            if current_version_row is None:
+                raise AgentRecordNotFound(expected_head_id)
+            if target_version_row is None:
+                raise AgentRecordNotFound(target_head_id)
+            current_version = _workspace_version_from_row(current_version_row)
+            target_version = _workspace_version_from_row(target_version_row)
+            if (
+                current_version.run_id != run.id
+                or target_version.run_id != run.id
+                or current_version.parent_id != target_head_id
+            ):
+                raise AgentStoreConflict(
+                    "Undo target must be the current Workspace version's parent."
+                )
+            validate_run_transition(current.phase, run.phase)
+            _update_run_row(connection, run)
+            invalidated = connection.execute(
+                """
+                UPDATE agent_approvals
+                SET status = ?, resolved_at = ?
+                WHERE run_id = ? AND status IN (?, ?)
+                """,
+                (
+                    ApprovalStatus.EXPIRED.value,
+                    _timestamp(run.updated_at),
+                    run.id,
+                    ApprovalStatus.PENDING.value,
+                    ApprovalStatus.APPROVED.value,
+                ),
+            )
+            event = _append_event_in_connection(
+                connection,
+                run_id=run.id,
+                event_type="workspace.head.moved",
+                phase=run.phase.value,
+                message=event_message,
+                data={
+                    "from_version_id": expected_head_id,
+                    "workspace_version_id": target_head_id,
+                    "invalidated_approval_count": invalidated.rowcount,
+                    **(event_data or {}),
+                },
+            )
+        return self.get_run(run.id), self.get_workspace_version(target_head_id), event
 
     def get_workspace_version(self, version_id: str) -> WorkspaceVersion:
         with self._reader() as connection:
@@ -768,13 +915,104 @@ class AgentStore:
             )
         return self.get_run(run.id), self.get_approval(approval.id), event
 
+    def finish_creation_commit(
+        self,
+        *,
+        run: AgentRun,
+        approval: AgentApproval,
+        session: AgentSession,
+        event_message: str,
+        event_data: dict[str, Any],
+    ) -> tuple[AgentRun, AgentApproval, AgentSession, AgentEvent]:
+        if approval.status != ApprovalStatus.CONSUMED:
+            raise ValueError("A successful Commit must consume its Approval.")
+        if session.id != run.session_id or session.operation != "modify":
+            raise ValueError(
+                "A creation Commit must promote its originating Session to modify mode."
+            )
+        if not session.app_id:
+            raise ValueError("A completed creation Commit requires a Dify app_id.")
+        with self._transaction(immediate=True) as connection:
+            current_run_row = connection.execute(
+                "SELECT * FROM agent_runs WHERE id = ?",
+                (run.id,),
+            ).fetchone()
+            current_approval_row = connection.execute(
+                "SELECT * FROM agent_approvals WHERE id = ?",
+                (approval.id,),
+            ).fetchone()
+            current_session_row = connection.execute(
+                "SELECT * FROM agent_sessions WHERE id = ?",
+                (session.id,),
+            ).fetchone()
+            if current_run_row is None:
+                raise AgentRecordNotFound(run.id)
+            if current_approval_row is None:
+                raise AgentRecordNotFound(approval.id)
+            if current_session_row is None:
+                raise AgentRecordNotFound(session.id)
+            current_run = _run_from_row(current_run_row)
+            current_approval = _approval_from_row(current_approval_row)
+            current_session = _session_from_row(current_session_row)
+            validate_run_transition(current_run.phase, run.phase)
+            if current_approval.status != ApprovalStatus.APPROVED:
+                raise AgentStoreConflict("Commit Approval is no longer approved.")
+            if current_run.head_version_id != run.head_version_id:
+                raise AgentStoreConflict(
+                    "Creation Workspace head changed before result persistence."
+                )
+            if current_approval.workspace_version_id != run.head_version_id:
+                raise AgentStoreConflict(
+                    "Commit Approval does not match the Workspace head."
+                )
+            checkpoint = current_run.commit_result or {}
+            final_result = run.commit_result or {}
+            if (
+                checkpoint.get("kind") != "create"
+                or checkpoint.get("status")
+                != "import_succeeded_recovery_pending"
+                or checkpoint.get("idempotency_key")
+                != final_result.get("idempotency_key")
+            ):
+                raise AgentStoreConflict(
+                    "Creation result checkpoint changed before final persistence."
+                )
+            if current_session.operation != "create":
+                raise AgentStoreConflict(
+                    "Creation Commit Session changed operation mode."
+                )
+            if current_session.app_id not in {None, session.app_id}:
+                raise AgentStoreConflict(
+                    "Creation Session is already bound to a different Dify app."
+                )
+            _update_run_row(connection, run)
+            _update_approval_row(connection, approval)
+            _update_session_row(connection, session)
+            event = _append_event_in_connection(
+                connection,
+                run_id=run.id,
+                event_type="commit.completed",
+                phase=run.phase.value,
+                message=event_message,
+                data=event_data,
+            )
+        return (
+            self.get_run(run.id),
+            self.get_approval(approval.id),
+            self.get_session(session.id),
+            event,
+        )
+
 
 def _session_from_row(row: sqlite3.Row) -> AgentSession:
     return AgentSession.model_validate(
         {
             "id": row["id"],
+            "operation": row["operation"],
             "app_id": row["app_id"],
             "app_mode": row["app_mode"],
+            "app_name": row["app_name"],
+            "app_description": row["app_description"],
             "status": row["status"],
             "created_at": _datetime(row["created_at"]),
             "updated_at": _datetime(row["updated_at"]),
@@ -957,6 +1195,32 @@ def _update_run_row(connection: sqlite3.Connection, run: AgentRun) -> None:
     )
     if cursor.rowcount == 0:
         raise AgentRecordNotFound(run.id)
+
+
+def _update_session_row(
+    connection: sqlite3.Connection,
+    session: AgentSession,
+) -> None:
+    cursor = connection.execute(
+        """
+        UPDATE agent_sessions
+        SET operation = ?, app_id = ?, app_mode = ?, app_name = ?,
+            app_description = ?, status = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            session.operation,
+            session.app_id,
+            session.app_mode,
+            session.app_name,
+            session.app_description,
+            session.status.value,
+            _timestamp(session.updated_at),
+            session.id,
+        ),
+    )
+    if cursor.rowcount == 0:
+        raise AgentRecordNotFound(session.id)
 
 
 def _update_approval_row(
