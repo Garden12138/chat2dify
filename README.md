@@ -1,8 +1,10 @@
 # chat2dify
 
-chat2dify 是一个独立的 FastAPI 组件，用自然语言对话创建、修改、测试运行和发布 Dify 应用。v4.0.0 在保留 v3 入口的同时加入受 Feature Flag 控制的 Builder Agent；它可以作为 Dify Console 中的内嵌面板随 Dify docker compose 一起启动，也可以继续独立运行。
+chat2dify 是一个独立的 FastAPI sidecar，用自然语言创建、修改、测试和审阅 Dify 应用。v4.0.0 新增受 Feature Flag 控制的 Builder Agent：它把每次编辑放在服务端版本化 Workspace 中，通过 Typed Tools、Patch IR 和确定性校验生成可审阅 Diff，只有用户批准后才会写回 Dify 草稿。现有 v3 入口继续保留。
 
-运行时仍然是独立 sidecar：chat2dify 连接本地或局域网内的 Dify Console API，把用户意图转换成可审阅的操作，再由后台任务执行。Dify web 只需要一个轻量适配层来放置抽屉入口和 iframe。核心入口是 `POST /api/assistant/plan` 和 `POST /api/assistant/execute`。
+chat2dify 可以作为 Dify Console 的内嵌面板随 Dify docker compose 启动，也可以独立运行。Dify web 只承载抽屉入口、iframe 和安全画布上下文握手；Snapshot、Workspace、审批、Commit 和执行状态都由 sidecar 管理。
+
+> 第一次使用 v4？从 [v4.0.0 使用手册与实战教程](docs/v4-user-guide.md) 开始。
 
 ## 当前版本
 
@@ -16,6 +18,10 @@ chat2dify 是一个独立的 FastAPI 组件，用自然语言对话创建、修�
 - Test → Inspect → Repair 闭环、Skills、Dify 兼容矩阵和经过真实 Runtime 执行的固定评测集。
 - v4 API 默认关闭；`CHAT2DIFY_AGENT_V4_ENABLED=false` 时继续使用有效的 v3 产品路径。
 - Python 包、FastAPI 元数据、面板 manifest、健康检查、静态资源和 Docker 镜像统一为 `4.0.0`。
+- Release Gate 已完成：完整 Python 测试为 `462 passed, 12 skipped`，本地
+  Dify 1.14.2 验收为 `11 passed, 1 skipped`，Workbench Node 测试为
+  `9 passed`。外部 Provider 的终态成功路径因当前无稳定可用额度而被明确
+  豁免；这不等于 v4 运行时不需要可用的决策模型。
 
 保留的 v3 能力：
 
@@ -49,22 +55,27 @@ chat2dify Dify 风格对话工作台，对话中完成创建、运行、修改�
 
 ![Dify 售后工作流语气修改示例](docs/images/dify-v2-support-workflow-angry-customer.png)
 
-## 工作方式
+## v4 工作方式
 
 典型流程如下：
 
 ```text
-用户自然语言
-  -> /api/assistant/plan
-  -> 缺信息则继续追问
-  -> 生成待确认操作卡片
-  -> 用户确认
-  -> /api/assistant/execute
-  -> 后台任务执行 create / modify / run / publish
-  -> 返回 Dify app_id、草稿 hash、运行结果或错误详情
+用户目标 + Dify Snapshot/画布上下文
+  -> Builder Agent 生成 Goal Plan
+  -> Typed Tool 检查并提出 Patch IR
+  -> 事务性写入版本化 Workspace
+  -> 确定性 Validate / Repair
+  -> 业务 Diff、技术 Diff、风险和测试范围
+  -> 用户审批精确 Workspace 版本
+  -> Commit 服务再次核对 Dify Hash
+  -> 写回 Dify 草稿
 ```
 
-对话助手本身不直接让 LLM 任意调用 Dify。它会把用户意图归类为明确操作，并构造结构化 payload。每个高风险或写入操作都需要用户确认。
+模型不能写原始 Dify DSL、生成最终节点 ID、直接调用 Dify 写 API或批准自己的操作。Workspace Patch 要么整体成功并产生一个新版本，要么完全不移动当前 head。发布仍是 v4 Builder Agent 之外的独立高风险操作。
+
+v3 继续使用 `POST /api/assistant/plan` 和
+`POST /api/assistant/execute` 的“规划 → 确认 → 后台任务”流程；关闭 v4
+Feature Flag 不会移除这些入口。
 
 ## 系统架构图
 
@@ -77,61 +88,74 @@ v4.0.0 Builder Agent 架构与分阶段落地计划见
 阶段任务、验收标准和可复制的 `/goal` 指令见
 [v4.0.0 开发任务清单](docs/tasks.md)。
 Builder Agent 的
+[v4.0.0 使用手册与实战教程](docs/v4-user-guide.md)、
 [配置、审批、保留、恢复与扩展指南](docs/agent-v4-operations.md)、
 [v3 → v4 迁移/回滚步骤](docs/migration-v4.md)和
 [Dify 兼容矩阵](docs/compatibility/dify-v4.md)
 也分别维护为可操作文档。
 
-## 能做什么
+## v4 能做什么
 
-### 创建应用
+### 新建 Workflow 或 Chatflow
 
 可以直接说：
 
 ```text
-创建一个电脑城售后服务工作流，用户描述电脑问题后，生成专业售后回复。
+创建一个名为“电脑城售后助手”的 Workflow。接收用户问题，先分类，
+再生成专业的排查建议；保留清晰的开始和结束输出。
 ```
 
-如果缺少应用名称或需求描述，助手会继续追问。确认后会调用后台创建任务，把生成的 DSL 导入 Dify。
+Agent 会先创建服务端 Workspace，展示 Goal Plan、校验结果、业务 Diff、
+技术 Diff 和风险。只有批准 `commit` 并点击“提交到 Dify”后，Commit
+服务才会导入应用。Chatbot、Completion、Agent 的新建在 v4.0.0 中仍走
+v3。
 
-### 修改草稿
+### 修改现有应用
 
-可以基于当前应用继续说：
+进入 Workflow/Chatflow 画布或现有配置型应用页面，打开 Chat2Dify 后可以说：
 
 ```text
-把回复改得更专业一点，先安抚用户，再给排查步骤。
+只修改当前选中的 LLM 节点：回复先安抚用户，再给三步排查建议，
+不要改动其他节点和连线。
 ```
 
-修改分两步：
+Workflow/Chatflow 修改会接收可信的画布选区、dirty state 和草稿 Hash；
+Chatbot、Completion、Agent 修改读取 Dify 持久化配置，不使用画布上下文。
+高风险变化会先要求独立的“破坏性变更审批”，随后才会出现 Commit 审批。
 
-1. 生成修改预览，不写回 Dify。
-2. 用户确认“应用”后，用预览中的 Plan IR 写回 Dify 草稿。
+### Draft Test、修复和恢复
 
-默认安全模式会阻止大规模删除节点、重写入口/出口、广泛改线等高风险变更。确实需要破坏性重构时，API 可显式传 `allow_destructive=true`。
+Agent 可以提出 Draft Test，界面会显示副作用分类、输入预览和允许次数，
+由用户决定是否批准。运行失败时，结构化观察可进入 Repair 循环，但每次
+修复仍会产生新 Workspace 版本并重新校验。
 
-### 测试运行
+Dify 1.14.2 不能执行未提交的候选 Graph。Workspace 已修改时会返回
+`DRAFT_TEST_CANDIDATE_GRAPH_UNSUPPORTED`；正确流程是审阅并批准 Commit，
+然后通过 Dify 预览或 v3 Draft Run 开启一次新的显式运行。网络、429 或
+5xx 导致所有 Provider 尝试耗尽时，只要预算仍在，Run 会进入
+`interrupted`，可从已持久化检查点继续。
 
-创建或修改后，可以继续输入：
+### 撤销与发布
 
-```text
-运行这个工作流，输入：为什么台式机突然黑屏开不了机？
-```
-
-Workflow 会把自然语言测试文本映射到 `inputs.query`；Chatflow、Chatbot、Agent、Completion 使用各自的 draft run/chat API。
-
-### 发布和触发器
-
-普通创建和修改只更新 Dify 草稿，不会自动发布。发布必须显式执行，并带当前草稿 hash。Webhook、Schedule、Plugin Trigger 工作流需要发布后通过对应触发方式运行，不能用普通 Draft Run 代替。
+- Commit 前撤销：Workspace head 回到父版本，Dify 不发生写入。
+- Workflow/Chatflow Commit 后撤销：创建补偿预览，必须重新审阅和批准。
+- 配置型应用的 Commit 后补偿撤销不在 v4.0.0 范围内。
+- Builder Agent 不自动发布。发布继续使用显式 v3 发布操作，并校验当前
+  草稿 Hash。
 
 ## 支持的应用类型
 
-| Dify 类型 | `app_mode` | 说明 |
-| --- | --- | --- |
-| Workflow | `workflow` | 普通工作流，使用 `start -> ... -> end` |
-| Chatflow | `advanced-chat` | 对话流，使用 `start -> ... -> answer`，支持多轮上下文 |
-| Chatbot | `chat` | Dify 基础聊天助手配置 |
-| Agent | `agent-chat` | Dify Agent 应用配置 |
-| Completion | `completion` | 文本生成应用配置 |
+| Dify 类型 | `app_mode` | v4 新建 | v4 修改 | Workspace 域 |
+| --- | --- | --- | --- | --- |
+| Workflow | `workflow` | 支持 | 支持 | Graph `PatchDocument` |
+| Chatflow | `advanced-chat` | 支持 | 支持 | Graph `PatchDocument` |
+| Chatbot | `chat` | v3 | 支持 | `ConfigPatchDocument` |
+| Completion | `completion` | v3 | 支持 | `ConfigPatchDocument` |
+| Agent | `agent-chat` | v3 | 支持 | `ConfigPatchDocument` |
+
+Graph Patch 与 Config Patch 不能互换。复杂旧草稿可以尽量读取并保留，
+但超出 Capability Catalog 的结构只作为外部依赖或原始元数据处理，不能据此
+宣称支持生成同类新节点。
 
 ## 安装
 
@@ -209,7 +233,16 @@ CHAT2DIFY_AGENT_V4_ENABLED=false
   Session/Run/SSE/Approval API，并在同一个 SQLite 文件中初始化独立的
   `agent_*` 表；不会关闭 v3 API。
 
-如果没有配置任何 Planner key，创建草稿会退化为简单确定性模板；修改预览仍需要至少一个可用 Planner。
+要使用 v4 Workbench，请改为：
+
+```env
+CHAT2DIFY_AGENT_V4_ENABLED=true
+```
+
+并至少配置一个稳定可用的 Planner/Decision Provider。Provider 顺序由
+`PLANNER_DEFAULT_PROVIDER` 和 `PLANNER_FALLBACK_PROVIDERS` 决定。没有任何
+Provider key 时，v3 的简单 Workflow 草稿创建可以退化为确定性模板，但 v4
+Builder Agent 无法完成自然语言多步决策。
 
 ## 运行
 
@@ -263,6 +296,7 @@ rsync -av deploy/dify/web-adapter/web/ ../dify/web/
 
 ```env
 CHAT2DIFY_PUBLIC_BASE_PATH=/chat2dify
+CHAT2DIFY_AGENT_V4_ENABLED=true
 CHAT2DIFY_DIFY_EMAIL=you@example.com
 CHAT2DIFY_DIFY_PASSWORD=your-password
 CHAT2DIFY_NVIDIA_API_KEY=nvapi-...
@@ -301,32 +335,49 @@ http://localhost/chat2dify/
 
 详细说明见 [Dify Compose Deployment](docs/deployment/dify-compose.md)。
 
-## Web UI 使用建议
+## v4 Workbench 快速使用
 
-推荐把信息直接写完整：
+打开 Dify Studio 后：
 
-```text
-创建一个电脑城售后服务工作流。名称叫电脑城售后服务工作流。
-用户输入售后问题后，先安抚，再给排查步骤，最后建议联系门店或维修服务。
-```
+1. 新建 Workflow/Chatflow：点击创建应用区域的 `Chat2Dify 创建`。
+2. 修改 Workflow/Chatflow：进入画布，保存或同步当前画布，再点击顶部
+   `Chat2Dify`；需要定向修改时先选中节点。
+3. 修改 Chatbot/Completion/Agent：进入已有应用配置页，点击 Builder 操作条
+   中的 `Chat2Dify`。
+4. 输入边界清晰的目标，观察时间线、Goal Plan、确定性校验、业务 Diff、
+   风险和技术详情。
+5. 对 Draft Test、破坏性变更和 Commit 分别审批；Commit 审批通过后还需
+   点击“提交到 Dify”。
 
-创建后继续在同一对话里操作：
-
-```text
-运行这个工作流，输入：电脑突然黑屏开不了机了
-```
-
-```text
-修改这个工作流，回复要更简洁，先问电源和显示器，再问是否听到风扇声
-```
+推荐提示词：
 
 ```text
-应用刚才的修改
+只修改我选中的 LLM 节点。保留节点 ID、其他节点、连线、变量和布局；
+把系统提示词改成中文售后专家，输出“判断、排查步骤、升级条件”三个部分。
 ```
+
+完整的安装、三类实战教程、审批、冲突处理和错误码见
+[v4.0.0 使用手册与实战教程](docs/v4-user-guide.md)。
 
 ## API 概览
 
-Web UI 使用这些助手 API：
+v4 Workbench API：
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `POST` | `/api/v4/agent/sessions` | 创建 Builder Session |
+| `POST` | `/api/v4/agent/sessions/{session_id}/messages` | 提交目标并创建 Run |
+| `GET` | `/api/v4/agent/runs/{run_id}` | 轮询 Run、Review 和错误状态 |
+| `GET` | `/api/v4/agent/runs/{run_id}/events` | SSE 时间线，支持游标重连 |
+| `GET` | `/api/v4/agent/runs/{run_id}/diff` | 读取已持久化 Review |
+| `POST` | `/api/v4/agent/runs/{run_id}/approvals/{approval_id}` | 批准或拒绝操作 |
+| `POST` | `/api/v4/agent/runs/{run_id}/commit` | 提交已批准的精确 Workspace 版本 |
+| `POST` | `/api/v4/agent/runs/{run_id}/pause` | 暂停 Run |
+| `POST` | `/api/v4/agent/runs/{run_id}/resume` | 从检查点继续 Run |
+| `POST` | `/api/v4/agent/runs/{run_id}/undo` | 撤销 Workspace 或生成补偿预览 |
+| `POST` | `/api/v4/agent/runs/{run_id}/cancel` | 取消 Run |
+
+v3 Web UI 使用这些助手 API：
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
@@ -414,12 +465,27 @@ CHAT2DIFY_TASK_WORKERS=2
 
 Planner 请求会按 provider 做网络重试和 fallback。NVIDIA 默认使用流式请求；OpenRouter 和 OpenAI-compatible provider 可作为 fallback。若最终失败，后台任务会保留结构化错误详情，Web UI 会尽量显示中文原因，例如 API Key 超限、请求过频、超时或认证失败。
 
+v4 Run、Workspace、Approval 和 Event 使用同一 SQLite 文件中的独立
+`agent_*` 表。`waiting_user`、`waiting_approval`、`paused` 和
+`interrupted` 都是可恢复状态；进程重启不会自动重放 Commit 或 Draft Test。
+v4.0.0 不自动清理这些审计记录，生产环境需要将数据库纳入容量规划和
+WAL-aware 备份。
+
 ## 开发
 
 运行测试：
 
 ```bash
 pytest
+```
+
+v4.0.0 Release Gate 的已记录结果：
+
+```text
+Python repository suite: 462 passed, 12 skipped
+Local Dify 1.14.2 acceptance: 11 passed, 1 skipped
+Workbench Node tests: 9 passed
+Evaluation cases: 10
 ```
 
 运行默认离线、可重复的 Builder Agent 评测并生成机器可读报告：
@@ -441,10 +507,12 @@ node --check app/static/app.js
 app/
   main.py              FastAPI 路由、任务入口和 Dify 操作编排
   assistant.py         对话助手的确定性意图解析和待确认操作生成
-  agent/               Planner、编辑器、规范化、差异和保护逻辑
+  agent/               v3 安全核心与 v4 Runtime/Workspace/Patch/Approval/Commit
+  api/agent_v4.py      v4 Session、Run、SSE、Approval、Commit、Undo API
+  evals/               v4 固定场景、确定性执行器和发布评测报告
   compiler/            Plan IR 到 Dify DSL 的编译
   dify/                Dify Console API client、graph 适配和预检
-  static/              v3 Dify 面板 Web UI
+  static/              v3 对话 UI 与 v4 Agent Workbench
 deploy/dify/           Dify docker compose overlay 和 nginx 面板路由
 deploy/dify/web-adapter/
                        Dify Console 内嵌入口适配层源码副本
@@ -460,5 +528,10 @@ docs/images/           README 截图
 - Dify 面板模式同时支持 Console 抽屉入口和 nginx 子路径入口；默认子路径是 `/chat2dify/`。
 - 创建和修改默认只操作 Dify 草稿；发布需要显式确认。
 - 浏览器端只保存会话上下文和待确认操作，API key 保留在服务端。
+- v4 不接受浏览器提供的原始 Graph 作为 Commit 来源；画布 dirty 或 Hash
+  不一致会阻止 Commit。
+- 外部 Provider 终态验收的发布豁免不是运行时能力替代。正式使用 v4 时应
+  配置稳定 Provider，并自行确认费用、限流和数据传输策略。
 - 运行 Dify docker compose 时，优先使用 nginx 暴露的 `/console/api` 地址，而不是容器内部的 `5001`。
-- README 中的截图来自 Dify 风格 Web UI 和 Dify 生成结果。
+- 当前 README 截图主要来自 v3 Dify 风格 UI 和 Dify 生成结果；v4 的实际
+  操作界面以 Agent Workbench 的 Goal Plan、时间线、Diff 和审批栏为准。

@@ -44,6 +44,7 @@ Add chat2dify-specific variables to `dify/docker/.env`:
 
 ```env
 CHAT2DIFY_PUBLIC_BASE_PATH=/chat2dify
+CHAT2DIFY_AGENT_V4_ENABLED=true
 CHAT2DIFY_DIFY_CONSOLE_WEB_BASE=http://localhost
 
 CHAT2DIFY_DIFY_EMAIL=you@example.com
@@ -68,6 +69,12 @@ CHAT2DIFY_OPENAI_COMPATIBLE_RESPONSE_FORMAT=true
 `CHAT2DIFY_DIFY_CONSOLE_API_BASE` defaults to `http://api:5001/console/api`,
 which uses Dify's internal compose network. Override it only if your Dify API
 service has a different name or route.
+
+The overlay defaults `CHAT2DIFY_AGENT_V4_ENABLED` to `false`. Set it to `true`
+only when enabling the v4 Workbench; v3 routes remain available either way.
+The v4 Builder Agent also needs at least one stable configured decision
+Provider. A release-acceptance waiver for an unavailable or rate-limited test
+Provider is not a providerless runtime mode.
 
 ## Start
 

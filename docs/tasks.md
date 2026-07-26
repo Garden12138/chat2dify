@@ -1,7 +1,7 @@
 # Chat2Dify v4.0.0 Development Tasks
 
 > - Branch: `v4.0.0`
-> - Overall status: `in_progress`
+> - Overall status: `completed`
 > - Architecture:
 >   [v4 Agent architecture and implementation plan](architecture/v4-agent-architecture-and-implementation-plan.md)
 > - Agent instructions: [`AGENTS.md`](../AGENTS.md)

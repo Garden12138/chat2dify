@@ -5,6 +5,8 @@ troubleshooting, compatibility, and extension workflows for the v4 Builder
 Agent. The architecture remains defined by
 [`architecture/v4-agent-architecture-and-implementation-plan.md`](architecture/v4-agent-architecture-and-implementation-plan.md);
 the implementation ledger is [`tasks.md`](tasks.md).
+For installation and end-user walkthroughs, see
+[`v4-user-guide.md`](v4-user-guide.md).
 
 ## Enablement and configuration
 
