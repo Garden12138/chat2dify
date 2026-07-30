@@ -276,9 +276,244 @@ Workflow 新建模式。标题应显示“新建工作流”，状态显示
 重试。Dify 1.14.2 不按 `Idempotency-Key` 去重，直接重试可能创建重复应用；
 此时先在 Dify 中人工核对，再决定是否新建 Session。
 
-## 6. 教程二：定向修改 Workflow/Chatflow
+## 6. 创建场景案例库
 
-### 6.1 准备画布
+### 6.1 先选 Workflow 还是 Chatflow
+
+| 需求 | 推荐类型 | 原因 |
+| --- | --- | --- |
+| 一次提交输入，返回结构化处理结果 | Workflow | 适合工单、文档、分类、抽取和批处理 |
+| 围绕 `sys.query` 连续对话 | Chatflow | 适合客服、导购和需要会话变量的场景 |
+| 新建 Chatbot、Completion 或 Agent | v3 创建入口 | v4.0.0 只支持修改已有配置型应用 |
+
+第一次使用建议先创建一个没有 HTTP、Tool、人工通知和文件输入的 Workflow。
+这样只涉及本地路由和模型费用，Diff 与审批最容易理解。
+
+### 6.2 创建目标的通用写法
+
+一个容易成功、容易审阅的创建目标通常包含六部分：
+
+```text
+创建一个名为“<应用名称>”的 Workflow。
+
+输入：
+- <字段名>：<类型>，<是否必填>，<业务含义>
+
+处理：
+1. <第一步>
+2. <第二步>
+3. <分支或异常处理>
+
+输出：
+- <输出字段>：<含义或格式>
+
+资源：
+- 只使用当前 Dify 中已经可用的模型、知识库或工具。
+
+约束：
+- 不要添加未明确要求的 HTTP、Tool、通知或发布操作。
+- 保留可读的节点名称，并在 Review 中说明每个新增节点。
+```
+
+不需要在目标里写节点 ID、Dify DSL、Graph JSON、数据集 ID 或 Provider
+内部标识。Agent 应先通过 Capability 搜索读取真实资源；最终节点 ID 由服务端
+生成。
+
+### 6.3 第一次使用推荐：售后工单分流
+
+这个案例覆盖 Start、条件分支、LLM、End、Diff、审批和 Commit，但没有外部
+网络副作用，适合作为首次验收：
+
+```text
+创建一个名为“售后工单分流”的 Workflow。
+
+输入：
+- query：paragraph，必填，表示用户提交的售后问题。
+
+处理：
+1. 判断 query 是否包含“退款”“退货”“重复扣款”或“无法付款”等交易关键词。
+2. 命中时进入“交易问题”分支，生成包含问题分类、需要核对的信息和下一步建议的回复。
+3. 未命中时进入“普通售后”分支，生成礼貌、简洁、最多三步的处理建议。
+
+输出：
+- answer：最终给用户的中文回复。
+
+约束：
+- 只使用 if-else、LLM 和 End 节点。
+- 不添加 HTTP、Tool、知识库、人工通知或发布操作。
+- 不编造订单号、金额、退款政策或处理结果。
+```
+
+Review 中至少应看到：
+
+| 检查项 | 预期 |
+| --- | --- |
+| Goal Plan | 读取能力、建立两条分支、校验、生成 Diff |
+| Graph | 一个 Start、一个条件节点、两条回复路径和对应 End |
+| 输入 | `query` 为必填文本 |
+| 输出 | 每条路径都能到达 End，并返回 `answer` |
+| 风险 | 可能有模型费用，但不应出现 HTTP、Tool 或通知副作用 |
+| Commit 前 | Dify 中还没有这个新应用 |
+
+### 6.4 案例：用户反馈分析并输出 JSON
+
+适合验证结构化提示词和明确的输出契约：
+
+```text
+创建一个名为“用户反馈分析”的 Workflow。
+
+输入：
+- feedback：paragraph，必填，表示一条用户反馈。
+
+处理：
+1. 分析情绪是 positive、neutral 还是 negative。
+2. 提取 topic、summary 和最多三个 action_items。
+3. 如果原文信息不足，对不确定字段使用 null，不要猜测。
+
+输出：
+- analysis：只返回一个合法 JSON 对象，格式为：
+  {"sentiment":"positive|neutral|negative","topic":"string|null",
+   "summary":"string","action_items":["string"]}
+
+约束：
+- 不输出 Markdown 代码块或 JSON 之外的解释。
+- 不添加外部 HTTP、Tool、知识库或通知节点。
+```
+
+审阅时确认 LLM Prompt 中包含完整 JSON 契约，End 引用的是 LLM 的真实输出，
+而不是未定义变量。Draft Test 的样例可使用：
+
+```text
+feedback = 物流很快，但包装破损，客服已经答应补发。
+```
+
+### 6.5 案例：基于知识库回答维修问题
+
+前置条件：Dify 中已经存在并允许当前租户使用的维修知识库。目标中写准确的
+知识库名称，让 Agent 从 Capability Snapshot 中查找；不要手写或猜测
+`dataset_id`。
+
+```text
+创建一个名为“维修手册问答”的 Workflow。
+
+输入：
+- query：paragraph，必填，表示用户的维修问题。
+
+处理：
+1. 从 Dify 中名为“repair-manual”的已存在知识库检索与 query 最相关的内容。
+2. 只依据检索结果生成中文答案。
+3. 没有足够依据时明确回复“维修手册中没有找到足够信息”，不要编造。
+
+输出：
+- answer：维修建议。
+
+约束：
+- 知识库必须来自当前 Run 固定的可用资源。
+- 不修改环境变量、Credential 或知识库内容。
+- 不添加 HTTP、Tool、通知或发布操作。
+```
+
+Review 中应出现 `knowledge-retrieval` 节点、来自真实 Capability 的数据集绑定、
+检索结果到 LLM 的引用，以及 LLM 到 End 的可达路径。
+
+### 6.6 案例：上传文件并生成处理摘要
+
+前置条件：用户需要在 Draft Test 时提供真实文件，或使用已经批准的测试
+Fixture；系统不会伪造文件。
+
+```text
+创建一个名为“维修报告摘要”的 Workflow。
+
+输入：
+- query：paragraph，必填，表示希望从文件中确认的问题。
+- files：file-list，必填，表示一份或多份维修报告。
+
+处理：
+1. 使用 document-extractor 提取 files 中的文本。
+2. 根据 query 从提取文本中生成摘要、风险项和后续动作。
+3. 文件中没有的信息标记为“未提供”，不能编造。
+
+输出：
+- answer：包含“摘要、风险项、后续动作”三个部分。
+
+约束：
+- 不把完整文件内容写入公开 Trace。
+- 不添加 HTTP、Tool、通知或发布操作。
+```
+
+如果点击 Draft Test 时没有提供文件，出现
+`DRAFT_TEST_FILE_REQUIRED` 是预期行为。上传或选择明确的测试 Fixture 后，再
+为精确输入和运行次数审批。
+
+### 6.7 案例：低置信度转人工
+
+前置条件：Dify 中已经配置可用的人工处理方式。`human-input` 属于外部副作用，
+Draft Test 和 Commit 前要重点审阅交付方式、表单内容、超时和用户动作。
+
+```text
+创建一个名为“售后问答人工兜底”的 Chatflow。
+
+处理：
+1. 根据 sys.query 生成售后答复，并在答案中明确给出 confidence=high 或 confidence=low。
+2. confidence=high 时直接返回答案。
+3. confidence=low 时进入人工审核，提供“批准”和“退回”两个动作。
+4. 人工处理后向用户返回清晰的处理状态，不暴露内部备注。
+
+约束：
+- 只使用当前 Dify 中已配置的人工交付方式。
+- 不自动发送未在 Review 中显示的通知。
+- Draft Test 每次都需要明确审批。
+```
+
+Review 中应该把人工节点标为外部副作用。若交付方式、接收人、表单或超时不符合
+预期，拒绝审批并修改目标，不要先 Commit 再修。
+
+### 6.8 案例：带会话变量的 Chatflow
+
+```text
+创建一个名为“会员售后客服”的 Chatflow。
+
+会话变量：
+- customer_tier：string，默认值 standard，表示当前会员等级。
+
+处理：
+1. 使用 sys.query 作为当前用户问题。
+2. 回答时结合 customer_tier 调整服务说明，但不能承诺不存在的权益。
+3. 信息不足时追问一个最必要的问题。
+
+输出：
+- 使用 Answer 节点返回自然语言回复。
+
+约束：
+- 保留 customer_tier，后续修改不能把它替换成环境变量。
+- 不添加 HTTP、Tool、通知或发布操作。
+```
+
+Chatflow 使用 `answer` 而不是 Workflow 的 `end`。Review 中确认
+`customer_tier` 是类型明确的会话变量，其他已有变量没有被删除。
+
+### 6.9 模糊目标和可审阅目标的对比
+
+不推荐：
+
+```text
+帮我做一个智能客服工作流，要专业一点。
+```
+
+推荐：
+
+```text
+创建一个名为“订单售后分类”的 Workflow。
+输入 query 为必填文本；先区分退款、物流和其他问题，再分别生成最多三步的中文建议；
+最终输出 answer。不要添加 HTTP、Tool、知识库或通知节点，不要编造订单状态。
+```
+
+两者的差别不是文字长短，而是后者明确了应用类型、输入、处理、输出、不变量和
+副作用边界。
+
+## 7. 教程二：定向修改 Workflow/Chatflow
+
+### 7.1 准备画布
 
 1. 在 Dify 打开目标 Workflow 或 Chatflow。
 2. 保存或同步当前画布，避免 dirty state。
@@ -289,7 +524,7 @@ Workflow 新建模式。标题应显示“新建工作流”，状态显示
 浏览器只传递经过 origin、nonce 和协议校验的选择信息、viewport、dirty
 state 和草稿 Hash；原始浏览器 Graph 不是 Commit 来源。
 
-### 6.2 输入窄范围目标
+### 7.2 输入窄范围目标
 
 ```text
 只修改当前选中的 LLM 节点。
@@ -302,7 +537,7 @@ state 和草稿 Hash；原始浏览器 Graph 不是 Commit 来源。
 避免只写“优化一下”。明确“只改什么”和“必须保留什么”，有助于 Diff
 保持可审阅。
 
-### 6.3 处理 Draft Test
+### 7.3 处理 Draft Test
 
 Agent 可能提出 Draft Test 审批卡片，其中包括：
 
@@ -322,7 +557,7 @@ Agent 可能提出 Draft Test 审批卡片，其中包括：
 - 审阅并 Commit 后，应通过 Dify 原生预览或 v3 Draft Run 新开一次显式
   运行，验证实际草稿。
 
-### 6.4 Commit 冲突
+### 7.4 Commit 冲突
 
 点击“提交到 Dify”前，系统会检查：
 
@@ -340,7 +575,7 @@ Dify 画布 Hash 与本次 Run 的基准 Hash 不一致。
 DIFY_DRAFT_HASH_CONFLICT
 ```
 
-## 7. 教程三：修改 Chatbot、Completion 或 Agent
+## 8. 教程三：修改 Chatbot、Completion 或 Agent
 
 1. 打开已经存在的配置型应用。
 2. 在配置页点击 Chat2Dify Builder 操作条。
@@ -372,7 +607,7 @@ v4.0.0 不支持：
   v3 保留的配置预览路径。
 - 在 Builder Agent 循环中自动发布。
 
-## 8. 审批规则
+## 9. 审批规则
 
 | 审批 | 何时出现 | 批准前检查 |
 | --- | --- | --- |
@@ -394,9 +629,9 @@ expires_at
 因此不要把“批准过一次”理解为对后续任何版本的授权。新 Patch、新 Repair
 或 Undo 都可能产生新版本，并使旧审批失效。
 
-## 9. 暂停、恢复、取消与撤销
+## 10. 暂停、恢复、取消与撤销
 
-### 9.1 暂停和恢复
+### 10.1 暂停和恢复
 
 - `waiting_user`：在输入框补充信息，继续同一个 Run。
 - `paused`：点击“继续”从检查点恢复。
@@ -409,7 +644,7 @@ expires_at
 恢复不会自动重放已经开始的 Commit、Draft Test 或其他副作用操作；遇到
 外部结果不明确时先人工核对。
 
-### 9.2 撤销
+### 10.2 撤销
 
 - Commit 前：移动 Workspace head 到父版本，并使旧审批失效。
 - Workflow/Chatflow Commit 后：创建新的补偿 Run/预览，重新审阅和批准
@@ -418,7 +653,7 @@ expires_at
 
 关闭 Feature Flag 也不会撤销已经完成的 Dify 写入。
 
-## 10. 常见错误与处理
+## 11. 常见错误与处理
 
 | 错误码或提示 | 含义 | 处理 |
 | --- | --- | --- |
@@ -440,7 +675,7 @@ expires_at
 版本。不要把原始 Authorization、Cookie、环境变量值或未脱敏 Dify 响应
 复制到问题单或外部模型。
 
-## 11. 安全使用清单
+## 12. 安全使用清单
 
 提交前确认：
 
@@ -457,7 +692,7 @@ expires_at
 工作流 Prompt、代码、插件元数据、数据集内容、HTTP 响应和执行错误都应视为
 不可信数据，而不是给 Builder Agent 的系统指令。
 
-## 12. 回滚 v4
+## 13. 回滚 v4
 
 1. 停止接收新的 v4 工作。
 2. 让无副作用操作完成，或显式暂停/取消；不要自动重试正在进行的 Commit
@@ -474,7 +709,7 @@ expires_at
 `agent_*` 表可以保留用于审计和以后重新启用；不需要做 schema downgrade。
 如果已批准写入 Dify，关闭 Feature Flag 不会回滚该草稿。
 
-## 13. API 快速参考
+## 14. API 快速参考
 
 UI 已封装正常使用所需调用。集成方可使用：
 
@@ -499,7 +734,7 @@ SSE 支持 `Last-Event-ID` 和 `after_seq`，事件序号在每个 Run 内严格
 任何写入集成都必须提交服务端持久化的 `workspace_version_id` 和
 `approval_id`，不能上传任意替代 Plan。
 
-## 14. 延伸文档
+## 15. 延伸文档
 
 - [README](../README.md)：项目入口、配置、部署和 API 总览
 - [Builder Agent 运维指南](agent-v4-operations.md)：保留、备份、恢复、评测和扩展
