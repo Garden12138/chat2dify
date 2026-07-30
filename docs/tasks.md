@@ -5,7 +5,7 @@
 > - Architecture:
 >   [v4 Agent architecture and implementation plan](architecture/v4-agent-architecture-and-implementation-plan.md)
 > - Agent instructions: [`AGENTS.md`](../AGENTS.md)
-> - Last updated: 2026-07-26
+> - Last updated: 2026-07-30
 
 ## 1. How to use this file
 
@@ -42,6 +42,7 @@ Rules:
 | Phase 3 | Draft Test, Inspect, and Repair | Phase 2 | `completed` |
 | Phase 4 | Config apps, Skills, evals, and hardening | Phase 3 | `completed` |
 | Release gate | v4.0.0 release readiness | Phases 0–3; selected Phase 4 gates | `completed` |
+| Full user-journey audit | Real v4.0.0 end-to-end user scenarios | Release gate | `completed` |
 
 Dependency flow:
 
@@ -1171,6 +1172,116 @@ Release Gate `/goal` must still re-run and sign off every item below.
 | Ambiguous create import | A real Dify 1.14.2 probe submitted identical DSL twice with one `Idempotency-Key` and received two distinct App IDs; both temporary apps were deleted. Checkpoint/receipt and fail-closed retry behavior are deterministic and tested | Verified live upstream non-idempotency/manual recovery boundary | With no returned app/import ID, operator reconciliation is required because upstream exposes no safe correlation primitive |
 | Full environment/package | `462 passed, 12 skipped`; 9 Node Workbench tests, reproducible eval, syntax/compile checks, wheel inspection, image rebuild, and container health pass | Verified | None |
 
+## 10A. Full user-journey acceptance audit — 2026-07-30
+
+Status: `completed`
+
+Dependencies: v4.0.0 Release Gate `completed`
+
+Outcome: exercise v4.0.0 as a user would across the real local deployment,
+including the browser-hosted Workbench and authoritative Dify state, while
+retaining deterministic regression coverage and cleaning up isolated fixtures.
+
+### Selected task coverage
+
+- [x] **AUDIT-01 — Environment and safety baseline**
+  - Verify branch, clean-worktree baseline, version/feature-flag state, Dify
+    compatibility, and isolated-fixture cleanup controls.
+- [x] **AUDIT-02 — Workflow and Chatflow create journeys**
+  - Create from the v4 Runtime, review before import, approve, commit, verify
+    persisted Dify state, retry idempotently, and delete the temporary apps.
+- [x] **AUDIT-03 — Workflow and Chatflow modify journeys**
+  - Observe, selection-bound Patch, Validate, Review, approve, Commit, verify
+    unrelated preservation, exercise conflict protection and compensating Undo.
+- [x] **AUDIT-04 — Configured-app modify journeys**
+  - Exercise Chatbot, Completion, and Dify Agent inspect/patch/review/approval/
+    commit paths and verify authoritative readback.
+- [x] **AUDIT-05 — Draft Test, Inspect, and Repair boundaries**
+  - Run the real persisted Draft path, verify candidate-Graph fail-closed
+    behavior, and run deterministic workspace-aware repair scenarios.
+- [x] **AUDIT-06 — Workbench and recovery journeys**
+  - Verify the signed-in Dify-hosted Workbench entry and context handshake,
+    SSE reconnect/deduplication, cancellation, interruption/resume, approval
+    version binding, and feature-flag-off v3 fallback.
+- [x] **AUDIT-07 — Regression, evaluation, and evidence**
+  - Run focused suites first, then the full repository suite, Workbench tests,
+    deterministic evaluations, compile/syntax checks, and `git diff --check`.
+  - Record exact results, defects/fixes, limitations, and cleanup evidence.
+
+### Completion record
+
+- Started: 2026-07-30
+- Completed: 2026-07-30
+- Real environment:
+  - Started from a clean `v4.0.0` worktree. The running images were
+    `chat2dify:4.0.0`, `langgenius/dify-web:1.14.2-chat2dify`, and Dify API
+    `1.14.2`; health reported App DSL `0.6.0`.
+  - The Sidecar was healthy with `CHAT2DIFY_AGENT_V4_ENABLED=false`. Browser
+    acceptance temporarily recreated only the Sidecar with the flag enabled,
+    then restored and independently verified the default `false` state and
+    healthy endpoint.
+  - Localhost Dify acceptance:
+    `CHAT2DIFY_LIVE_DIFY_ACCEPTANCE=1 .venv/bin/python -m pytest -q
+    tests/test_agent_phase1a_live.py tests/test_agent_phase2_live.py
+    tests/test_agent_release_live.py` → `11 passed, 1 skipped` in `43.39s`.
+    The skip was the separately gated real-Provider case.
+  - The real cases covered Workflow/Chatflow create, review-before-import,
+    Approval and Commit, duplicate Commit, existing-app classification Patch,
+    Hash conflict, selected-node Prompt Patch, compensating Undo, Chatbot/
+    Completion/Agent Config Commit, persisted Draft Run, candidate-Graph
+    fail-closed behavior, and Dify's non-idempotent import boundary.
+  - Every test fixture used a unique name and cleanup verified deletion. The
+    signed-in Dify application list returned to “未找到应用”. Two additional
+    browser-only Chatbot/Workflow fixtures were also deleted by their exact
+    App IDs and verified absent.
+- Signed-in browser acceptance:
+  - With v4 enabled, selecting the Workflow application category and opening
+    “Chat2Dify 创建” rendered the Builder Workbench with Timeline, Goal Plan,
+    business Diff, Approval, Draft Test/repair, and technical-detail regions.
+    The unfiltered create entry intentionally retained the compatible v3 path
+    because no concrete app mode was selected.
+  - A real Chatbot configuration page exposed its Builder entry and rendered
+    “配置应用不使用画布上下文”.
+  - A real Workflow canvas opened the Builder with a synchronized draft Hash.
+    After selecting the LLM node, the Workbench context changed from zero
+    selected nodes to `1 个节点 · 0 条连线`. Visual inspection confirmed the
+    v4 drawer was not obscured by the legacy shell.
+  - After restoring the flag to `false`, the same direct create URL rendered
+    the v3 workbench, confirming rollout rollback behavior.
+- Deterministic verification:
+  - Agent domain/store/registry and Phase 1–4/API focused suite:
+    `88 passed` in `60.47s`.
+  - Full repository suite: `462 passed, 12 skipped` in `61.30s`; all skips
+    were explicitly gated localhost Dify or real-Provider cases. Pytest
+    reported the existing upstream Starlette `TestClient` deprecation warning.
+  - Workbench Node tests: `9 passed`.
+  - Runtime evaluation: all release gates passed across ten cases. Reviewable
+    validity `100%`, goal completion `90%`, unrelated preservation `100%`,
+    designated auto-repair `100%`, readable failure Trace `100%`, unapproved
+    writes `0`, and incorrect conflict overwrites `0`. The `/tmp` report was
+    byte-identical to `app/evals/reports/phase4-release.json`.
+  - `.venv/bin/python -m compileall -q app tests`, three Workbench/legacy
+    JavaScript syntax checks, adapter source synchronization, and
+    `git diff --check` passed.
+- Defects/fixes:
+  - No product-code defect was reproduced. This audit changed only the task
+    ledger and did not broaden v4.0.0 scope.
+- Limitations:
+  - The Dify Web source checkout currently has no `node_modules`; the focused
+    host-component command stopped before collection with `vp: command not
+    found`, so this audit does not claim a fresh component-suite pass. The
+    adapter files are byte-synchronized with the Dify checkout, and the
+    current production Web image was covered through signed-in browser
+    acceptance.
+  - The deployed Sidecar has no configured Planner key. Real external-Provider
+    success was therefore not re-run; deterministic providers exercised the
+    complete decision loop, while real Dify exercised the authoritative
+    Snapshot, Workspace, Approval, Commit, Draft Run, conflict, and cleanup
+    boundaries.
+  - Dify `1.14.2` still cannot execute an uncommitted candidate Graph. The
+    built-in adapter correctly fails closed; real post-repair execution
+    requires approved Commit followed by a new explicit Run.
+
 ## 11. Deferred backlog
 
 These items are intentionally outside the current v4.0.0 plan unless the user
@@ -1222,3 +1333,4 @@ the plan.
 | 2026-07-26 | Release Gate | Treat an import outcome without an App/Import ID as ambiguous and never auto-retry it | A real Dify 1.14.2 probe submitted identical DSL twice with one `Idempotency-Key` and received two distinct App IDs; upstream does not provide client-key idempotency or a safe correlation lookup | `tests/test_agent_release_live.py`, `app/agent/commit.py`, `docs/compatibility/dify-v4.md` |
 | 2026-07-26 | Release Gate | Interrupt rather than terminally fail a Run when every exhausted decision-Provider attempt is retryable and model-call budget remains | A real NVIDIA Run completed Inspect, then encountered one connection error and two HTTP 503 responses; the accepted Tool checkpoint and four calls of budget remained safe to resume explicitly | `app/agent/runtime.py`, `tests/test_agent_phase1a.py`, architecture Section 5.2 |
 | 2026-07-26 | Release Gate | Waive successful terminal acceptance for the currently configured external Providers | The user has no usable OpenAI-compatible key and the free NVIDIA endpoint is rate/timeout constrained; both failure paths were exercised live, neither Provider is a required v4.0.0 production dependency, and all deterministic/live Dify release gates pass | `docs/tasks.md`, `tests/test_agent_release_live.py` |
+| 2026-07-30 | Full user-journey audit | Combine destructive localhost-only API fixtures with signed-in production-image browser acceptance, then restore the v4 flag and verify exact fixture deletion | Covers authoritative Dify state and actual user entry/handshake behavior without publishing, retaining test data, or depending on an unconfigured external Planner | `docs/tasks.md`, existing live/evaluation/Workbench tests |
