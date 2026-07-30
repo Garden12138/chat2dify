@@ -6,7 +6,7 @@ services:
     image: ${DIFY_WEB_IMAGE:-langgenius/dify-web:1.14.2-chat2dify}
 
   chat2dify:
-    image: ${CHAT2DIFY_IMAGE:-chat2dify:4.0.0}
+    image: ${CHAT2DIFY_IMAGE:-chat2dify:5.0.0}
     build:
       context: ../../chat2dify
       dockerfile: docker/Dockerfile
@@ -14,6 +14,11 @@ services:
     environment:
       CHAT2DIFY_PUBLIC_BASE_PATH: ${CHAT2DIFY_PUBLIC_BASE_PATH:-/chat2dify}
       CHAT2DIFY_AGENT_V4_ENABLED: ${CHAT2DIFY_AGENT_V4_ENABLED:-false}
+      CHAT2DIFY_AI_STUDIO_V5_ENABLED: ${CHAT2DIFY_AI_STUDIO_V5_ENABLED:-false}
+      CHAT2DIFY_STUDIO_SIGNING_SECRET: ${CHAT2DIFY_STUDIO_SIGNING_SECRET:-}
+      CHAT2DIFY_STUDIO_DATABASE_URL: ${CHAT2DIFY_STUDIO_DATABASE_URL:-}
+      CHAT2DIFY_STUDIO_ALLOWED_ORIGINS: ${CHAT2DIFY_STUDIO_ALLOWED_ORIGINS:-http://localhost}
+      CHAT2DIFY_STUDIO_TOKEN_TTL_SECONDS: ${CHAT2DIFY_STUDIO_TOKEN_TTL_SECONDS:-900}
       CHAT2DIFY_TASK_DB: /app/data/tasks.sqlite3
       CHAT2DIFY_TASK_WORKERS: ${CHAT2DIFY_TASK_WORKERS:-2}
       DIFY_SOURCE_DIR: /dify

@@ -152,6 +152,89 @@ def test_agent_v4_feature_flag_rejects_invalid_values(tmp_path: Path) -> None:
         )
 
 
+def test_ai_studio_v5_defaults_off_and_requires_a_strong_signing_secret(
+    tmp_path: Path,
+) -> None:
+    default_settings = Settings.from_env(
+        {"DIFY_SOURCE_DIR": "../dify"},
+        project_root=tmp_path,
+        validate_dify=False,
+    )
+
+    assert default_settings.ai_studio_v5_enabled is False
+    assert default_settings.studio_signing_secret is None
+
+    with pytest.raises(
+        ValueError,
+        match="CHAT2DIFY_STUDIO_SIGNING_SECRET must contain at least 32",
+    ):
+        Settings.from_env(
+            {
+                "DIFY_SOURCE_DIR": "../dify",
+                "CHAT2DIFY_AI_STUDIO_V5_ENABLED": "true",
+                "CHAT2DIFY_STUDIO_SIGNING_SECRET": "short",
+            },
+            project_root=tmp_path,
+            validate_dify=False,
+        )
+
+
+def test_ai_studio_v5_storage_origin_and_token_settings(tmp_path: Path) -> None:
+    settings = Settings.from_env(
+        {
+            "DIFY_SOURCE_DIR": "../dify",
+            "DIFY_CONSOLE_WEB_BASE": "https://dify.example",
+            "CHAT2DIFY_AI_STUDIO_V5_ENABLED": "true",
+            "CHAT2DIFY_STUDIO_SIGNING_SECRET": "s" * 48,
+            "CHAT2DIFY_STUDIO_DATABASE_URL": "sqlite:///runtime/studio.sqlite3",
+            "CHAT2DIFY_STUDIO_ALLOWED_ORIGINS": (
+                "https://dify.example, https://studio.example"
+            ),
+            "CHAT2DIFY_STUDIO_TOKEN_TTL_SECONDS": "600",
+        },
+        project_root=tmp_path,
+        validate_dify=False,
+    )
+
+    assert settings.ai_studio_v5_enabled is True
+    assert settings.studio_database_url == (
+        f"sqlite:///{(tmp_path / 'runtime/studio.sqlite3').resolve()}"
+    )
+    assert settings.studio_allowed_origins == [
+        "https://dify.example",
+        "https://studio.example",
+    ]
+    assert settings.studio_token_ttl_seconds == 600
+
+
+def test_ai_studio_v5_rejects_unsafe_origin_and_database_scheme(
+    tmp_path: Path,
+) -> None:
+    common = {
+        "DIFY_SOURCE_DIR": "../dify",
+        "CHAT2DIFY_AI_STUDIO_V5_ENABLED": "true",
+        "CHAT2DIFY_STUDIO_SIGNING_SECRET": "s" * 48,
+    }
+    with pytest.raises(ValueError, match="HTTP\\(S\\) origins"):
+        Settings.from_env(
+            {
+                **common,
+                "CHAT2DIFY_STUDIO_ALLOWED_ORIGINS": "https://dify.example/path",
+            },
+            project_root=tmp_path,
+            validate_dify=False,
+        )
+    with pytest.raises(ValueError, match="sqlite:/// or postgresql://"):
+        Settings.from_env(
+            {
+                **common,
+                "CHAT2DIFY_STUDIO_DATABASE_URL": "mysql://db/studio",
+            },
+            project_root=tmp_path,
+            validate_dify=False,
+        )
+
+
 def test_public_base_path_is_normalized(tmp_path: Path) -> None:
     settings = Settings.from_env(
         {

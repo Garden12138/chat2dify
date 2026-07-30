@@ -1,6 +1,6 @@
 # Dify Compose Deployment
 
-chat2dify v4.0.0 can run as an independent component beside Dify, be exposed
+chat2dify v5.0.0 can run as an independent component beside Dify, be exposed
 inside the same nginx entry point at `/chat2dify/`, and be opened from embedded
 Dify Console drawer entries.
 
@@ -45,6 +45,11 @@ Add chat2dify-specific variables to `dify/docker/.env`:
 ```env
 CHAT2DIFY_PUBLIC_BASE_PATH=/chat2dify
 CHAT2DIFY_AGENT_V4_ENABLED=true
+CHAT2DIFY_AI_STUDIO_V5_ENABLED=true
+CHAT2DIFY_STUDIO_SIGNING_SECRET=replace-with-at-least-32-random-characters
+CHAT2DIFY_STUDIO_ALLOWED_ORIGINS=http://localhost
+# Optional team deployment:
+# CHAT2DIFY_STUDIO_DATABASE_URL=postgresql://user:password@postgres:5432/chat2dify
 CHAT2DIFY_DIFY_CONSOLE_WEB_BASE=http://localhost
 
 CHAT2DIFY_DIFY_EMAIL=you@example.com
@@ -75,6 +80,12 @@ only when enabling the v4 Workbench; v3 routes remain available either way.
 The v4 Builder Agent also needs at least one stable configured decision
 Provider. A release-acceptance waiver for an unavailable or rate-limited test
 Provider is not a providerless runtime mode.
+
+The overlay also defaults `CHAT2DIFY_AI_STUDIO_V5_ENABLED` to `false`. Enabling
+it requires a unique 32+ character `CHAT2DIFY_STUDIO_SIGNING_SECRET`. Studio
+verifies the current Dify browser session server-side and binds its short-lived
+session to the exact allowed Origin; browser-supplied user, role, project, app,
+or environment fields do not grant access.
 
 ## Start
 

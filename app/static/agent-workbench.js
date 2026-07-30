@@ -6,8 +6,11 @@ import {
   approvalMatchesVisibleVersion,
   commitBlockReason,
   isAgentWorkbenchSupported,
+  isContextNonce,
   parseSse,
   reviewDiffRows,
+  resolveAgentAppMode,
+  requiresCanvasContext,
   runControlState,
   supportsCanvasContext,
   testPresentation,
@@ -19,7 +22,7 @@ const config = window.CHAT2DIFY_CONFIG || {};
 const basePath = normalizeBasePath(config.basePath || "");
 const params = new URLSearchParams(window.location.search);
 const intent = (params.get("intent") || "").toLowerCase();
-const appMode = params.get("app_mode") || "";
+const appMode = resolveAgentAppMode(intent, params.get("app_mode"));
 const appId = params.get("app_id") || "";
 const appName = params.get("app_name") || "";
 const embedded = ["1", "true", "yes"].includes(
@@ -30,7 +33,7 @@ const enabled = isAgentWorkbenchSupported({
   intent,
   appMode,
   appId,
-});
+}) && (!config.studioV5Enabled || params.get("studio") === "build");
 
 const workbenchState = {
   session: null,
@@ -62,6 +65,19 @@ async function bootAgentWorkbench() {
   elements.title.textContent = intent === "create"
     ? `新建${appModeLabel(appMode)}`
     : (appName || `修改${appModeLabel(appMode)}`);
+  const studioBackLink = document.querySelector("#studio-back-link");
+  if (studioBackLink && config.studioV5Enabled) {
+    const homeParams = new URLSearchParams();
+    if (embedded) {
+      homeParams.set("embed", "1");
+    }
+    const contextNonce = params.get("context_nonce") || "";
+    if (isContextNonce(contextNonce)) {
+      homeParams.set("context_nonce", contextNonce);
+    }
+    studioBackLink.href = `?${homeParams.toString()}`;
+    studioBackLink.hidden = false;
+  }
   bindActions();
   setupCanvasChannel();
   try {
@@ -121,8 +137,18 @@ function setupCanvasChannel() {
     setContextStatus("新建模式不读取现有画布", "ok");
     return;
   }
-  if (!embedded) {
-    setContextStatus("使用 URL 应用上下文；未连接画布选择", "muted");
+  if (!requiresCanvasContext({
+    appMode,
+    intent,
+    embedded,
+    studioEntry: params.get("studio_entry") || "",
+  })) {
+    setContextStatus(
+      params.get("studio_entry") === "home"
+        ? "使用 Dify 已持久化草稿；当前入口不连接画布选择"
+        : "使用 URL 应用上下文；未连接画布选择",
+      "muted",
+    );
     return;
   }
   const nonce = params.get("context_nonce") || "";
@@ -156,18 +182,26 @@ function setupCanvasChannel() {
 
 async function restoreOrCreateSession() {
   const storageKey = activeRunStorageKey();
+  const requestedRunId = params.get("run_id") || "";
   const storedRunId = sessionStorage.getItem(storageKey);
-  if (storedRunId) {
+  for (const candidateRunId of [requestedRunId, storedRunId].filter(Boolean)) {
     try {
-      const run = await requestJson(`/api/v4/agent/runs/${encodeURIComponent(storedRunId)}`);
-      workbenchState.run = run;
-      workbenchState.session = await requestJson(
+      const run = await requestJson(`/api/v4/agent/runs/${encodeURIComponent(candidateRunId)}`);
+      const session = await requestJson(
         `/api/v4/agent/sessions/${encodeURIComponent(run.session_id)}`,
       );
+      if (intent === "modify" && session.app_id !== appId) {
+        throw new Error("Run does not belong to the selected Dify application.");
+      }
+      workbenchState.run = run;
+      workbenchState.session = session;
+      sessionStorage.setItem(storageKey, run.id);
       await connectRun(run.id);
       return;
     } catch (_error) {
-      sessionStorage.removeItem(storageKey);
+      if (candidateRunId === storedRunId) {
+        sessionStorage.removeItem(storageKey);
+      }
     }
   }
   workbenchState.session = await requestJson("/api/v4/agent/sessions", {
@@ -637,9 +671,12 @@ function canvasConstraints() {
 }
 
 function updateComposerAvailability() {
-  const needsHandshake = supportsCanvasContext(appMode)
-    && intent === "modify"
-    && embedded;
+  const needsHandshake = requiresCanvasContext({
+    appMode,
+    intent,
+    embedded,
+    studioEntry: params.get("studio_entry") || "",
+  });
   const hasContext = Boolean(workbenchState.canvasContext);
   const run = workbenchState.run;
   const blockedByRun = run && !isTerminalRun(run)

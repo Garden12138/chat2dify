@@ -203,7 +203,7 @@ const els = {
 };
 
 document.addEventListener("DOMContentLoaded", () => {
-  if (window.CHAT2DIFY_AGENT_WORKBENCH) {
+  if (window.CHAT2DIFY_AGENT_WORKBENCH || isStudioHomeActive()) {
     return;
   }
   const boot = initializeFromUrl();
@@ -214,6 +214,11 @@ document.addEventListener("DOMContentLoaded", () => {
   }
   refreshHeader();
 });
+
+function isStudioHomeActive() {
+  const params = new URLSearchParams(window.location.search);
+  return Boolean(APP_CONFIG.studioV5Enabled) && params.get("studio") !== "build";
+}
 
 function bindEvents() {
   els.refreshHealth.addEventListener("click", refreshHeader);

@@ -1,14 +1,28 @@
 # chat2dify
 
-chat2dify 是一个独立的 FastAPI sidecar，用自然语言创建、修改、测试和审阅 Dify 应用。v4.0.0 新增受 Feature Flag 控制的 Builder Agent：它把每次编辑放在服务端版本化 Workspace 中，通过 Typed Tools、Patch IR 和确定性校验生成可审阅 Diff，只有用户批准后才会写回 Dify 草稿。现有 v3 入口继续保留。
+chat2dify 是一个独立的 FastAPI sidecar，用自然语言创建、修改、测试和审阅 Dify 应用。v5.0.0 正在把已经发布的 v4 Builder Agent 安全内核升级成完整的 AI Workflow Studio；现有 v3 与 v4 入口继续保留。
 
 chat2dify 可以作为 Dify Console 的内嵌面板随 Dify docker compose 启动，也可以独立运行。Dify web 只承载抽屉入口、iframe 和安全画布上下文握手；Snapshot、Workspace、审批、Commit 和执行状态都由 sidecar 管理。
 
 > 第一次使用 v4？从 [v4.0.0 使用手册与实战教程](docs/v4-user-guide.md) 开始。
 
-## 当前版本
+## 当前开发版本
 
-`v4.0.0` 的主要变化：
+`v5.0.0` 当前以默认关闭的
+`CHAT2DIFY_AI_STUDIO_V5_ENABLED` 交付产品切片。第一阶段包含：
+
+- Dify 内嵌 Studio Shell 与 Studio Home；
+- 服务端验证的 Dify Principal、短期签名会话、Origin/Nonce/Replay 防护；
+- 个人 Project 与 Membership，所有 v5 读取先做项目授权；
+- 最近 Dify 应用、搜索、类型筛选、v4 工作迁移与继续构建；
+- SQLite 单用户与 PostgreSQL 团队存储、增量迁移、Activity、Job、Outbox 和 Receipt 地基；
+- 关闭 v5 后回到未替换的 v4 产品路径，保留 v5 数据而不做 schema 降级。
+
+完整产品方向见
+[v5 AI Workflow Studio 架构](docs/architecture/v5-ai-workflow-studio.md)，执行状态见
+[v5 任务清单](docs/tasks.md)。
+
+`v4.0.0` 是当前稳定基线，主要能力包括：
 
 - 单 Builder Agent：通过 Typed Tools、服务端预算和确定性校验完成 Observe → Patch → Validate → Review。
 - 版本化 Workspace 与显式 Patch IR：模型不能直接写 Dify DSL、生成最终节点 ID 或调用 Dify 写 API。
@@ -17,7 +31,7 @@ chat2dify 可以作为 Dify Console 的内嵌面板随 Dify docker compose 启�
 - Workflow、Chatflow 创建/修改与选定的 Chatbot、Completion、Agent 配置修改能力。
 - Test → Inspect → Repair 闭环、Skills、Dify 兼容矩阵和经过真实 Runtime 执行的固定评测集。
 - v4 API 默认关闭；`CHAT2DIFY_AGENT_V4_ENABLED=false` 时继续使用有效的 v3 产品路径。
-- Python 包、FastAPI 元数据、面板 manifest、健康检查、静态资源和 Docker 镜像统一为 `4.0.0`。
+- v4 发布时 Python 包、FastAPI 元数据、面板 manifest、健康检查、静态资源和 Docker 镜像统一为 `4.0.0`；v5 分支已统一为 `5.0.0`。
 - Release Gate 已完成：完整 Python 测试为 `462 passed, 12 skipped`，本地
   Dify 1.14.2 验收为 `11 passed, 1 skipped`，Workbench Node 测试为
   `9 passed`。外部 Provider 的终态成功路径因当前无稳定可用额度而被明确
@@ -84,9 +98,13 @@ Feature Flag 不会移除这些入口。
 图中蓝色实线表示主要请求和执行链路，灰色虚线表示配置、本地存储和版本依赖。
 
 v4.0.0 Builder Agent 架构与分阶段落地计划见
-[v4.0.0 AI Chat Agent 架构升级与实现方案](docs/architecture/v4-agent-architecture-and-implementation-plan.md)。
-阶段任务、验收标准和可复制的 `/goal` 指令见
-[v4.0.0 开发任务清单](docs/tasks.md)。
+[v4.0.0 AI Chat Agent 架构升级与实现方案](docs/architecture/v4-agent-architecture-and-implementation-plan.md)，
+完成证据保存在
+[v4.0.0 归档任务清单](docs/archive/v4.0.0-tasks.md)。
+下一版本的产品升级方向、阶段任务、验收标准和可复制 `/goal` 指令见
+[v5.0.0 AI Workflow Studio 产品架构](docs/architecture/v5-ai-workflow-studio.md)、
+[v5.0.0 开发任务清单](docs/tasks.md)和
+[`/goal` 对话内容](docs/goals/v5.0.0-goal-prompts.md)。
 Builder Agent 的
 [v4.0.0 使用手册与实战教程](docs/v4-user-guide.md)、
 [配置、审批、保留、恢复与扩展指南](docs/agent-v4-operations.md)、
@@ -216,6 +234,10 @@ OPENAI_COMPATIBLE_RESPONSE_FORMAT=true
 CHAT2DIFY_TASK_DB=data/tasks.sqlite3
 CHAT2DIFY_TASK_WORKERS=2
 CHAT2DIFY_AGENT_V4_ENABLED=false
+CHAT2DIFY_AI_STUDIO_V5_ENABLED=false
+CHAT2DIFY_STUDIO_SIGNING_SECRET=
+CHAT2DIFY_STUDIO_DATABASE_URL=
+CHAT2DIFY_STUDIO_ALLOWED_ORIGINS=http://127.0.0.1
 ```
 
 重要配置说明：
@@ -232,6 +254,15 @@ CHAT2DIFY_AGENT_V4_ENABLED=false
 - `CHAT2DIFY_AGENT_V4_ENABLED`：默认 `false`。启用后注册 v4 Builder Agent
   Session/Run/SSE/Approval API，并在同一个 SQLite 文件中初始化独立的
   `agent_*` 表；不会关闭 v3 API。
+- `CHAT2DIFY_AI_STUDIO_V5_ENABLED`：默认 `false`。启用后加载 Studio
+  Shell、`/api/v5/studio` 和 v5 数据层；关闭后不会启动 v5 服务，也不会替换
+  v4 UI。
+- `CHAT2DIFY_STUDIO_SIGNING_SECRET`：启用 v5 时必填，至少 32 个字符，用于
+  签发只在短时间和指定 Dify Origin 有效的 Studio 会话。
+- `CHAT2DIFY_STUDIO_DATABASE_URL`：省略时与任务数据共用 SQLite 文件中的
+  独立 `studio_*` 表；团队部署可设置 `postgresql://...`。
+- `CHAT2DIFY_STUDIO_ALLOWED_ORIGINS`：允许承载 Studio 的 Dify HTTP(S)
+  Origin 列表，不接受带路径或凭据的 URL。
 
 要使用 v4 Workbench，请改为：
 
@@ -297,6 +328,9 @@ rsync -av deploy/dify/web-adapter/web/ ../dify/web/
 ```env
 CHAT2DIFY_PUBLIC_BASE_PATH=/chat2dify
 CHAT2DIFY_AGENT_V4_ENABLED=true
+CHAT2DIFY_AI_STUDIO_V5_ENABLED=true
+CHAT2DIFY_STUDIO_SIGNING_SECRET=replace-with-at-least-32-random-characters
+CHAT2DIFY_STUDIO_ALLOWED_ORIGINS=http://localhost
 CHAT2DIFY_DIFY_EMAIL=you@example.com
 CHAT2DIFY_DIFY_PASSWORD=your-password
 CHAT2DIFY_NVIDIA_API_KEY=nvapi-...

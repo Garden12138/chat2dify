@@ -50,15 +50,19 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
         styles = client.get("/static/styles.css")
         agent_script = client.get("/static/agent-workbench.js")
         agent_core = client.get("/static/agent-workbench-core.mjs")
+        studio_script = client.get("/static/studio/home/index.js")
+        studio_core = client.get("/static/studio/home/core.mjs")
+        studio_styles = client.get("/static/studio/home/styles.css")
 
     assert index.status_code == 200
     assert "chat2dify" in index.text
-    assert "chat-v4.0.0" in index.text
-    assert 'href="static/styles.css?v=chat-v4.0.0"' in index.text
+    assert "chat-v5.0.0" in index.text
+    assert 'href="static/styles.css?v=chat-v5.0.0"' in index.text
     assert "[hidden]" in styles.text
     assert "display: none !important;" in styles.text
-    assert 'src="static/app.js?v=chat-v4.0.0"' in index.text
-    assert '"version": "4.0.0"' in index.text
+    assert 'src="static/app.js?v=chat-v5.0.0"' in index.text
+    assert '"version": "5.0.0"' in index.text
+    assert '"studioV5Enabled": false' in index.text
     assert index.headers["cache-control"] == "no-store"
     assert 'id="chat-log"' in index.text
     assert 'id="chat-form"' in index.text
@@ -69,7 +73,12 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert 'id="agent-timeline"' in index.text
     assert 'id="agent-goal-plan"' in index.text
     assert 'id="agent-approvals"' in index.text
-    assert 'static/agent-workbench.js?v=chat-v4.0.0' in index.text
+    assert 'id="studio-root"' in index.text
+    assert 'aria-label="Studio 主导航"' in index.text
+    assert 'id="studio-search-input"' in index.text
+    assert 'id="studio-mode-select"' in index.text
+    assert "Reviews & Releases" in index.text
+    assert 'static/agent-workbench.js?v=chat-v5.0.0' in index.text
     assert 'id="create-form"' not in index.text
     assert 'id="modify-form"' not in index.text
     assert 'id="run-form"' not in index.text
@@ -106,7 +115,7 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert "BASE_PATH" in script.text
     assert "apiUrl(path)" in script.text
     assert "applyContextHints(text)" not in script.text
-    assert app.version == "4.0.0"
+    assert app.version == "5.0.0"
     assert styles.status_code == 200
     assert ".chat-shell" in styles.text
     assert ".chat-composer" in styles.text
@@ -120,6 +129,12 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert agent_core.status_code == 200
     assert "CanvasContextChannel" in agent_core.text
     assert "/api/v4/agent" in agent_script.text
+    assert studio_script.status_code == 200
+    assert studio_core.status_code == 200
+    assert studio_styles.status_code == 200
+    assert "/api/v5/studio/session" in studio_script.text
+    assert "isStudioHomeEnabled" in studio_core.text
+    assert ".studio-shell" in studio_styles.text
 
 
 def test_health_returns_configured_dataset_count(monkeypatch) -> None:
@@ -134,7 +149,7 @@ def test_health_returns_configured_dataset_count(monkeypatch) -> None:
 
     assert response.status_code == 200
     data = response.json()
-    assert data["version"] == "4.0.0"
+    assert data["version"] == "5.0.0"
     assert data["component"]["kind"] == "dify-panel-component"
     assert data["component"]["panel_url"] == "/"
     assert data["configured_dataset_count"] == 2
@@ -142,7 +157,10 @@ def test_health_returns_configured_dataset_count(monkeypatch) -> None:
     assert data["dify"]["configured_dataset_count"] == 2
     assert data["dify"]["default_model"] == {"provider": "langgenius/tongyi/tongyi", "name": "qwen3.5-plus"}
     assert data["planner"] == {"provider": "openai", "model": "gpt-4o-mini", "configured": True}
-    assert data["features"] == {"agent_v4": False}
+    assert data["features"] == {
+        "agent_v4": False,
+        "ai_studio_v5": False,
+    }
 
 
 def test_panel_manifest_uses_public_base_path(monkeypatch) -> None:
@@ -154,7 +172,7 @@ def test_panel_manifest_uses_public_base_path(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json() == {
         "name": "chat2dify",
-        "version": "4.0.0",
+        "version": "5.0.0",
         "kind": "dify-panel-component",
         "mount_path": "/chat2dify",
         "panel_url": "/chat2dify/",

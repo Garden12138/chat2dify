@@ -29,6 +29,11 @@ What the adapter adds:
 - bounded selection, viewport, panel, dirty-state, and draft-Hash updates without
   sending the browser's raw Workflow graph as an authoritative source.
 
+When the sidecar enables `CHAT2DIFY_AI_STUDIO_V5_ENABLED`, the same embedded
+entry opens Studio Home first. “Continue building” switches the iframe to the
+existing v4 Builder deep link. With the v5 flag off, the adapter URL and v4
+behavior remain unchanged.
+
 To apply this adapter to a sibling Dify checkout:
 
 ```bash

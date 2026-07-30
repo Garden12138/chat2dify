@@ -40,6 +40,14 @@ export const AGENT_EVENT_TYPES = [
   "agent.failed",
 ];
 
+export function resolveAgentAppMode(intent, appMode) {
+  const normalized = String(appMode || "").trim();
+  if (normalized) {
+    return normalized;
+  }
+  return intent === "create" ? "workflow" : "";
+}
+
 export function isAgentWorkbenchSupported({
   featureEnabled,
   intent,
@@ -63,6 +71,18 @@ export function supportsCanvasContext(appMode) {
   return GRAPH_APP_MODES.has(appMode);
 }
 
+export function requiresCanvasContext({
+  appMode,
+  intent,
+  embedded,
+  studioEntry = "",
+}) {
+  return supportsCanvasContext(appMode)
+    && intent === "modify"
+    && Boolean(embedded)
+    && studioEntry !== "home";
+}
+
 export function appModeLabel(appMode) {
   return {
     workflow: "工作流",
@@ -78,7 +98,7 @@ export class CanvasContextChannel {
     if (!isOrigin(expectedOrigin)) {
       throw new Error("A valid parent origin is required.");
     }
-    if (!isNonce(nonce)) {
+    if (!isContextNonce(nonce)) {
       throw new Error("A valid per-panel context nonce is required.");
     }
     this.expectedOrigin = expectedOrigin;
@@ -368,7 +388,7 @@ function isOrigin(value) {
   }
 }
 
-function isNonce(value) {
+export function isContextNonce(value) {
   return typeof value === "string"
     && value.length >= 16
     && value.length <= 256

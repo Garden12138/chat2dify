@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Mapping
+from urllib.parse import urlsplit
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +26,8 @@ DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_OPENROUTER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 DEFAULT_OPENAI_COMPATIBLE_BASE_URL = "http://localhost:4000/v1"
 DEFAULT_OPENAI_COMPATIBLE_MODEL = "gpt-4o-mini"
+DEFAULT_STUDIO_TOKEN_ISSUER = "chat2dify-studio"
+DEFAULT_STUDIO_TOKEN_AUDIENCE = "chat2dify-dify-host"
 
 
 class ConfigurationError(ValueError):
@@ -84,6 +87,13 @@ class Settings:
     openrouter_max_tokens: int
     chat2dify_public_base_path: str
     agent_v4_enabled: bool
+    ai_studio_v5_enabled: bool
+    studio_database_url: str
+    studio_signing_secret: str | None
+    studio_token_issuer: str
+    studio_token_audience: str
+    studio_token_ttl_seconds: int
+    studio_allowed_origins: list[str]
     task_db_path: Path
     task_workers: int
 
@@ -105,13 +115,39 @@ class Settings:
 
         nvidia_model = source.get("NVIDIA_MODEL", DEFAULT_NVIDIA_MODEL).strip()
         nvidia_max_tokens_default = str(_nvidia_model_max_tokens(nvidia_model))
+        task_db_path = resolve_path_from_project_root(
+            source.get("CHAT2DIFY_TASK_DB", "data/tasks.sqlite3"),
+            root,
+        )
+        ai_studio_v5_enabled = _boolean(
+            source.get("CHAT2DIFY_AI_STUDIO_V5_ENABLED", "false"),
+            name="CHAT2DIFY_AI_STUDIO_V5_ENABLED",
+        )
+        studio_signing_secret = _empty_to_none(
+            source.get("CHAT2DIFY_STUDIO_SIGNING_SECRET")
+        )
+        if ai_studio_v5_enabled and (
+            studio_signing_secret is None or len(studio_signing_secret) < 32
+        ):
+            raise ConfigurationError(
+                "CHAT2DIFY_STUDIO_SIGNING_SECRET must contain at least 32 "
+                "characters when CHAT2DIFY_AI_STUDIO_V5_ENABLED is true."
+            )
+        dify_console_web_base = source.get(
+            "DIFY_CONSOLE_WEB_BASE",
+            "http://localhost:3000",
+        ).rstrip("/")
+        studio_allowed_origins = _studio_origins(
+            source.get("CHAT2DIFY_STUDIO_ALLOWED_ORIGINS"),
+            fallback=dify_console_web_base,
+        )
 
         return cls(
             project_root=root,
             dify_source_dir=dify_source_dir,
             dify_source_path=dify_source_path,
             dify_console_api_base=source.get("DIFY_CONSOLE_API_BASE", "http://localhost:5001/console/api").rstrip("/"),
-            dify_console_web_base=source.get("DIFY_CONSOLE_WEB_BASE", "http://localhost:3000").rstrip("/"),
+            dify_console_web_base=dify_console_web_base,
             dify_email=_empty_to_none(source.get("DIFY_EMAIL")),
             dify_password=_empty_to_none(source.get("DIFY_PASSWORD")),
             dify_login_language=source.get("DIFY_LOGIN_LANGUAGE", "en-US"),
@@ -183,10 +219,29 @@ class Settings:
                 source.get("CHAT2DIFY_AGENT_V4_ENABLED", "false"),
                 name="CHAT2DIFY_AGENT_V4_ENABLED",
             ),
-            task_db_path=resolve_path_from_project_root(
-                source.get("CHAT2DIFY_TASK_DB", "data/tasks.sqlite3"),
-                root,
+            ai_studio_v5_enabled=ai_studio_v5_enabled,
+            studio_database_url=_studio_database_url(
+                source.get("CHAT2DIFY_STUDIO_DATABASE_URL"),
+                project_root=root,
+                fallback_path=task_db_path,
             ),
+            studio_signing_secret=studio_signing_secret,
+            studio_token_issuer=source.get(
+                "CHAT2DIFY_STUDIO_TOKEN_ISSUER",
+                DEFAULT_STUDIO_TOKEN_ISSUER,
+            ).strip()
+            or DEFAULT_STUDIO_TOKEN_ISSUER,
+            studio_token_audience=source.get(
+                "CHAT2DIFY_STUDIO_TOKEN_AUDIENCE",
+                DEFAULT_STUDIO_TOKEN_AUDIENCE,
+            ).strip()
+            or DEFAULT_STUDIO_TOKEN_AUDIENCE,
+            studio_token_ttl_seconds=_positive_int(
+                source.get("CHAT2DIFY_STUDIO_TOKEN_TTL_SECONDS", "900"),
+                name="CHAT2DIFY_STUDIO_TOKEN_TTL_SECONDS",
+            ),
+            studio_allowed_origins=studio_allowed_origins,
+            task_db_path=task_db_path,
             task_workers=_positive_int(
                 source.get("CHAT2DIFY_TASK_WORKERS", "2"),
                 name="CHAT2DIFY_TASK_WORKERS",
@@ -451,6 +506,52 @@ def _csv_list(value: str | None) -> list[str]:
     if not value:
         return []
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _studio_database_url(
+    value: str | None,
+    *,
+    project_root: Path,
+    fallback_path: Path,
+) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return f"sqlite:///{fallback_path}"
+    if raw.startswith("sqlite:///"):
+        path_value = raw.removeprefix("sqlite:///")
+        path = Path(path_value).expanduser()
+        if not path.is_absolute():
+            path = project_root / path
+        return f"sqlite:///{path.resolve()}"
+    if raw.startswith(("postgresql://", "postgresql+psycopg://")):
+        return raw
+    raise ConfigurationError(
+        "CHAT2DIFY_STUDIO_DATABASE_URL must use sqlite:/// or postgresql://."
+    )
+
+
+def _studio_origins(value: str | None, *, fallback: str) -> list[str]:
+    configured = _csv_list(value) or [fallback]
+    origins: list[str] = []
+    for item in configured:
+        parsed = urlsplit(item)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ConfigurationError(
+                "CHAT2DIFY_STUDIO_ALLOWED_ORIGINS must contain HTTP(S) origins "
+                "without paths, credentials, query strings, or fragments."
+            )
+        origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+        if origin not in origins:
+            origins.append(origin)
+    return origins
 
 
 def _load_environment(project_root: Path) -> dict[str, str]:

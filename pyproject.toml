@@ -4,12 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chat2dify"
-version = "4.0.0"
+version = "5.0.0"
 description = "Dify panel component for creating, editing, running, and publishing apps from natural language."
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.110",
     "httpx>=0.27",
+    "psycopg[binary]>=3.1",
     "pydantic>=2.7",
     "pyyaml>=6.0",
     "uvicorn>=0.29",
@@ -37,4 +38,5 @@ app = [
     "evals/fixtures/**/*.json",
     "evals/reports/*.json",
     "static/*",
+    "static/**/*",
 ]

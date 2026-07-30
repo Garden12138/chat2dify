@@ -8,6 +8,8 @@ from pathlib import Path
 import re
 
 from fastapi import FastAPI, HTTPException, Query, Request, status
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
@@ -60,6 +62,11 @@ from app.assistant import (
     plan_assistant_action,
 )
 from app.api.agent_v4 import router as agent_v4_router
+from app.api.studio_v5 import (
+    StudioRequestInvalid,
+    router as studio_v5_router,
+    studio_error_response,
+)
 from app.compiler.agent import (
     agent_app_plan_payload,
     agent_tool_configs,
@@ -108,13 +115,17 @@ from app.models import (
     WorkflowTriggerStatusRequest,
 )
 from app.tasks import TaskContext, TaskManager, TaskNotFound, TaskRepository
+from app.studio.home import StudioHomeService, V4ContinuityReader
+from app.studio.identity import DifyHostVerifier, StudioIdentityService
+from app.studio.service import StudioApplicationService
+from app.studio.store import StudioStore
 from app.validator import has_errors, validate_dsl, validate_plan
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 INDEX_TEMPLATE = STATIC_DIR / "index.html"
 DEFAULT_INDEX_CONFIG = (
-    '{"basePath":"","version":"4.0.0","agentV4Enabled":false}'
+    '{"basePath":"","version":"5.0.0","agentV4Enabled":false,"studioV5Enabled":false}'
 )
 
 
@@ -125,9 +136,12 @@ async def lifespan(application: FastAPI):
     task_manager = TaskManager(TaskRepository(settings.task_db_path), workers=settings.task_workers)
     application.state.task_manager = task_manager
     application.state.agent_v4_enabled = settings.agent_v4_enabled
+    application.state.ai_studio_v5_enabled = settings.ai_studio_v5_enabled
     application.state.agent_store = None
     application.state.agent_service = None
     application.state.agent_registry = None
+    application.state.studio_store = None
+    application.state.studio_service = None
     agent_service = None
     if settings.agent_v4_enabled:
         agent_store = AgentStore(settings.task_db_path)
@@ -269,6 +283,22 @@ async def lifespan(application: FastAPI):
         application.state.agent_store = agent_store
         application.state.agent_service = agent_service
         application.state.agent_registry = registry
+    if settings.ai_studio_v5_enabled:
+        studio_store = StudioStore(settings.studio_database_url)
+        studio_service = StudioApplicationService(
+            identity=StudioIdentityService(
+                settings=settings,
+                store=studio_store,
+                host_verifier=DifyHostVerifier(settings),
+            ),
+            home=StudioHomeService(
+                store=studio_store,
+                v4_reader=V4ContinuityReader(settings.task_db_path),
+                public_base_path=settings.chat2dify_public_base_path,
+            ),
+        )
+        application.state.studio_store = studio_store
+        application.state.studio_service = studio_service
     try:
         yield
     finally:
@@ -279,6 +309,19 @@ async def lifespan(application: FastAPI):
 
 app = FastAPI(title="chat2dify", version=__version__, lifespan=lifespan)
 app.include_router(agent_v4_router)
+app.include_router(studio_v5_router)
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_handler(
+    request: Request,
+    exc: RequestValidationError,
+):
+    if request.url.path.startswith("/api/v5/studio"):
+        return studio_error_response(
+            StudioRequestInvalid("The Studio request is invalid.")
+        )
+    return await request_validation_exception_handler(request, exc)
 
 
 @app.middleware("http")
@@ -298,10 +341,12 @@ def index() -> HTMLResponse:
 
 
 def _render_index_html() -> str:
+    settings = load_settings()
     config = {
-        "basePath": load_public_base_path(),
+        "basePath": settings.chat2dify_public_base_path,
         "version": __version__,
-        "agentV4Enabled": load_settings().agent_v4_enabled,
+        "agentV4Enabled": settings.agent_v4_enabled,
+        "studioV5Enabled": settings.ai_studio_v5_enabled,
     }
     return INDEX_TEMPLATE.read_text(encoding="utf-8").replace(
         DEFAULT_INDEX_CONFIG,
@@ -347,6 +392,7 @@ def health() -> dict:
         },
         "features": {
             "agent_v4": settings.agent_v4_enabled,
+            "ai_studio_v5": settings.ai_studio_v5_enabled,
         },
         "dify": {
             "source_dir": settings.dify_source_dir,

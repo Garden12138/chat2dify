@@ -9,14 +9,47 @@ import {
   approvalMatchesVisibleVersion,
   commitBlockReason,
   isAgentWorkbenchSupported,
+  isContextNonce,
   parseSse,
   reviewDiffRows,
+  resolveAgentAppMode,
+  requiresCanvasContext,
   runControlState,
   supportsCanvasContext,
   testPresentation,
   timelinePresentation,
   undoPresentation,
 } from "../../app/static/agent-workbench-core.mjs";
+
+test("create deep links default to workflow when Dify omits app_mode", () => {
+  assert.equal(resolveAgentAppMode("create", ""), "workflow");
+  assert.equal(resolveAgentAppMode("create", null), "workflow");
+  assert.equal(resolveAgentAppMode("modify", ""), "");
+  assert.equal(resolveAgentAppMode("create", "advanced-chat"), "advanced-chat");
+  assert.equal(isContextNonce("context-nonce-1234567890"), true);
+  assert.equal(isContextNonce("bad nonce"), false);
+});
+
+test("Studio Home uses persisted Dify drafts without pretending to have canvas context", () => {
+  assert.equal(requiresCanvasContext({
+    appMode: "workflow",
+    intent: "modify",
+    embedded: true,
+    studioEntry: "home",
+  }), false);
+  assert.equal(requiresCanvasContext({
+    appMode: "workflow",
+    intent: "modify",
+    embedded: true,
+    studioEntry: "canvas",
+  }), true);
+  assert.equal(requiresCanvasContext({
+    appMode: "workflow",
+    intent: "create",
+    embedded: true,
+    studioEntry: "canvas",
+  }), false);
+});
 
 const nonce = "safe_context_nonce_123456789";
 const parentWindow = {};

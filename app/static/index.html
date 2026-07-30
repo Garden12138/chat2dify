@@ -4,10 +4,186 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>chat2dify</title>
-    <link rel="stylesheet" href="static/styles.css?v=chat-v4.0.0">
+    <link rel="stylesheet" href="static/styles.css?v=chat-v5.0.0">
+    <link rel="stylesheet" href="static/studio/home/styles.css?v=studio-v5.0.0">
   </head>
   <body>
-    <div class="app-frame">
+    <a class="studio-skip-link" href="#studio-main">跳到主要内容</a>
+    <div id="studio-root" class="studio-shell" hidden>
+      <header class="studio-topbar">
+        <a class="studio-brand" href="./" aria-label="Chat2Dify Studio 首页">
+          <span class="studio-brand-mark" aria-hidden="true">C2</span>
+          <span>
+            <strong>Chat2Dify</strong>
+            <small>AI Workflow Studio</small>
+          </span>
+        </a>
+        <div class="studio-topbar-meta">
+          <span id="studio-project-badge" class="studio-project-badge">正在识别项目</span>
+          <span id="studio-connection" class="studio-connection" data-tone="loading">
+            正在连接 Dify
+          </span>
+        </div>
+      </header>
+
+      <div class="studio-layout">
+        <aside class="studio-sidebar">
+          <nav aria-label="Studio 主导航">
+            <a class="studio-nav-item studio-nav-active" href="./" aria-current="page">
+              <span aria-hidden="true">⌂</span>
+              <span>Studio Home</span>
+            </a>
+            <a
+              id="studio-build-nav"
+              class="studio-nav-item"
+              href="?studio=build&intent=create&app_mode=workflow"
+            >
+              <span aria-hidden="true">✦</span>
+              <span>Build Studio</span>
+            </a>
+            <span class="studio-nav-item studio-nav-disabled" aria-disabled="true">
+              <span aria-hidden="true">▱</span>
+              <span>Blueprints</span>
+              <small>即将推出</small>
+            </span>
+            <span class="studio-nav-item studio-nav-disabled" aria-disabled="true">
+              <span aria-hidden="true">◫</span>
+              <span>Scenarios</span>
+              <small>即将推出</small>
+            </span>
+            <span class="studio-nav-item studio-nav-disabled" aria-disabled="true">
+              <span aria-hidden="true">✓</span>
+              <span>Reviews & Releases</span>
+              <small>即将推出</small>
+            </span>
+            <span class="studio-nav-item studio-nav-disabled" aria-disabled="true">
+              <span aria-hidden="true">↗</span>
+              <span>Runs</span>
+              <small>即将推出</small>
+            </span>
+          </nav>
+          <div class="studio-sidebar-note">
+            <span class="studio-note-dot" aria-hidden="true"></span>
+            <p>v5 保留 v4 的版本化工作区、校验、审批和 Hash 安全边界。</p>
+          </div>
+        </aside>
+
+        <main id="studio-main" class="studio-main" tabindex="-1">
+          <section id="studio-state" class="studio-state-card" role="status" aria-live="polite" tabindex="-1">
+            <div class="studio-spinner" aria-hidden="true"></div>
+            <div>
+              <h1>正在打开你的 Studio</h1>
+              <p>正在验证 Dify 会话并加载可访问的应用与工作。</p>
+            </div>
+          </section>
+
+          <div id="studio-content" hidden>
+            <section class="studio-hero" aria-labelledby="studio-home-title">
+              <div>
+                <p class="studio-eyebrow">YOUR AI WORKFLOW COMMAND CENTER</p>
+                <h1 id="studio-home-title">继续把想法变成可靠的 Dify 应用</h1>
+                <p id="studio-home-summary">
+                  从最近应用或未完成工作继续，不需要复制应用 ID。
+                </p>
+              </div>
+              <a
+                class="studio-primary-action"
+                href="?studio=build&intent=create&app_mode=workflow"
+              >
+                <span aria-hidden="true">＋</span>
+                开始构建
+              </a>
+            </section>
+
+            <form id="studio-filters" class="studio-filters" role="search">
+              <label class="studio-search">
+                <span class="studio-visually-hidden">搜索应用或工作目标</span>
+                <span aria-hidden="true">⌕</span>
+                <input
+                  id="studio-search-input"
+                  type="search"
+                  autocomplete="off"
+                  placeholder="搜索应用名称或描述"
+                >
+              </label>
+              <label class="studio-mode-filter">
+                <span class="studio-visually-hidden">按应用类型筛选</span>
+                <select id="studio-mode-select" aria-label="按应用类型筛选">
+                  <option value="">全部类型</option>
+                  <option value="workflow">Workflow</option>
+                  <option value="advanced-chat">Chatflow</option>
+                  <option value="chat">Chatbot</option>
+                  <option value="agent-chat">Agent</option>
+                  <option value="completion">文本生成</option>
+                </select>
+              </label>
+              <button id="studio-refresh" type="button" class="studio-secondary-action">
+                刷新
+              </button>
+            </form>
+
+            <section class="studio-section" aria-labelledby="studio-apps-title">
+              <div class="studio-section-heading">
+                <div>
+                  <p class="studio-eyebrow">RECENTLY EDITED</p>
+                  <h2 id="studio-apps-title">Dify 应用</h2>
+                </div>
+                <p id="studio-apps-state" class="studio-section-state"></p>
+              </div>
+              <div id="studio-app-list" class="studio-card-grid"></div>
+            </section>
+
+            <section class="studio-section" aria-labelledby="studio-work-title">
+              <div class="studio-section-heading">
+                <div>
+                  <p class="studio-eyebrow">PICK UP WHERE YOU LEFT OFF</p>
+                  <h2 id="studio-work-title">继续工作</h2>
+                </div>
+                <p id="studio-work-state" class="studio-section-state"></p>
+              </div>
+              <div id="studio-work-list" class="studio-work-list"></div>
+            </section>
+
+            <section class="studio-section" aria-labelledby="studio-horizon-title">
+              <div class="studio-section-heading">
+                <div>
+                  <p class="studio-eyebrow">COMING INTO VIEW</p>
+                  <h2 id="studio-horizon-title">项目动态</h2>
+                </div>
+              </div>
+              <div id="studio-horizon" class="studio-horizon-grid">
+                <article>
+                  <span aria-hidden="true">◎</span>
+                  <h3>待我评审</h3>
+                  <strong>0</strong>
+                  <p>Review Center 将在后续阶段启用。</p>
+                </article>
+                <article>
+                  <span aria-hidden="true">◒</span>
+                  <h3>质量回归</h3>
+                  <strong>0</strong>
+                  <p>当前没有生成尚未验证的质量指标。</p>
+                </article>
+                <article>
+                  <span aria-hidden="true">⇧</span>
+                  <h3>最近发布</h3>
+                  <strong>0</strong>
+                  <p>Release Center 将展示真实发布回执。</p>
+                </article>
+                <article>
+                  <span aria-hidden="true">!</span>
+                  <h3>运行事件</h3>
+                  <strong>0</strong>
+                  <p>Run Center 启用前不展示虚构告警。</p>
+                </article>
+              </div>
+            </section>
+          </div>
+        </main>
+      </div>
+    </div>
+
+    <div id="legacy-app-frame" class="app-frame">
       <aside class="app-sidebar" aria-label="chat2dify navigation">
         <div class="brand">
           <span class="brand-mark" aria-hidden="true">c2d</span>
@@ -68,6 +244,7 @@
             <h1 id="agent-title">Agent Workbench</h1>
           </div>
           <div class="agent-header-meta">
+            <a id="studio-back-link" class="studio-back-link" href="./" hidden>返回 Studio Home</a>
             <span id="agent-selection" class="selection-summary">未选择画布元素</span>
             <span id="agent-context-status" class="status-pill status-muted">等待上下文</span>
             <span id="agent-phase" class="status-pill status-muted">idle</span>
@@ -159,9 +336,10 @@
     </div>
 
     <script>
-      window.CHAT2DIFY_CONFIG = {"basePath":"","version":"4.0.0","agentV4Enabled":false};
+      window.CHAT2DIFY_CONFIG = {"basePath":"","version":"5.0.0","agentV4Enabled":false,"studioV5Enabled":false};
     </script>
-    <script src="static/app.js?v=chat-v4.0.0" defer></script>
-    <script type="module" src="static/agent-workbench.js?v=chat-v4.0.0"></script>
+    <script src="static/app.js?v=chat-v5.0.0" defer></script>
+    <script type="module" src="static/agent-workbench.js?v=chat-v5.0.0"></script>
+    <script type="module" src="static/studio/home/index.js?v=studio-v5.0.0"></script>
   </body>
 </html>
