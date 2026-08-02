@@ -116,6 +116,7 @@ from app.models import (
 )
 from app.tasks import TaskContext, TaskManager, TaskNotFound, TaskRepository
 from app.studio.home import StudioHomeService, V4ContinuityReader
+from app.studio.build import StudioBuildService
 from app.studio.identity import DifyHostVerifier, StudioIdentityService
 from app.studio.service import StudioApplicationService
 from app.studio.store import StudioStore
@@ -143,6 +144,7 @@ async def lifespan(application: FastAPI):
     application.state.studio_store = None
     application.state.studio_service = None
     agent_service = None
+    agent_store = None
     if settings.agent_v4_enabled:
         agent_store = AgentStore(settings.task_db_path)
         agent_store.interrupt_active_runs()
@@ -210,6 +212,8 @@ async def lifespan(application: FastAPI):
             client_factory=client_factory,
             dify_version=version_info,
             compatibility=compatibility,
+            default_model_provider=settings.dify_default_model_provider,
+            default_model_name=settings.dify_default_model_name,
         )
         snapshot_service = AgentSnapshotRouter(
             workflow=workflow_snapshot_service,
@@ -295,6 +299,15 @@ async def lifespan(application: FastAPI):
                 store=studio_store,
                 v4_reader=V4ContinuityReader(settings.task_db_path),
                 public_base_path=settings.chat2dify_public_base_path,
+            ),
+            build=(
+                StudioBuildService(
+                    store=studio_store,
+                    agent_store=agent_store,
+                    agent_service=agent_service,
+                )
+                if agent_store is not None and agent_service is not None
+                else None
             ),
         )
         application.state.studio_store = studio_store

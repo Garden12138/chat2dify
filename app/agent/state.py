@@ -326,6 +326,8 @@ class CanvasViewport(StrictModel):
 class RunConstraints(StrictModel):
     allow_draft_test: bool = False
     allow_destructive: bool = False
+    workspace_only: bool = False
+    read_only: bool = False
     selected_node_ids: list[str] = Field(default_factory=list, max_length=100)
     selected_edge_ids: list[str] = Field(default_factory=list, max_length=100)
     viewport: CanvasViewport | None = None
@@ -382,17 +384,31 @@ class AgentWorkflowSnapshot(StrictModel):
 
 
 class AgentConfigSnapshot(StrictModel):
-    operation: Literal["modify"] = "modify"
-    app_id: str = Field(min_length=1, max_length=256)
+    operation: AgentOperation = "modify"
+    app_id: str | None = Field(default=None, min_length=1, max_length=256)
     app_name: str = Field(min_length=1, max_length=512)
     app_description: str = Field(default="", max_length=8_000)
     app_mode: Literal["chat", "completion", "agent-chat"]
-    base_hash: str = Field(min_length=1, max_length=512)
+    base_hash: str | None = Field(default=None, min_length=1, max_length=512)
     base_config: dict[str, Any]
     dify_version: dict[str, str] = Field(default_factory=dict)
     capabilities: list[dict[str, Any]] = Field(default_factory=list)
     compatibility: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)
+
+    @model_validator(mode="after")
+    def validate_operation_boundary(self) -> "AgentConfigSnapshot":
+        if self.operation == "modify" and (not self.app_id or not self.base_hash):
+            raise ValueError(
+                "Modify Config Snapshots require an existing app_id and base Hash."
+            )
+        if self.operation == "create" and (
+            self.app_id is not None or self.base_hash is not None
+        ):
+            raise ValueError(
+                "Create Config Snapshots must not contain an app_id or base Hash."
+            )
+        return self
 
 
 AgentSnapshot = AgentWorkflowSnapshot | AgentConfigSnapshot

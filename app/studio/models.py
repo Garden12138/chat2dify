@@ -10,6 +10,19 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field
 StudioRole = Literal["owner", "admin", "builder", "reviewer", "viewer"]
 ProjectKind = Literal["personal", "team"]
 LeaseStatus = Literal["pending", "leased", "completed", "failed", "ambiguous"]
+BuildOperation = Literal["create", "modify"]
+BuildEntrySource = Literal["home", "canvas", "create"]
+BuildStatus = Literal["active", "cancelled"]
+CandidateStatus = Literal[
+    "queued",
+    "building",
+    "waiting_input",
+    "valid",
+    "invalid",
+    "cancelled",
+    "interrupted",
+    "conflicted",
+]
 
 
 def utc_now() -> datetime:
@@ -191,4 +204,64 @@ class StudioHome(StrictModel):
     quality_regressions: list[dict[str, Any]] = Field(default_factory=list)
     incidents: list[dict[str, Any]] = Field(default_factory=list)
     states: dict[str, HomeSectionState]
+    generated_at: datetime = Field(default_factory=utc_now)
+
+
+class StudioBuild(StrictModel):
+    id: str = Field(min_length=1, max_length=128)
+    project_id: str = Field(min_length=1, max_length=128)
+    created_by: str = Field(min_length=1, max_length=768)
+    operation: BuildOperation
+    entry_source: BuildEntrySource
+    app_id: str | None = Field(default=None, max_length=256)
+    app_mode: str = Field(min_length=1, max_length=64)
+    app_name: str = Field(min_length=1, max_length=512)
+    base_fingerprint: str | None = Field(default=None, max_length=512)
+    selected_candidate_id: str | None = Field(default=None, max_length=128)
+    status: BuildStatus = "active"
+    version: int = Field(ge=1)
+    created_at: datetime
+    updated_at: datetime
+
+
+class StudioCandidate(StrictModel):
+    id: str = Field(min_length=1, max_length=128)
+    project_id: str = Field(min_length=1, max_length=128)
+    build_id: str = Field(min_length=1, max_length=128)
+    run_id: str = Field(min_length=1, max_length=128)
+    label: str = Field(min_length=1, max_length=256)
+    intent: str = Field(min_length=1, max_length=4_000)
+    source_candidate_ids: list[str] = Field(default_factory=list, max_length=3)
+    base_fingerprint: str | None = Field(default=None, max_length=512)
+    status: CandidateStatus = "queued"
+    ordinal: int = Field(ge=1, le=100)
+    version: int = Field(ge=1)
+    created_at: datetime
+    updated_at: datetime
+
+
+class CandidatePresentation(StrictModel):
+    candidate: StudioCandidate
+    phase: str
+    workspace_version_id: str | None = None
+    business_summary: str
+    assumptions: list[str] = Field(default_factory=list)
+    changed_path: list[str] = Field(default_factory=list)
+    risk: dict[str, Any] = Field(default_factory=dict)
+    validation: dict[str, Any] = Field(default_factory=dict)
+    side_effects: dict[str, Any] = Field(default_factory=dict)
+    unresolved_questions: list[str] = Field(default_factory=list)
+    goal_plan: dict[str, Any] = Field(default_factory=dict)
+    timeline: list[dict[str, Any]] = Field(default_factory=list)
+    technical_detail: dict[str, Any] = Field(default_factory=dict)
+    reconstructable: bool = False
+    layout_preview: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
+
+
+class BuildStudioView(StrictModel):
+    build: StudioBuild
+    candidates: list[CandidatePresentation] = Field(default_factory=list)
+    comparison: dict[str, Any] = Field(default_factory=dict)
+    selected_context: dict[str, Any] = Field(default_factory=dict)
     generated_at: datetime = Field(default_factory=utc_now)

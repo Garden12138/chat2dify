@@ -33,7 +33,7 @@ const enabled = isAgentWorkbenchSupported({
   intent,
   appMode,
   appId,
-}) && (!config.studioV5Enabled || params.get("studio") === "build");
+}) && !(config.studioV5Enabled && params.get("studio") === "build");
 
 const workbenchState = {
   session: null,

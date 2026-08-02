@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from pydantic import Field
 
 from app.agent.service import AgentApplicationService
+from app.agent.state import CanvasViewport, RunConstraints
 from app.agent.store import AgentStore
 from app.studio.home import V4ContinuityError
 from app.studio.identity import (
@@ -20,6 +21,7 @@ from app.studio.identity import (
 )
 from app.studio.models import (
     Membership,
+    BuildStudioView,
     Principal,
     Project,
     StrictModel,
@@ -72,6 +74,54 @@ class ResumeV4Request(StrictModel):
     project_id: str = Field(min_length=1, max_length=128)
     run_id: str = Field(min_length=1, max_length=128)
     message: str | None = Field(default=None, max_length=8_000)
+
+
+class CreateBuildRequest(StrictModel):
+    project_id: str = Field(min_length=1, max_length=128)
+    operation: Literal["create", "modify"]
+    entry_source: Literal["home", "canvas", "create"]
+    app_id: str | None = Field(default=None, max_length=256)
+    app_mode: Literal["workflow", "advanced-chat", "chat", "completion", "agent-chat"]
+    app_name: str = Field(min_length=1, max_length=512)
+
+
+class BuildCanvasContext(StrictModel):
+    selected_node_ids: list[str] = Field(default_factory=list, max_length=100)
+    selected_edge_ids: list[str] = Field(default_factory=list, max_length=100)
+    viewport: CanvasViewport | None = None
+    current_panel: str | None = Field(default=None, max_length=128)
+    dirty_state: bool = False
+    canvas_draft_hash: str | None = Field(default=None, max_length=512)
+    revision: int = Field(default=0, ge=0)
+
+
+class BuildCommandRequest(StrictModel):
+    project_id: str = Field(min_length=1, max_length=128)
+    mode: Literal["explain", "alternatives", "synthesize"]
+    message: str = Field(min_length=1, max_length=8_000)
+    candidate_count: int = Field(default=2, ge=2, le=3)
+    source_candidate_ids: list[str] = Field(default_factory=list, max_length=3)
+    canvas_context: BuildCanvasContext | None = None
+
+
+class CandidateActionRequest(StrictModel):
+    project_id: str = Field(min_length=1, max_length=128)
+    candidate_id: str = Field(min_length=1, max_length=128)
+
+
+class ResumeCandidateRequest(CandidateActionRequest):
+    message: str | None = Field(default=None, max_length=8_000)
+
+
+class BuildContextCommandRequest(CandidateActionRequest):
+    command: Literal[
+        "explain_selection",
+        "explain_variable_flow",
+        "safer_fallback",
+        "generate_scenarios",
+        "suggest_resources",
+    ]
+    selected_node_ids: list[str] = Field(default_factory=list, max_length=20)
 
 
 ERROR_RESPONSES = {
@@ -196,6 +246,207 @@ def resume_v4_work(
         return resumed.model_dump(mode="json")
     except Exception as exc:
         return studio_error_response(exc)
+
+
+@router.post(
+    "/builds",
+    status_code=201,
+    responses=ERROR_RESPONSES,
+)
+def create_build(
+    payload: CreateBuildRequest,
+    request: Request,
+    response: Response,
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        return service.create_build(
+            authenticated,
+            project_id=payload.project_id,
+            operation=payload.operation,
+            entry_source=payload.entry_source,
+            app_id=payload.app_id,
+            app_mode=payload.app_mode,
+            app_name=payload.app_name,
+        ).model_dump(mode="json")
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
+@router.get(
+    "/builds/{build_id}",
+    response_model=BuildStudioView,
+    responses=ERROR_RESPONSES,
+)
+def get_build(
+    build_id: str,
+    request: Request,
+    response: Response,
+    project_id: str = Query(min_length=1, max_length=128),
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        return service.get_build(
+            authenticated,
+            project_id=project_id,
+            build_id=build_id,
+        )
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
+@router.post(
+    "/builds/{build_id}/commands",
+    response_model=BuildStudioView,
+    status_code=202,
+    responses=ERROR_RESPONSES,
+)
+def command_build(
+    build_id: str,
+    payload: BuildCommandRequest,
+    request: Request,
+    response: Response,
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        context = payload.canvas_context
+        constraints = RunConstraints(
+            workspace_only=True,
+            selected_node_ids=context.selected_node_ids if context else [],
+            selected_edge_ids=context.selected_edge_ids if context else [],
+            viewport=context.viewport if context else None,
+            current_panel=context.current_panel if context else None,
+            dirty_state=context.dirty_state if context else False,
+            canvas_draft_hash=context.canvas_draft_hash if context else None,
+            canvas_context_revision=context.revision if context else 0,
+        )
+        service.command_build(
+            authenticated,
+            project_id=payload.project_id,
+            build_id=build_id,
+            mode=payload.mode,
+            message=payload.message,
+            candidate_count=payload.candidate_count,
+            source_candidate_ids=payload.source_candidate_ids,
+            constraints=constraints,
+        )
+        return service.get_build(
+            authenticated,
+            project_id=payload.project_id,
+            build_id=build_id,
+        )
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
+@router.post(
+    "/builds/{build_id}/select",
+    response_model=BuildStudioView,
+    responses=ERROR_RESPONSES,
+)
+def select_candidate(
+    build_id: str,
+    payload: CandidateActionRequest,
+    request: Request,
+    response: Response,
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        return service.select_candidate(
+            authenticated,
+            project_id=payload.project_id,
+            build_id=build_id,
+            candidate_id=payload.candidate_id,
+        )
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
+@router.post(
+    "/builds/{build_id}/cancel",
+    response_model=BuildStudioView,
+    responses=ERROR_RESPONSES,
+)
+def cancel_candidate(
+    build_id: str,
+    payload: CandidateActionRequest,
+    request: Request,
+    response: Response,
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        return service.cancel_candidate(
+            authenticated,
+            project_id=payload.project_id,
+            build_id=build_id,
+            candidate_id=payload.candidate_id,
+        )
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
+@router.post(
+    "/builds/{build_id}/resume",
+    response_model=BuildStudioView,
+    status_code=202,
+    responses=ERROR_RESPONSES,
+)
+def resume_candidate(
+    build_id: str,
+    payload: ResumeCandidateRequest,
+    request: Request,
+    response: Response,
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        return service.resume_candidate(
+            authenticated,
+            project_id=payload.project_id,
+            build_id=build_id,
+            candidate_id=payload.candidate_id,
+            message=payload.message,
+        )
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
+@router.post(
+    "/builds/{build_id}/context",
+    responses=ERROR_RESPONSES,
+)
+def contextual_command(
+    build_id: str,
+    payload: BuildContextCommandRequest,
+    request: Request,
+    response: Response,
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        return service.contextual_command(
+            authenticated,
+            project_id=payload.project_id,
+            build_id=build_id,
+            candidate_id=payload.candidate_id,
+            command=payload.command,
+            selected_node_ids=payload.selected_node_ids,
+        )
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
+def _authenticated_service(
+    request: Request,
+    response: Response,
+) -> tuple[StudioApplicationService, Any]:
+    service = require_studio_service(request)
+    authenticated = service.authenticate(
+        authorization=request.headers.get("authorization"),
+        origin_header=request.headers.get("origin"),
+        referer_header=request.headers.get("referer"),
+        cookie_header=request.headers.get("cookie"),
+    )
+    _forward_dify_cookies(response, authenticated.host.set_cookie_headers)
+    return service, authenticated
 
 
 def require_studio_service(request: Request) -> StudioApplicationService:

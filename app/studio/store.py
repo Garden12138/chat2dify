@@ -12,12 +12,15 @@ from uuid import NAMESPACE_URL, uuid5
 from app.agent.trace import redact_sensitive_data
 from app.studio.models import (
     Activity,
+    CandidateStatus,
     DurableJob,
     ExternalReceipt,
     Membership,
     OutboxMessage,
     Principal,
     Project,
+    StudioBuild,
+    StudioCandidate,
     StudioRole,
     StudioSession,
     new_id,
@@ -49,7 +52,7 @@ class StudioRecordNotFound(StudioStoreError):
     code = "STUDIO_RECORD_NOT_FOUND"
 
 
-_MIGRATION_VERSION = 1
+_MIGRATION_VERSION = 2
 _SCHEMA_STATEMENTS = [
     """
     CREATE TABLE IF NOT EXISTS studio_schema_migrations (
@@ -195,6 +198,45 @@ _SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS studio_builds (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        entry_source TEXT NOT NULL,
+        app_id TEXT,
+        app_mode TEXT NOT NULL,
+        app_name TEXT NOT NULL,
+        base_fingerprint TEXT,
+        selected_candidate_id TEXT,
+        status TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS studio_candidates (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        build_id TEXT NOT NULL,
+        run_id TEXT NOT NULL UNIQUE,
+        label TEXT NOT NULL,
+        intent TEXT NOT NULL,
+        source_candidate_ids_json TEXT NOT NULL,
+        base_fingerprint TEXT,
+        status TEXT NOT NULL,
+        ordinal INTEGER NOT NULL,
+        version INTEGER NOT NULL,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        UNIQUE(build_id, ordinal),
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE,
+        FOREIGN KEY(build_id) REFERENCES studio_builds(id) ON DELETE CASCADE
+    )
+    """,
+    """
     CREATE INDEX IF NOT EXISTS idx_studio_memberships_principal
         ON studio_memberships(principal_key, updated_at DESC)
     """,
@@ -209,6 +251,14 @@ _SCHEMA_STATEMENTS = [
     """
     CREATE INDEX IF NOT EXISTS idx_studio_outbox_claim
         ON studio_outbox(status, lease_expires_at, created_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_studio_builds_project
+        ON studio_builds(project_id, updated_at DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_studio_candidates_build
+        ON studio_candidates(build_id, ordinal)
     """,
 ]
 
@@ -803,6 +853,318 @@ class StudioStore:
             ).fetchall()
         return [_activity_from_row(row) for row in rows]
 
+    def create_build(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+        operation: str,
+        entry_source: str,
+        app_id: str | None,
+        app_mode: str,
+        app_name: str,
+    ) -> StudioBuild:
+        _, membership = self.get_project_for_principal(project_id, principal_key)
+        if membership.role not in {"owner", "admin", "builder"}:
+            raise StudioAccessDenied("Only a project builder can start Build Studio work.")
+        now = utc_now()
+        build = StudioBuild(
+            id=new_id(),
+            project_id=project_id,
+            created_by=principal_key,
+            operation=operation,
+            entry_source=entry_source,
+            app_id=app_id,
+            app_mode=app_mode,
+            app_name=app_name,
+            status="active",
+            version=1,
+            created_at=now,
+            updated_at=now,
+        )
+        with self._transaction(immediate=True) as connection:
+            self._execute(
+                connection,
+                """
+                INSERT INTO studio_builds(
+                    id, project_id, created_by, operation, entry_source,
+                    app_id, app_mode, app_name, base_fingerprint,
+                    selected_candidate_id, status, version, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 'active', 1, ?, ?)
+                """,
+                (
+                    build.id,
+                    project_id,
+                    principal_key,
+                    operation,
+                    entry_source,
+                    app_id,
+                    app_mode,
+                    app_name,
+                    _timestamp(now),
+                    _timestamp(now),
+                ),
+            )
+            _insert_activity(
+                self,
+                connection,
+                project_id=project_id,
+                principal_key=principal_key,
+                kind="build.started",
+                entity_type="build",
+                entity_id=build.id,
+                summary={
+                    "operation": operation,
+                    "app_id": app_id,
+                    "app_mode": app_mode,
+                    "entry_source": entry_source,
+                },
+                now=now,
+            )
+        return build
+
+    def get_build(
+        self,
+        build_id: str,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> StudioBuild:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            row = self._execute(
+                connection,
+                "SELECT * FROM studio_builds WHERE id = ? AND project_id = ?",
+                (build_id, project_id),
+            ).fetchone()
+        if row is None:
+            raise StudioRecordNotFound("The Build Studio work item was not found.")
+        return _build_from_row(row)
+
+    def add_candidate(
+        self,
+        *,
+        build_id: str,
+        project_id: str,
+        principal_key: str,
+        run_id: str,
+        label: str,
+        intent: str,
+        source_candidate_ids: list[str] | None = None,
+    ) -> StudioCandidate:
+        build = self.get_build(
+            build_id,
+            project_id=project_id,
+            principal_key=principal_key,
+        )
+        if build.status != "active":
+            raise StudioConflict("The Build Studio work item is not active.")
+        now = utc_now()
+        candidate_id = new_id()
+        sources = source_candidate_ids or []
+        with self._transaction(immediate=True) as connection:
+            row = self._execute(
+                connection,
+                "SELECT COALESCE(MAX(ordinal), 0) AS ordinal FROM studio_candidates WHERE build_id = ?",
+                (build_id,),
+            ).fetchone()
+            ordinal = int(_row_value(row, "ordinal") or 0) + 1
+            self._execute(
+                connection,
+                """
+                INSERT INTO studio_candidates(
+                    id, project_id, build_id, run_id, label, intent,
+                    source_candidate_ids_json, base_fingerprint, status,
+                    ordinal, version, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'queued', ?, 1, ?, ?)
+                """,
+                (
+                    candidate_id,
+                    project_id,
+                    build_id,
+                    run_id,
+                    label,
+                    intent,
+                    _json_dump({"ids": sources}),
+                    ordinal,
+                    _timestamp(now),
+                    _timestamp(now),
+                ),
+            )
+            self._execute(
+                connection,
+                "UPDATE studio_builds SET version = version + 1, updated_at = ? WHERE id = ?",
+                (_timestamp(now), build_id),
+            )
+            _insert_activity(
+                self,
+                connection,
+                project_id=project_id,
+                principal_key=principal_key,
+                kind="candidate.started",
+                entity_type="candidate",
+                entity_id=candidate_id,
+                summary={"build_id": build_id, "label": label, "sources": sources},
+                now=now,
+            )
+            candidate_row = self._execute(
+                connection,
+                "SELECT * FROM studio_candidates WHERE id = ?",
+                (candidate_id,),
+            ).fetchone()
+        assert candidate_row is not None
+        return _candidate_from_row(candidate_row)
+
+    def list_candidates(
+        self,
+        build_id: str,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> list[StudioCandidate]:
+        self.get_build(build_id, project_id=project_id, principal_key=principal_key)
+        with self._reader() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_candidates
+                WHERE build_id = ? AND project_id = ?
+                ORDER BY ordinal ASC
+                """,
+                (build_id, project_id),
+            ).fetchall()
+        return [_candidate_from_row(row) for row in rows]
+
+    def get_candidate(
+        self,
+        candidate_id: str,
+        *,
+        build_id: str,
+        project_id: str,
+        principal_key: str,
+    ) -> StudioCandidate:
+        self.get_build(build_id, project_id=project_id, principal_key=principal_key)
+        with self._reader() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_candidates
+                WHERE id = ? AND build_id = ? AND project_id = ?
+                """,
+                (candidate_id, build_id, project_id),
+            ).fetchone()
+        if row is None:
+            raise StudioRecordNotFound("The Build Studio candidate was not found.")
+        return _candidate_from_row(row)
+
+    def reconcile_candidate(
+        self,
+        candidate_id: str,
+        *,
+        status: CandidateStatus,
+        base_fingerprint: str | None,
+    ) -> StudioCandidate:
+        now = utc_now()
+        with self._transaction(immediate=True) as connection:
+            row = self._execute(
+                connection,
+                "SELECT * FROM studio_candidates WHERE id = ?",
+                (candidate_id,),
+            ).fetchone()
+            if row is None:
+                raise StudioRecordNotFound("The Build Studio candidate was not found.")
+            current = _candidate_from_row(row)
+            if current.status == status and current.base_fingerprint == base_fingerprint:
+                return current
+            self._execute(
+                connection,
+                """
+                UPDATE studio_candidates
+                SET status = ?, base_fingerprint = ?, version = version + 1, updated_at = ?
+                WHERE id = ?
+                """,
+                (status, base_fingerprint, _timestamp(now), candidate_id),
+            )
+            updated = self._execute(
+                connection,
+                "SELECT * FROM studio_candidates WHERE id = ?",
+                (candidate_id,),
+            ).fetchone()
+        assert updated is not None
+        return _candidate_from_row(updated)
+
+    def bind_build_base(
+        self,
+        build_id: str,
+        *,
+        base_fingerprint: str,
+    ) -> bool:
+        now = utc_now()
+        with self._transaction(immediate=True) as connection:
+            row = self._execute(
+                connection,
+                "SELECT base_fingerprint FROM studio_builds WHERE id = ?",
+                (build_id,),
+            ).fetchone()
+            if row is None:
+                raise StudioRecordNotFound("The Build Studio work item was not found.")
+            current = _optional_string(_row_value(row, "base_fingerprint"))
+            if current is not None:
+                return current == base_fingerprint
+            self._execute(
+                connection,
+                """
+                UPDATE studio_builds
+                SET base_fingerprint = ?, version = version + 1, updated_at = ?
+                WHERE id = ? AND base_fingerprint IS NULL
+                """,
+                (base_fingerprint, _timestamp(now), build_id),
+            )
+        return True
+
+    def select_candidate(
+        self,
+        candidate_id: str,
+        *,
+        build_id: str,
+        project_id: str,
+        principal_key: str,
+    ) -> StudioBuild:
+        candidate = self.get_candidate(
+            candidate_id,
+            build_id=build_id,
+            project_id=project_id,
+            principal_key=principal_key,
+        )
+        if candidate.status != "valid" or not candidate.base_fingerprint:
+            raise StudioConflict("Only a valid, base-bound candidate can be selected.")
+        build = self.get_build(build_id, project_id=project_id, principal_key=principal_key)
+        if build.base_fingerprint != candidate.base_fingerprint:
+            raise StudioConflict("The candidate no longer matches the pinned Build base.")
+        now = utc_now()
+        with self._transaction(immediate=True) as connection:
+            self._execute(
+                connection,
+                """
+                UPDATE studio_builds
+                SET selected_candidate_id = ?, version = version + 1, updated_at = ?
+                WHERE id = ? AND project_id = ?
+                """,
+                (candidate.id, _timestamp(now), build_id, project_id),
+            )
+            _insert_activity(
+                self,
+                connection,
+                project_id=project_id,
+                principal_key=principal_key,
+                kind="candidate.selected",
+                entity_type="candidate",
+                entity_id=candidate.id,
+                summary={"build_id": build_id, "label": candidate.label},
+                now=now,
+            )
+        return self.get_build(build_id, project_id=project_id, principal_key=principal_key)
+
     def enqueue_job(
         self,
         *,
@@ -1298,6 +1660,51 @@ def _activity_from_row(row: Any) -> Activity:
         entity_id=str(_row_value(row, "entity_id")),
         summary=_json_load(_row_value(row, "summary_json")),
         created_at=_datetime(_row_value(row, "created_at")),
+    )
+
+
+def _build_from_row(row: Any) -> StudioBuild:
+    return StudioBuild(
+        id=str(_row_value(row, "id")),
+        project_id=str(_row_value(row, "project_id")),
+        created_by=str(_row_value(row, "created_by")),
+        operation=str(_row_value(row, "operation")),
+        entry_source=str(_row_value(row, "entry_source")),
+        app_id=_optional_string(_row_value(row, "app_id")),
+        app_mode=str(_row_value(row, "app_mode")),
+        app_name=str(_row_value(row, "app_name")),
+        base_fingerprint=_optional_string(_row_value(row, "base_fingerprint")),
+        selected_candidate_id=_optional_string(
+            _row_value(row, "selected_candidate_id")
+        ),
+        status=str(_row_value(row, "status")),
+        version=int(_row_value(row, "version")),
+        created_at=_datetime(_row_value(row, "created_at")),
+        updated_at=_datetime(_row_value(row, "updated_at")),
+    )
+
+
+def _candidate_from_row(row: Any) -> StudioCandidate:
+    source_payload = _json_load(_row_value(row, "source_candidate_ids_json"))
+    raw_sources = source_payload.get("ids")
+    return StudioCandidate(
+        id=str(_row_value(row, "id")),
+        project_id=str(_row_value(row, "project_id")),
+        build_id=str(_row_value(row, "build_id")),
+        run_id=str(_row_value(row, "run_id")),
+        label=str(_row_value(row, "label")),
+        intent=str(_row_value(row, "intent")),
+        source_candidate_ids=(
+            [str(item) for item in raw_sources]
+            if isinstance(raw_sources, list)
+            else []
+        ),
+        base_fingerprint=_optional_string(_row_value(row, "base_fingerprint")),
+        status=str(_row_value(row, "status")),
+        ordinal=int(_row_value(row, "ordinal")),
+        version=int(_row_value(row, "version")),
+        created_at=_datetime(_row_value(row, "created_at")),
+        updated_at=_datetime(_row_value(row, "updated_at")),
     )
 
 

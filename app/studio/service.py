@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from app.agent.service import AgentApplicationService
 from app.agent.store import AgentStore
+from app.agent.state import RunConstraints
+from app.studio.build import BuildCommandMode, ContextCommand, StudioBuildService
 from app.studio.home import StudioHomeService
 from app.studio.identity import (
     AuthenticatedStudioRequest,
     IssuedStudioSession,
     StudioIdentityService,
+    StudioHostUnavailable,
 )
 from app.studio.models import StudioHome
 
@@ -17,9 +20,11 @@ class StudioApplicationService:
         *,
         identity: StudioIdentityService,
         home: StudioHomeService,
+        build: StudioBuildService | None = None,
     ) -> None:
         self.identity = identity
         self.home_service = home
+        self.build_service = build
 
     def issue_session(
         self,
@@ -87,4 +92,52 @@ class StudioApplicationService:
             message=message,
             agent_store=agent_store,
             agent_service=agent_service,
+        )
+
+    def require_build(self) -> StudioBuildService:
+        if self.build_service is None:
+            raise StudioHostUnavailable("Build Studio requires the v4 safety core.")
+        return self.build_service
+
+    def create_build(self, authenticated, **kwargs):
+        return self.require_build().create(authenticated, **kwargs)
+
+    def get_build(self, authenticated, **kwargs):
+        return self.require_build().get(authenticated, **kwargs)
+
+    def command_build(
+        self,
+        authenticated,
+        *,
+        mode: BuildCommandMode,
+        constraints: RunConstraints | None = None,
+        **kwargs,
+    ):
+        return self.require_build().command(
+            authenticated,
+            mode=mode,
+            constraints=constraints,
+            **kwargs,
+        )
+
+    def select_candidate(self, authenticated, **kwargs):
+        return self.require_build().select(authenticated, **kwargs)
+
+    def cancel_candidate(self, authenticated, **kwargs):
+        return self.require_build().cancel_candidate(authenticated, **kwargs)
+
+    def resume_candidate(self, authenticated, **kwargs):
+        return self.require_build().resume_candidate(authenticated, **kwargs)
+
+    def contextual_command(
+        self,
+        authenticated,
+        *,
+        command: ContextCommand,
+        **kwargs,
+    ):
+        return self.require_build().contextual_command(
+            authenticated,
+            command=command,
+            **kwargs,
         )

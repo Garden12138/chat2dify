@@ -92,6 +92,7 @@ class AgentApplicationService:
         app_mode: str,
         app_name: str | None = None,
         app_description: str = "",
+        allow_config_create: bool = False,
     ) -> AgentSession:
         supported_modes = {
             "workflow",
@@ -105,7 +106,11 @@ class AgentApplicationService:
                 "Builder Agent received an unsupported Dify application mode."
             )
         normalized_app_id = (app_id or "").strip() or None
-        if app_mode in CONFIG_APP_MODES and normalized_app_id is None:
+        if (
+            app_mode in CONFIG_APP_MODES
+            and normalized_app_id is None
+            and not allow_config_create
+        ):
             raise ValueError(
                 "Configured-app Builder sessions require an existing app_id; "
                 "new configured apps remain on the v3 fallback path."
@@ -296,6 +301,8 @@ class AgentApplicationService:
         constraints = RunConstraints(
             allow_draft_test=run.constraints.allow_draft_test,
             allow_destructive=run.constraints.allow_destructive,
+            workspace_only=run.constraints.workspace_only,
+            read_only=run.constraints.read_only,
             selected_node_ids=selected_node_ids,
             selected_edge_ids=selected_edge_ids,
             viewport=viewport,
@@ -436,6 +443,15 @@ class AgentApplicationService:
         approval_id: str,
     ) -> CommitResult | CreationCommitResult | ConfigCommitResult:
         run = self.store.get_run(run_id)
+        if run.constraints.workspace_only:
+            raise CommitServiceError(
+                "COMMIT_DISABLED_FOR_CANDIDATE",
+                (
+                    "Build Studio candidates are Workspace-only in v5 Phase 1; "
+                    "selecting a candidate never writes Dify."
+                ),
+                status_code=409,
+            )
         session = self.store.get_session(run.session_id)
         if session.app_mode in CONFIG_APP_MODES:
             if self.config_commit_service is None:

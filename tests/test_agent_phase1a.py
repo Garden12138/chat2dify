@@ -857,7 +857,7 @@ def test_snapshot_workspace_patch_is_transactional_reversible_and_private(tmp_pa
     assert run.snapshot is not None
     assert run.snapshot.base_graph["custom_graph_metadata"] == {"preserve": True}
     assert run.snapshot.environment_variables[0]["value"] == "must-stay-private"
-    assert {item["type"] for item in run.snapshot.capabilities} == {
+    assert {
         "document-extractor",
         "end",
         "http-request",
@@ -866,7 +866,10 @@ def test_snapshot_workspace_patch_is_transactional_reversible_and_private(tmp_pa
         "knowledge-retrieval",
         "llm",
         "tool",
-    }
+    }.issubset({item["type"] for item in run.snapshot.capabilities})
+    assert {"code", "question-classifier", "iteration", "loop"}.issubset(
+        {item["type"] for item in run.snapshot.capabilities}
+    )
 
     context = BuilderContextBuilder(store=stack.store).build(run)
     result = stack.workspace.apply_patch(
@@ -909,6 +912,47 @@ def test_snapshot_workspace_patch_is_transactional_reversible_and_private(tmp_pa
     assert exc_info.value.code == "WORKSPACE_PATCH_VALIDATION_FAILED"
     assert stack.store.get_run(run.id).head_version_id == head_before
     assert len(stack.store.list_workspace_versions(run.id)) == 2
+
+
+def test_runtime_rejects_dirty_or_stale_canvas_before_any_model_decision(tmp_path) -> None:
+    dirty_provider = NoopDecisionProvider()
+    dirty_stack = _stack(tmp_path, "workflow", dirty_provider)
+    dirty_session = dirty_stack.service.create_session(
+        app_id="app-dirty",
+        app_mode="workflow",
+    )
+    dirty_submitted = dirty_stack.service.submit_goal(
+        dirty_session.id,
+        message="Explain the selected path.",
+        constraints=RunConstraints(
+            dirty_state=True,
+            canvas_draft_hash="hash-v0",
+            canvas_context_revision=1,
+        ),
+    )
+    dirty_run = dirty_stack.store.get_run(dirty_submitted.id)
+    assert dirty_run.phase == RunPhase.FAILED
+    assert dirty_run.error["code"] == "CANVAS_DIRTY_STATE"
+    assert dirty_provider.calls == 0
+
+    stale_provider = NoopDecisionProvider()
+    stale_stack = _stack(tmp_path, "advanced-chat", stale_provider)
+    stale_session = stale_stack.service.create_session(
+        app_id="app-stale",
+        app_mode="advanced-chat",
+    )
+    stale_submitted = stale_stack.service.submit_goal(
+        stale_session.id,
+        message="Explain the selected path.",
+        constraints=RunConstraints(
+            canvas_draft_hash="stale-browser-hash",
+            canvas_context_revision=1,
+        ),
+    )
+    stale_run = stale_stack.store.get_run(stale_submitted.id)
+    assert stale_run.phase == RunPhase.FAILED
+    assert stale_run.error["code"] == "CANVAS_HASH_MISMATCH"
+    assert stale_provider.calls == 0
 
 
 def test_snapshot_pins_sanitized_dynamic_dify_resources() -> None:

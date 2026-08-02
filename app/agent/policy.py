@@ -41,6 +41,12 @@ class AgentToolPolicy:
         *,
         goal_step_id: str = "test",
     ) -> ToolAuthorization:
+        if run.constraints.read_only and spec.side_effect != "none":
+            return ToolAuthorization(
+                allowed=False,
+                code="READ_ONLY_TOOL_FORBIDDEN",
+                message="This Run may inspect and explain, but cannot mutate a Workspace or execute side effects.",
+            )
         if spec.side_effect in {"none", "workspace"} and spec.approval == "never":
             return ToolAuthorization(allowed=True)
         if spec.side_effect == "draft_run":

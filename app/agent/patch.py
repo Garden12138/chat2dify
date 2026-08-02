@@ -74,6 +74,13 @@ class UpdateNode(PatchOperationBase):
         return value
 
 
+class RemoveNode(PatchOperationBase):
+    op: Literal["node.remove"]
+    node_id: NodeReference
+    expected_type: NodeType
+    expected_title: str | None = Field(default=None, min_length=1, max_length=256)
+
+
 class AddEdge(PatchOperationBase):
     op: Literal["edge.add"]
     source: NodeReference
@@ -152,6 +159,7 @@ class ConversationVariableRemove(PatchOperationBase):
 PatchOperation = Annotated[
     AddNode
     | UpdateNode
+    | RemoveNode
     | AddEdge
     | RemoveEdge
     | ConversationVariableAdd

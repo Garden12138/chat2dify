@@ -53,6 +53,9 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
         studio_script = client.get("/static/studio/home/index.js")
         studio_core = client.get("/static/studio/home/core.mjs")
         studio_styles = client.get("/static/studio/home/styles.css")
+        build_script = client.get("/static/studio/build/index.js")
+        build_core = client.get("/static/studio/build/core.mjs")
+        build_styles = client.get("/static/studio/build/styles.css")
 
     assert index.status_code == 200
     assert "chat2dify" in index.text
@@ -77,6 +80,9 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert 'aria-label="Studio 主导航"' in index.text
     assert 'id="studio-search-input"' in index.text
     assert 'id="studio-mode-select"' in index.text
+    assert 'id="studio-build-content"' in index.text
+    assert 'id="studio-candidate-tabs"' in index.text
+    assert 'id="studio-resume-candidate"' in index.text
     assert "Reviews & Releases" in index.text
     assert 'static/agent-workbench.js?v=chat-v5.0.0' in index.text
     assert 'id="create-form"' not in index.text
@@ -135,6 +141,12 @@ def test_web_ui_index_and_static_assets(monkeypatch) -> None:
     assert "/api/v5/studio/session" in studio_script.text
     assert "isStudioHomeEnabled" in studio_core.text
     assert ".studio-shell" in studio_styles.text
+    assert build_script.status_code == 200
+    assert build_core.status_code == 200
+    assert build_styles.status_code == 200
+    assert "/api/v5/studio/builds" in build_script.text
+    assert "buildCommandPayload" in build_core.text
+    assert ".studio-build-grid" in build_styles.text
 
 
 def test_health_returns_configured_dataset_count(monkeypatch) -> None:

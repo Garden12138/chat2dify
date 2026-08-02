@@ -66,7 +66,7 @@ def test_populated_v4_sqlite_migrates_additively_without_data_loss(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }
-    assert studio.schema_version() == 1
+    assert studio.schema_version() == 2
     assert before_session == after_session
     assert before_run_count == after_run_count == 1
     assert before_tables <= after_tables
@@ -74,6 +74,8 @@ def test_populated_v4_sqlite_migrates_additively_without_data_loss(
     assert "studio_jobs" in after_tables
     assert "studio_outbox" in after_tables
     assert "studio_receipts" in after_tables
+    assert "studio_builds" in after_tables
+    assert "studio_candidates" in after_tables
     assert v4.get_run(run.id).goal == "Keep me."
 
 
@@ -147,6 +149,71 @@ def test_optimistic_project_version_activity_redaction_and_membership_roles(
     )
     assert "must-not-persist" not in str(activity)
     assert "[REDACTED]" in str(activity)
+
+
+def test_build_candidates_are_project_scoped_base_bound_and_selectable(
+    tmp_path: Path,
+) -> None:
+    store = StudioStore(f"sqlite:///{tmp_path / 'studio.sqlite3'}")
+    alice = _principal("alice")
+    bob = _principal("bob")
+    project, _ = store.ensure_personal_project(alice)
+    store.ensure_personal_project(bob)
+    build = store.create_build(
+        project_id=project.id,
+        principal_key=alice.key,
+        operation="modify",
+        entry_source="home",
+        app_id="app-1",
+        app_mode="advanced-chat",
+        app_name="售后 Chatflow",
+    )
+    first = store.add_candidate(
+        build_id=build.id,
+        project_id=project.id,
+        principal_key=alice.key,
+        run_id="run-1",
+        label="人工接管",
+        intent="低置信度时转人工",
+    )
+    second = store.add_candidate(
+        build_id=build.id,
+        project_id=project.id,
+        principal_key=alice.key,
+        run_id="run-2",
+        label="二次追问",
+        intent="低置信度时继续澄清",
+        source_candidate_ids=[first.id],
+    )
+
+    assert [item.ordinal for item in store.list_candidates(
+        build.id,
+        project_id=project.id,
+        principal_key=alice.key,
+    )] == [1, 2]
+    assert store.bind_build_base(build.id, base_fingerprint="hash-1") is True
+    assert store.bind_build_base(build.id, base_fingerprint="hash-2") is False
+    first = store.reconcile_candidate(
+        first.id,
+        status="valid",
+        base_fingerprint="hash-1",
+    )
+    selected = store.select_candidate(
+        first.id,
+        build_id=build.id,
+        project_id=project.id,
+        principal_key=alice.key,
+    )
+
+    assert first.status == "valid"
+    assert selected.selected_candidate_id == first.id
+    assert second.source_candidate_ids == [first.id]
+    with pytest.raises(StudioAccessDenied):
+        store.get_build(
+            build.id,
+            project_id=project.id,
+            principal_key=bob.key,
+        )
 
 
 def test_job_outbox_lease_and_receipt_primitives_are_idempotent(

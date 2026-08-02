@@ -48,12 +48,18 @@ class ConfigAppSnapshotService:
         ],
         dify_version: DifyVersionInfo,
         compatibility: DifyCompatibilityMatrix,
+        default_model_provider: str = "openai",
+        default_model_name: str = "gpt-4o-mini",
     ) -> None:
         self.client_factory = client_factory
         self.dify_version = dify_version
         self.compatibility = compatibility
+        self.default_model_provider = default_model_provider
+        self.default_model_name = default_model_name
 
     def capture(self, session) -> AgentConfigSnapshot:
+        if session.operation == "create":
+            return self._create_scaffold_snapshot(session)
         if session.operation != "modify" or not session.app_id:
             raise WorkspaceOperationError(
                 "CONFIG_APP_CREATE_UNSUPPORTED",
@@ -94,6 +100,7 @@ class ConfigAppSnapshotService:
             decision=decision,
         )
         return AgentConfigSnapshot(
+            operation="modify",
             app_id=session.app_id,
             app_name=app.name or f"Dify {app_mode} app",
             app_description=app.description,
@@ -106,6 +113,50 @@ class ConfigAppSnapshotService:
                 "app_dsl_version": self.dify_version.app_dsl_version,
             },
             capabilities=capabilities,
+            compatibility=decision.model_dump(mode="json"),
+        )
+
+    def _create_scaffold_snapshot(self, session) -> AgentConfigSnapshot:
+        app_mode = str(session.app_mode or "")
+        if app_mode not in CONFIG_APP_MODES:
+            raise WorkspaceOperationError(
+                "CONFIG_APP_MODE_UNSUPPORTED",
+                "Configured-app creation requires Chatbot, Completion, or Agent mode.",
+            )
+        if session.app_id is not None:
+            raise WorkspaceOperationError(
+                "CONFIG_APP_CREATE_ALREADY_BOUND",
+                "A configured-app create Session cannot already reference a Dify app.",
+            )
+        decision = self.compatibility.decide(
+            self.dify_version,
+            app_mode=app_mode,
+        )
+        config = _create_config_scaffold(
+            app_mode,
+            provider=self.default_model_provider,
+            model_name=self.default_model_name,
+        )
+        return AgentConfigSnapshot(
+            operation="create",
+            app_id=None,
+            app_name=session.app_name or _default_config_app_name(app_mode),
+            app_description=(
+                session.app_description
+                or "Created from a deterministic Chat2Dify Config Workspace scaffold."
+            ),
+            app_mode=app_mode,
+            base_hash=None,
+            base_config=config,
+            dify_version={
+                "source_dir": self.dify_version.source_dir,
+                "git_describe": self.dify_version.git_describe,
+                "app_dsl_version": self.dify_version.app_dsl_version,
+            },
+            capabilities=self.compatibility.pin_capabilities(
+                config_capabilities(app_mode),
+                decision=decision,
+            ),
             compatibility=decision.model_dump(mode="json"),
         )
 
@@ -451,6 +502,42 @@ def validate_config(
         graph_compiled=False,
         side_effects=classify_config_side_effects(app_mode, config),
     )
+
+
+def _create_config_scaffold(
+    app_mode: str,
+    *,
+    provider: str,
+    model_name: str,
+) -> dict[str, Any]:
+    config: dict[str, Any] = {
+        "model": {
+            "provider": provider,
+            "name": model_name,
+            "mode": "chat",
+            "completion_params": {},
+        },
+        "pre_prompt": "",
+        "opening_statement": "",
+        "suggested_questions": [],
+        "file_upload": {"enabled": False},
+        "dataset_configs": {"retrieval_model": "single"},
+    }
+    if app_mode == "agent-chat":
+        config["agent_mode"] = {
+            "enabled": True,
+            "strategy": "react",
+            "tools": [],
+        }
+    return config
+
+
+def _default_config_app_name(app_mode: str) -> str:
+    return {
+        "chat": "New Chatbot",
+        "completion": "New Completion App",
+        "agent-chat": "New Dify Agent",
+    }[app_mode]
 
 
 def classify_config_side_effects(

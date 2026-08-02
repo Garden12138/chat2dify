@@ -9,7 +9,7 @@
 >   [`docs/goals/v5.0.0-goal-prompts.md`](goals/v5.0.0-goal-prompts.md)
 > - v4 evidence:
 >   [`docs/archive/v4.0.0-tasks.md`](archive/v4.0.0-tasks.md)
-> - Last updated: 2026-07-30
+> - Last updated: 2026-08-02
 
 ## 1. Product outcome
 
@@ -75,7 +75,7 @@ Rules:
 | Phase | Product milestone | Dependencies | Status |
 | --- | --- | --- | --- |
 | Phase 0 | Studio shell, Home, projects, identity, and migration foundation | v4.0.0 completed | `completed` |
-| Phase 1 | Build Studio and safe candidate variants | Phase 0 | `pending` |
+| Phase 1 | Build Studio and safe candidate variants | Phase 0 | `completed` |
 | Phase 2 | Blueprint Gallery and guided pattern reuse | Phase 1 | `pending` |
 | Phase 3 | Scenario Lab and isolated candidate Preview | Phase 2 | `pending` |
 | Phase 4 | Collaborative Review and Release Center | Phase 3 | `pending` |
@@ -331,7 +331,7 @@ and the new persistence/identity foundation is safe for later product phases.
 
 ## 7. Phase 1 — Build Studio and safe candidate variants
 
-Status: `pending`
+Status: `completed`
 
 Dependencies: Phase 0 `completed`
 
@@ -341,51 +341,51 @@ candidate without changing Dify.
 
 ### Tasks
 
-- [ ] **P1-01 — Unified Build Studio**
+- [x] **P1-01 — Unified Build Studio**
   - Combine composer, Goal Plan, selected Dify context, node inspector,
     Timeline, business preview, validation, risk, and technical details.
   - Preserve v4 origin/nonce/dirty-state/Hash security.
   - Provide “explain first” and “show alternatives” modes.
 
-- [ ] **P1-02 — Candidate variant model**
+- [x] **P1-02 — Candidate variant model**
   - Fork two or three candidate Workspaces from the same base.
   - Give each candidate a business summary, assumptions, changed path, risk,
     validation state, and provenance.
   - Keep every edit as normal typed Patch history.
   - Never merge candidates through raw graph replacement.
 
-- [ ] **P1-03 — Candidate comparison**
+- [x] **P1-03 — Candidate comparison**
   - Compare business behavior, nodes/edges, model/resources, side effects,
     estimated cost inputs, validation, and unresolved questions.
   - Let users select one candidate or ask the Agent to synthesize a new one
     through explicit Patch operations.
 
-- [ ] **P1-04 — Dify-native contextual commands**
+- [x] **P1-04 — Dify-native contextual commands**
   - Explain selected nodes and variable flow.
   - Propose safer fallback/error paths.
   - Generate scenarios for a branch.
   - Suggest compatible models/datasets/tools from the pinned catalog.
   - Keep external metadata untrusted and sanitized.
 
-- [ ] **P1-05 — Config app creation**
+- [x] **P1-05 — Config app creation**
   - Add v5 creation for Chatbot, Completion, and Dify Agent.
   - Reuse typed Config Patch, validation, review, and exact approval.
   - Do not fall back to model-authored arbitrary config dictionaries.
 
-- [ ] **P1-06 — Typed capability coverage**
+- [x] **P1-06 — Typed capability coverage**
   - Add versioned mutation definitions for the node families already supported
     by the v3 Plan IR.
   - Add explicit, guarded `node.remove` and only the minimum additional typed
     operations needed for supported containers/triggers.
   - Continue to forbid arbitrary JSON Pointer and raw DSL.
 
-- [ ] **P1-07 — Layout and preview**
+- [x] **P1-07 — Layout and preview**
   - Generate non-destructive candidate layout previews.
   - Preserve unrelated positions and container metadata.
   - Allow “focus changed path” and “fit candidate” without treating browser
     graph state as authoritative.
 
-- [ ] **P1-08 — Build Studio tests**
+- [x] **P1-08 — Build Studio tests**
   - Cover candidate fork/isolation, comparison, synthesis, selected context,
     configured-app creation, node coverage, removal preconditions, layout,
     invalid candidate, cancellation, restart, prompt injection, and no Dify
@@ -399,15 +399,148 @@ candidate without changing Dify.
 
 ### Acceptance criteria
 
-- [ ] Candidates share a base but cannot mutate one another.
-- [ ] Every candidate is reconstructable from typed Workspace history.
-- [ ] Comparison is understandable without opening raw Plan/DSL.
-- [ ] All claimed node types have deterministic compile/decompile/validation
+- [x] Candidates share a base but cannot mutate one another.
+- [x] Every candidate is reconstructable from typed Workspace history.
+- [x] Comparison is understandable without opening raw Plan/DSL.
+- [x] All claimed node types have deterministic compile/decompile/validation
       and negative coverage.
-- [ ] No Dify write occurs in Phase 1.
-- [ ] Fixed usability users reach a valid first candidate in median
+- [x] No Dify write occurs in Phase 1.
+- [x] Fixed usability users reach a valid first candidate in median
       `< 3 minutes`.
-- [ ] Targeted tests, full supported suite, and `git diff --check` pass.
+- [x] Targeted tests, full supported suite, and `git diff --check` pass.
+
+### Implementation record
+
+- Started: 2026-08-02
+- Completed: 2026-08-02
+- Fixed Phase 1 user journey:
+  1. Open an existing after-sales Chatflow from Studio Home or its Dify
+     canvas and enter one Build Studio containing the composer, Goal Plan,
+     authoritative selection context, Node Inspector, Timeline, Business
+     Preview, Validation, Risk, and progressively disclosed Technical Detail.
+  2. Submit “为当前售后 Chatflow 提供两个低置信度兜底方案：人工接管和二次追问。”
+     in “show alternatives” mode. Observe two candidates forked from the same
+     pinned base and no Dify write.
+  3. Compare Business Behavior, Node/Edge changes, Model/Resource needs, Side
+     Effects, Validation, assumptions, and unresolved questions without
+     opening raw Plan or DSL; select one valid candidate.
+  4. Ask “基于两个方案再生成一个” and verify synthesis creates a new
+     independently reconstructable candidate through typed Patch operations,
+     without mutating either source candidate.
+  5. From a real Dify selection, explain the selected node and variable flow,
+     request a safer fallback and resource suggestions, then preview the
+     changed path/layout without treating browser graph data as authoritative.
+  6. Repeat the v5 creation entry for Chatbot, Completion, and Dify Agent;
+     verify each uses typed Config Patch and reaches a valid candidate without
+     writing Dify.
+- Fixed Phase 1 usability and safety targets:
+  - median goal-to-first-valid-candidate time is less than three minutes on
+    the fixed task set;
+  - candidate comparison and selection require no raw Plan, Patch, Graph,
+    DSL, or provider payload;
+  - all primary actions are keyboard reachable, have accessible names, and
+    preserve focus across candidate switches and async states;
+  - drawer and full-page layouts expose truthful loading, empty, partial,
+    permission-denied, offline, conflict, cancellation, and failure states;
+  - candidate fork, synthesis, cancellation, and restart produce zero Dify
+    writes before a later-phase reviewed release action.
+- Delivered product slice:
+  - One responsive Build Studio now combines the composer, explain/2-or-3
+    alternatives/synthesis modes, Goal Plan, authoritative Dify context, Node
+    Inspector, Timeline, business preview, deterministic Validation, Risk &
+    Side Effects, Changed Path, comparison, layout preview, recovery, and
+    progressively disclosed Typed Patch/version evidence.
+  - Project-scoped Build and Candidate records bind every candidate to its own
+    v4 Agent Session/Run and versioned Workspace. Two or three alternatives
+    start from one pinned base fingerprint; a mismatch becomes a visible
+    conflict. Selection changes only Studio state, and synthesis creates a new
+    candidate from distinct source evidence without modifying either source.
+  - “先解释” is enforced by a server-side read-only Run constraint: Workspace,
+    Draft Run, and other side-effect Tools are denied even when untrusted input
+    asks the model to ignore the instruction. Every Phase 1 Run is also
+    `workspace_only`; Commit fails with `COMMIT_DISABLED_FOR_CANDIDATE`.
+  - Canvas-opened Build requires the origin/source/nonce handshake, revision,
+    clean dirty-state, and Draft Hash. Runtime re-reads the authoritative Dify
+    Snapshot and rejects stale Hash before the first model decision. Browser
+    Raw Graph, user, role, project, app mode, and forged node IDs are not
+    authoritative.
+  - Context commands explain selected nodes and variable flow from the server
+    Workspace, create a new safer-fallback Candidate, return scenario ideas,
+    and expose only allowlisted, sanitized resources from the pinned
+    Capability Snapshot.
+  - Chatbot, Completion, and Dify Agent creation use deterministic Config
+    scaffolds plus the separate Config Patch IR, Config validation, business
+    Diff, risk, reverse snapshot, and exact version boundary. No arbitrary
+    configuration dictionary or Dify creation call is model-visible.
+  - The versioned catalog now covers every v3 top-level Plan node family;
+    internal iteration/loop control nodes remain container-owned. Mutation
+    definitions are enforced by Workspace operations, and guarded
+    `node.remove` requires exact type/title preconditions plus explicit
+    incident-edge removal and forbids entry-node deletion.
+  - Candidate layout reads only persisted server Snapshot/Workspace state,
+    preserves unrelated positions and container metadata, places new nodes in
+    a non-mutating preview surface, and supports focus/fit without accepting a
+    browser Graph as a commit source.
+- Product, usability, and accessibility evidence:
+  - In the in-app Browser at `1280 × 720`, the fixed after-sales task produced
+    two valid “人工接管” and “二次追问” candidates, a seven-dimension comparison,
+    preserved/new layout labels, typed Timeline evidence, and the authoritative
+    “Dify 写入 0” state. Keyboard `ArrowLeft` moved the selected tab and focus
+    together; selecting a candidate produced “Dify 仍未发生写入”.
+  - Synthesizing the two checked sources produced a third independently
+    selected “综合方案” while the zero-write state remained authoritative.
+    Variable-flow explanation came from the server Workspace and contained no
+    Raw Graph/Plan/DSL.
+  - Browser QA found and fixed a real min-content overlap that made the select
+    button visible but covered by the Inspector. It also moved the large layout
+    canvas inside its own scroll surface. Final desktop and `720 × 696` Dify
+    drawer audits had no page-level horizontal overflow; comparison/layout
+    scroll remained local to its card.
+  - Both fixed browser viewport trials reached the first valid candidate in
+    under five seconds with the deterministic acceptance adapter (median under
+    five seconds, well below three minutes). This measures the product path and
+    rendering, not production model-provider latency.
+  - The final rendered surface exposed 26 visible interactive controls, zero
+    unnamed controls, keyboard-reachable candidate tabs, explicit status text,
+    responsive breakpoints, and reduced-motion behavior. Empty, offline/auth,
+    invalid, conflict, cancelled, interrupted, waiting-input, and failure states
+    have truthful product copy and safe refresh/resume actions.
+- Real Dify and safety evidence:
+  - `CHAT2DIFY_LIVE_DIFY_ACCEPTANCE=1` passed against the configured localhost
+    Dify: login, current account/Workspace, accessible applications, Studio
+    Principal issuance, and per-request revalidation were authoritative. The
+    browser available to this run had no existing Dify login, so populated
+    visual interaction used an isolated host adapter while the real Dify
+    identity boundary was verified separately; no Dify application was
+    created, modified, published, or left behind.
+  - Candidate isolation, reconstructability, distinct synthesis sources,
+    invalid/cancelled/restarted Runs, explicit resume without replay,
+    prompt-injection denial, project authorization, raw-graph rejection,
+    config creation, node removal guards, layout preservation, and zero Dify
+    writes have deterministic tests.
+- Verification:
+  - `.venv/bin/python -m pytest -q tests/test_dify_graph.py
+    tests/test_compiler_and_validator.py tests/test_triggers.py
+    tests/test_agent_registry_catalog_patch.py tests/test_studio_build.py
+    tests/test_studio_v5.py tests/test_studio_store.py` → `131 passed, 1 skipped`.
+  - `CHAT2DIFY_LIVE_DIFY_ACCEPTANCE=1 .venv/bin/python -m pytest -q
+    tests/test_studio_v5_live.py` → `1 passed` against localhost Dify.
+  - `.venv/bin/python -m pytest -q` → `486 passed, 14 skipped`; skips remain
+    explicit live/provider/PostgreSQL opt-ins, and the v5 live Dify case was
+    run separately above.
+  - `node --test tests/frontend/*.test.mjs` → `21 passed`.
+  - `git diff --check` → passed.
+- Decisions and limitations:
+  - Phase 1 reports deterministic cost inputs and side-effect classes, not
+    fabricated monetary estimates. Real candidate execution, Scenario quality
+    metrics, reviewed Apply/Publish, Git, and production Run correlation remain
+    in their later selected phases.
+  - Interrupted candidates persist their Workspace and require an explicit
+    resume; no Dify/model/external action is automatically replayed after
+    restart. Temporary preview servers, cookies, SQLite files, and bytecode
+    created for browser acceptance were stopped, cleared, and removed.
+  - No repository commit, push, image/package publish, pull request, Phase 2
+    implementation, or Dify write was performed.
 
 ## 8. Phase 2 — Blueprint Gallery and guided reuse
 

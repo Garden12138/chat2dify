@@ -145,7 +145,7 @@ ConfigPatchOperation = Annotated[
 
 class ConfigPatchDocument(StrictModel):
     workspace_version: str = Field(min_length=1, max_length=128)
-    expected_base_hash: str = Field(min_length=1, max_length=512)
+    expected_base_hash: str | None = Field(default=None, min_length=1, max_length=512)
     app_mode: ConfigAppMode
     operations: list[ConfigPatchOperation] = Field(
         min_length=1,

@@ -17,6 +17,7 @@ from app.agent.patch import (
     ConversationVariableUpdate,
     PatchDocument,
     RemoveEdge,
+    RemoveNode,
     UpdateNode,
 )
 from app.agent.state import (
@@ -515,7 +516,11 @@ def _apply_operations(
     for operation in patch.operations:
         if isinstance(operation, AddNode):
             definition = catalog.get(operation.node_type)
-            if definition is None or app_mode not in definition.supported_app_modes:
+            if (
+                definition is None
+                or app_mode not in definition.supported_app_modes
+                or "node.add" not in definition.mutation_operations
+            ):
                 raise WorkspaceOperationError(
                     "PATCH_NODE_TYPE_UNSUPPORTED",
                     f"Node type {operation.node_type} is not available for {app_mode}.",
@@ -544,9 +549,10 @@ def _apply_operations(
             node = _require_node(nodes, operation.node_id)
             node_type = str(node.get("type") or "")
             definition = catalog.get(node_type)
-            if node_type != "start" and (
+            if (
                 definition is None
                 or app_mode not in definition.supported_app_modes
+                or "node.update" not in definition.mutation_operations
             ):
                 raise WorkspaceOperationError(
                     "PATCH_NODE_TYPE_UNSUPPORTED",
@@ -557,6 +563,88 @@ def _apply_operations(
                 node,
                 _resolve_temp_refs(operation.set_values, temp_ref_map),
             )
+        elif isinstance(operation, RemoveNode):
+            if operation.node_id.startswith("tmp_"):
+                raise WorkspaceOperationError(
+                    "PATCH_REMOVE_REQUIRES_EXISTING_NODE",
+                    "node.remove must reference an existing server node ID.",
+                )
+            node = _require_node(nodes, operation.node_id)
+            node_type = str(node.get("type") or "")
+            if node_type != operation.expected_type:
+                raise WorkspaceOperationError(
+                    "PATCH_NODE_REMOVE_PRECONDITION_FAILED",
+                    "node.remove expected_type no longer matches the current node.",
+                    details=[
+                        {
+                            "node_id": operation.node_id,
+                            "expected_type": operation.expected_type,
+                            "actual_type": node_type,
+                        }
+                    ],
+                )
+            actual_title = str(node.get("title") or "")
+            if (
+                operation.expected_title is not None
+                and actual_title != operation.expected_title
+            ):
+                raise WorkspaceOperationError(
+                    "PATCH_NODE_REMOVE_PRECONDITION_FAILED",
+                    "node.remove expected_title no longer matches the current node.",
+                    details=[
+                        {
+                            "node_id": operation.node_id,
+                            "expected_title": operation.expected_title,
+                            "actual_title": actual_title,
+                        }
+                    ],
+                )
+            if node_type in {
+                "start",
+                "datasource",
+                "trigger-webhook",
+                "trigger-plugin",
+                "trigger-schedule",
+            }:
+                raise WorkspaceOperationError(
+                    "PATCH_NODE_REMOVE_ENTRY_FORBIDDEN",
+                    "node.remove cannot delete a Workflow or Chatflow entry node.",
+                )
+            definition = catalog.get(node_type)
+            if (
+                definition is None
+                or app_mode not in definition.supported_app_modes
+                or not definition.removable
+                or "node.remove" not in definition.mutation_operations
+            ):
+                raise WorkspaceOperationError(
+                    "PATCH_NODE_REMOVE_UNSUPPORTED",
+                    f"node.remove is not available for {node_type} in {app_mode}.",
+                )
+            incident_edges = [
+                edge
+                for edge in edges
+                if edge.get("source") == operation.node_id
+                or edge.get("target") == operation.node_id
+            ]
+            if incident_edges:
+                raise WorkspaceOperationError(
+                    "PATCH_NODE_REMOVE_EDGES_EXIST",
+                    (
+                        "Remove every incident edge explicitly before deleting "
+                        "the node."
+                    ),
+                    details=[
+                        {
+                            "source": edge.get("source"),
+                            "source_handle": edge.get("source_handle", "source"),
+                            "target": edge.get("target"),
+                            "target_handle": edge.get("target_handle", "target"),
+                        }
+                        for edge in incident_edges[:20]
+                    ],
+                )
+            nodes.remove(node)
         elif isinstance(operation, AddEdge):
             edge = PlanEdge(
                 source=_resolve_node_reference(operation.source, temp_ref_map),

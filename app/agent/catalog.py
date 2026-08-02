@@ -10,9 +10,11 @@ from app.node_outputs import node_output_types
 
 
 SideEffectClass = Literal["none", "model_cost", "external", "unknown"]
+MutationName = Literal["node.add", "node.update", "node.remove"]
 
 
 class NodeDefinition(StrictModel):
+    capability_version: str = Field(default="1.0.0", pattern=r"^\d+\.\d+\.\d+$")
     type: NodeType
     supported_app_modes: set[AppMode] = Field(min_length=1)
     summary: str = Field(min_length=1, max_length=2_000)
@@ -21,6 +23,11 @@ class NodeDefinition(StrictModel):
     side_effect: SideEffectClass
     examples: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
     dify_version_range: str | None = None
+    mutation_operations: set[MutationName] = Field(
+        default_factory=lambda: {"node.add", "node.update", "node.remove"}
+    )
+    removable: bool = True
+    container: bool = False
 
 
 class NodeCapabilityCatalog:
@@ -68,6 +75,16 @@ class NodeCapabilityCatalog:
 def _mvp_definitions() -> list[NodeDefinition]:
     shared_modes: set[AppMode] = {"workflow", "advanced-chat"}
     return [
+        NodeDefinition(
+            type="start",
+            supported_app_modes=shared_modes,
+            summary="Declare authoritative application inputs and start execution.",
+            config_schema={"type": "object", "additionalProperties": True},
+            output_schema=_output_schema("start"),
+            side_effect="none",
+            mutation_operations={"node.update"},
+            removable=False,
+        ),
         NodeDefinition(
             type="llm",
             supported_app_modes=shared_modes,
@@ -120,6 +137,36 @@ def _mvp_definitions() -> list[NodeDefinition]:
             side_effect="none",
         ),
         _permissive_definition(
+            "code",
+            modes=shared_modes,
+            summary="Run bounded Python or JavaScript transformation code.",
+            side_effect="none",
+        ),
+        _permissive_definition(
+            "template-transform",
+            modes=shared_modes,
+            summary="Render deterministic text from upstream variables.",
+            side_effect="none",
+        ),
+        _permissive_definition(
+            "question-classifier",
+            modes=shared_modes,
+            summary="Classify an input into explicit business branches.",
+            side_effect="model_cost",
+        ),
+        _permissive_definition(
+            "parameter-extractor",
+            modes=shared_modes,
+            summary="Extract typed parameters from an upstream text value.",
+            side_effect="model_cost",
+        ),
+        _permissive_definition(
+            "variable-aggregator",
+            modes=shared_modes,
+            summary="Combine compatible upstream variables into one typed output.",
+            side_effect="none",
+        ),
+        _permissive_definition(
             "http-request",
             modes=shared_modes,
             summary=(
@@ -134,6 +181,18 @@ def _mvp_definitions() -> list[NodeDefinition]:
             summary=(
                 "Extract bounded text from a declared file or file-list input."
             ),
+            side_effect="none",
+        ),
+        _permissive_definition(
+            "assigner",
+            modes={"advanced-chat"},
+            summary="Assign reviewed values to declared Chatflow variables.",
+            side_effect="none",
+        ),
+        _permissive_definition(
+            "list-operator",
+            modes=shared_modes,
+            summary="Filter, sort, extract, or limit an upstream list.",
             side_effect="none",
         ),
         _permissive_definition(
@@ -154,6 +213,20 @@ def _mvp_definitions() -> list[NodeDefinition]:
             side_effect="external",
         ),
         _permissive_definition(
+            "iteration",
+            modes=shared_modes,
+            summary="Process every item in a list through a typed child graph.",
+            side_effect="unknown",
+            container=True,
+        ),
+        _permissive_definition(
+            "loop",
+            modes=shared_modes,
+            summary="Repeat a typed child graph under explicit bounded conditions.",
+            side_effect="unknown",
+            container=True,
+        ),
+        _permissive_definition(
             "tool",
             modes=shared_modes,
             summary=(
@@ -161,6 +234,56 @@ def _mvp_definitions() -> list[NodeDefinition]:
                 "parameters."
             ),
             side_effect="external",
+        ),
+        _permissive_definition(
+            "agent",
+            modes=shared_modes,
+            summary="Run a configured Dify agent strategy with pinned resources.",
+            side_effect="external",
+        ),
+        _permissive_definition(
+            "datasource",
+            modes={"workflow"},
+            summary="Start a Workflow from an explicitly configured datasource.",
+            side_effect="external",
+            mutation_operations={"node.add", "node.update"},
+            removable=False,
+        ),
+        _permissive_definition(
+            "datasource-empty",
+            modes={"workflow"},
+            summary="Represent an explicitly unconfigured datasource placeholder.",
+            side_effect="none",
+        ),
+        _permissive_definition(
+            "knowledge-index",
+            modes={"workflow"},
+            summary="Index reviewed source content into a configured knowledge target.",
+            side_effect="external",
+        ),
+        _permissive_definition(
+            "trigger-webhook",
+            modes={"workflow"},
+            summary="Start a Workflow from an explicitly configured webhook trigger.",
+            side_effect="external",
+            mutation_operations={"node.add", "node.update"},
+            removable=False,
+        ),
+        _permissive_definition(
+            "trigger-plugin",
+            modes={"workflow"},
+            summary="Start a Workflow from a pinned plugin event.",
+            side_effect="external",
+            mutation_operations={"node.add", "node.update"},
+            removable=False,
+        ),
+        _permissive_definition(
+            "trigger-schedule",
+            modes={"workflow"},
+            summary="Start a Workflow on an explicit schedule.",
+            side_effect="external",
+            mutation_operations={"node.add", "node.update"},
+            removable=False,
         ),
     ]
 
@@ -171,6 +294,9 @@ def _permissive_definition(
     modes: set[AppMode],
     summary: str,
     side_effect: SideEffectClass,
+    mutation_operations: set[MutationName] | None = None,
+    removable: bool = True,
+    container: bool = False,
 ) -> NodeDefinition:
     return NodeDefinition(
         type=node_type,
@@ -184,6 +310,13 @@ def _permissive_definition(
         output_schema=_output_schema(node_type),
         side_effect=side_effect,
         dify_version_range="1.14.x",
+        mutation_operations=(
+            mutation_operations
+            if mutation_operations is not None
+            else {"node.add", "node.update", "node.remove"}
+        ),
+        removable=removable,
+        container=container,
     )
 
 

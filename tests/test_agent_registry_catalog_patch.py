@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from typing import get_args
+
 import pytest
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.agent.catalog import NodeCapabilityCatalog
-from app.agent.patch import AddNode, PatchDocument
+from app.agent.patch import AddNode, PatchDocument, RemoveNode
 from app.agent.registry import ToolExecutionContext, ToolRegistry
+from app.models import NodeType
 
 
 class InspectInput(BaseModel):
@@ -84,48 +87,58 @@ def test_registry_validates_output_and_hides_executor_errors() -> None:
     assert invalid_output.error.code == "TOOL_OUTPUT_INVALID"
 
 
-def test_node_capability_catalog_has_bounded_mvp_definitions() -> None:
+def test_node_capability_catalog_covers_v3_top_level_node_families() -> None:
     catalog = NodeCapabilityCatalog()
 
     assert [item.type for item in catalog.list()] == [
+        "agent",
         "answer",
+        "assigner",
+        "code",
+        "datasource",
+        "datasource-empty",
         "document-extractor",
         "end",
         "http-request",
         "human-input",
         "if-else",
+        "iteration",
+        "knowledge-index",
         "knowledge-retrieval",
+        "list-operator",
         "llm",
+        "loop",
+        "parameter-extractor",
+        "question-classifier",
+        "start",
+        "template-transform",
         "tool",
+        "trigger-plugin",
+        "trigger-schedule",
+        "trigger-webhook",
+        "variable-aggregator",
     ]
+    assert all(item.capability_version == "1.0.0" for item in catalog.list())
+    assert {item.type for item in catalog.list()} == (
+        set(get_args(NodeType)) - {"iteration-start", "loop-start", "loop-end"}
+    )
     assert catalog.require("llm").side_effect == "model_cost"
     assert catalog.require("human-input").side_effect == "external"
     assert catalog.require("knowledge-retrieval").dify_version_range == "1.14.x"
     assert catalog.require("llm").output_schema["properties"]["text"]["type"] == "string"
     assert [item.type for item in catalog.search("conditional")] == ["if-else"]
-    assert [item.type for item in catalog.search(app_mode="workflow")] == [
-        "document-extractor",
-        "end",
-        "http-request",
-        "human-input",
-        "if-else",
-        "knowledge-retrieval",
-        "llm",
-        "tool",
-    ]
-    assert [item.type for item in catalog.search(app_mode="advanced-chat")] == [
-        "answer",
-        "document-extractor",
-        "http-request",
-        "human-input",
-        "if-else",
-        "knowledge-retrieval",
-        "llm",
-        "tool",
-    ]
-    assert catalog.get("start") is None
+    assert "end" in [item.type for item in catalog.search(app_mode="workflow")]
+    assert "answer" not in [item.type for item in catalog.search(app_mode="workflow")]
+    assert "answer" in [item.type for item in catalog.search(app_mode="advanced-chat")]
+    assert "end" not in [item.type for item in catalog.search(app_mode="advanced-chat")]
+    assert catalog.require("start").removable is False
+    assert catalog.require("iteration").container is True
+    assert catalog.require("trigger-webhook").mutation_operations == {
+        "node.add",
+        "node.update",
+    }
     with pytest.raises(KeyError):
-        catalog.require("start")
+        catalog.require("iteration-start")
 
 
 def test_patch_schema_is_explicit_bounded_and_supports_temp_refs() -> None:
@@ -162,6 +175,22 @@ def test_patch_schema_is_explicit_bounded_and_supports_temp_refs() -> None:
     assert patch.model_dump(mode="json", by_alias=True)["operations"][2]["set"] == {
         "params": {"outputs": [{"value_selector": ["tmp_llm", "text"]}]}
     }
+    removal = PatchDocument.model_validate(
+        {
+            "workspace_version": "v0",
+            "expected_base_hash": "hash-0",
+            "rationale": "Remove an explicitly matched obsolete node.",
+            "operations": [
+                {
+                    "op": "node.remove",
+                    "node_id": "obsolete-1",
+                    "expected_type": "code",
+                    "expected_title": "旧转换",
+                }
+            ],
+        }
+    )
+    assert isinstance(removal.operations[0], RemoveNode)
     variable_patch = PatchDocument.model_validate(
         {
             "workspace_version": "v0",

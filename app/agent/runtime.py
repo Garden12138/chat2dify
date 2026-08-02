@@ -34,6 +34,12 @@ class RepeatedAgentError(RuntimeError):
     code = "AGENT_REPEATED_ERROR"
 
 
+class CanvasContextBoundaryError(RuntimeError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 class AgentRuntime:
     def __init__(
         self,
@@ -81,7 +87,22 @@ class AgentRuntime:
         if run.phase != RunPhase.OBSERVING:
             return run
         session = self.store.get_session(run.session_id)
+        if run.constraints.dirty_state:
+            raise CanvasContextBoundaryError(
+                "CANVAS_DIRTY_STATE",
+                "Save or discard Dify canvas changes before starting Builder work.",
+            )
         snapshot = self.snapshot.capture(session)
+        expected_canvas_hash = run.constraints.canvas_draft_hash
+        if (
+            expected_canvas_hash
+            and snapshot.operation == "modify"
+            and snapshot.base_hash != expected_canvas_hash
+        ):
+            raise CanvasContextBoundaryError(
+                "CANVAS_HASH_MISMATCH",
+                "The authoritative Dify Draft no longer matches the canvas context.",
+            )
         goal_plan = _initial_goal_plan(
             run.goal,
             operation=snapshot.operation,

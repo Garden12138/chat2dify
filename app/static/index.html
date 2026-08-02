@@ -6,6 +6,7 @@
     <title>chat2dify</title>
     <link rel="stylesheet" href="static/styles.css?v=chat-v5.0.0">
     <link rel="stylesheet" href="static/studio/home/styles.css?v=studio-v5.0.0">
+    <link rel="stylesheet" href="static/studio/build/styles.css?v=studio-v5.0.0">
   </head>
   <body>
     <a class="studio-skip-link" href="#studio-main">跳到主要内容</a>
@@ -29,7 +30,7 @@
       <div class="studio-layout">
         <aside class="studio-sidebar">
           <nav aria-label="Studio 主导航">
-            <a class="studio-nav-item studio-nav-active" href="./" aria-current="page">
+            <a id="studio-home-nav" class="studio-nav-item studio-nav-active" href="./" aria-current="page">
               <span aria-hidden="true">⌂</span>
               <span>Studio Home</span>
             </a>
@@ -178,6 +179,147 @@
                 </article>
               </div>
             </section>
+          </div>
+
+          <div id="studio-build-content" class="studio-build" hidden>
+            <section class="studio-build-hero" aria-labelledby="studio-build-title">
+              <div>
+                <p class="studio-eyebrow">BUILD STUDIO · WORKSPACE ONLY</p>
+                <h1 id="studio-build-title">正在准备安全候选方案</h1>
+                <p id="studio-build-subtitle">所有方案都保留在版本化 Workspace；本阶段不会写入 Dify。</p>
+              </div>
+              <div class="studio-build-hero-actions">
+                <span id="studio-build-base" class="studio-project-badge">Base 尚未固定</span>
+                <button id="studio-build-refresh" type="button" class="studio-secondary-action">刷新</button>
+              </div>
+            </section>
+
+            <p id="studio-build-notice" class="studio-build-notice" role="status" aria-live="polite" tabindex="-1"></p>
+
+            <section class="studio-build-composer" aria-labelledby="studio-build-composer-title">
+              <div class="studio-section-heading">
+                <div>
+                  <p class="studio-eyebrow">CO-BUILD WITH AI</p>
+                  <h2 id="studio-build-composer-title">描述业务目标</h2>
+                </div>
+                <label id="studio-build-app-mode-wrap" class="studio-build-select" hidden>
+                  <span>应用类型</span>
+                  <select id="studio-build-app-mode" aria-label="新应用类型">
+                    <option value="workflow">Workflow</option>
+                    <option value="advanced-chat">Chatflow</option>
+                    <option value="chat">Chatbot</option>
+                    <option value="completion">文本生成</option>
+                    <option value="agent-chat">Dify Agent</option>
+                  </select>
+                </label>
+                <label class="studio-build-select">
+                  <span>构建模式</span>
+                  <select id="studio-build-mode" aria-label="构建模式">
+                    <option value="alternatives-2">给我两个方案</option>
+                    <option value="alternatives-3">给我三个方案</option>
+                    <option value="explain">先解释，不修改</option>
+                    <option value="synthesize">基于已选方案再生成一个</option>
+                  </select>
+                </label>
+              </div>
+              <form id="studio-build-form">
+                <textarea
+                  id="studio-build-input"
+                  rows="3"
+                  maxlength="8000"
+                  placeholder="例如：为当前售后 Chatflow 提供两个低置信度兜底方案：人工接管和二次追问。"
+                  required
+                ></textarea>
+                <button id="studio-build-submit" type="submit" class="studio-primary-action">生成安全候选</button>
+              </form>
+              <p class="studio-build-boundary">不接受 Raw DSL、任意 JSON Patch 或浏览器 Raw Graph；Candidate 选择不会触发 Commit。</p>
+            </section>
+
+            <section class="studio-build-candidates" aria-labelledby="studio-candidates-title">
+              <div class="studio-section-heading">
+                <div>
+                  <p class="studio-eyebrow">CANDIDATE WORKSPACES</p>
+                  <h2 id="studio-candidates-title">候选方案</h2>
+                </div>
+                <p id="studio-candidate-state" class="studio-section-state">还没有 Candidate</p>
+              </div>
+              <div id="studio-candidate-tabs" class="studio-candidate-tabs" role="tablist" aria-label="Candidate 列表"></div>
+            </section>
+
+            <div class="studio-build-grid">
+              <section class="studio-build-primary" aria-label="候选业务预览">
+                <article class="studio-build-card studio-business-preview">
+                  <div class="studio-section-heading">
+                    <div>
+                      <p class="studio-eyebrow">BUSINESS PREVIEW</p>
+                      <h2 id="studio-business-preview-title">选择一个 Candidate 查看</h2>
+                    </div>
+                    <button id="studio-select-candidate" type="button" class="studio-primary-action" disabled>选择此方案</button>
+                  </div>
+                  <p id="studio-business-summary" class="studio-build-lead">候选生成后，这里会用业务语言说明变化。</p>
+                  <div class="studio-proof-grid">
+                    <section><h3>Goal Plan</h3><ol id="studio-goal-plan" class="studio-goal-plan"></ol></section>
+                    <section><h3>Validation</h3><div id="studio-validation-card"></div></section>
+                    <section><h3>Risk & Side Effects</h3><div id="studio-risk-card"></div></section>
+                    <section><h3>Changed Path</h3><ul id="studio-changed-path"></ul></section>
+                  </div>
+                </article>
+
+                <article class="studio-build-card">
+                  <div class="studio-section-heading">
+                    <div><p class="studio-eyebrow">CANDIDATE COMPARISON</p><h2>业务与技术证据对比</h2></div>
+                  </div>
+                  <div id="studio-comparison" class="studio-comparison" tabindex="0"></div>
+                </article>
+
+                <article class="studio-build-card">
+                  <div class="studio-section-heading">
+                    <div><p class="studio-eyebrow">LAYOUT PREVIEW</p><h2>非破坏性布局预览</h2></div>
+                    <div class="studio-inline-actions">
+                      <button id="studio-focus-changes" type="button" class="studio-secondary-action">聚焦变化路径</button>
+                      <button id="studio-fit-candidate" type="button" class="studio-secondary-action">适配 Candidate</button>
+                    </div>
+                  </div>
+                  <div id="studio-layout-preview" class="studio-layout-preview" role="group" aria-label="Candidate 节点布局预览"></div>
+                </article>
+
+                <article class="studio-build-card">
+                  <div class="studio-section-heading"><div><p class="studio-eyebrow">TIMELINE</p><h2>构建时间线</h2></div></div>
+                  <ol id="studio-build-timeline" class="studio-build-timeline"></ol>
+                </article>
+              </section>
+
+              <aside class="studio-build-inspector" aria-label="Dify 上下文与技术详情">
+                <section class="studio-build-card">
+                  <p class="studio-eyebrow">DIFY CONTEXT</p>
+                  <h2>Node Inspector</h2>
+                  <p id="studio-selection-summary">当前入口没有 Dify 画布选区。</p>
+                  <div class="studio-context-actions">
+                    <button type="button" data-context-command="explain_selection">解释选中节点</button>
+                    <button type="button" data-context-command="explain_variable_flow">解释变量流</button>
+                    <button type="button" data-context-command="safer_fallback">提供更安全兜底</button>
+                    <button type="button" data-context-command="suggest_resources">建议兼容资源</button>
+                    <button type="button" data-context-command="generate_scenarios">生成场景建议</button>
+                  </div>
+                  <div id="studio-context-result" class="studio-context-result"></div>
+                </section>
+
+                <details class="studio-build-card studio-technical-detail">
+                  <summary>Technical Detail（Typed Patch / Version）</summary>
+                  <pre id="studio-technical-detail">{}</pre>
+                </details>
+
+                <section class="studio-build-card">
+                  <p class="studio-eyebrow">RECOVERY</p>
+                  <h2>取消与恢复</h2>
+                  <p>取消只终止当前 Candidate；中断或等待输入的 Candidate 必须由你显式恢复，不自动重放副作用。</p>
+                  <div class="studio-inline-actions">
+                    <button id="studio-resume-candidate" type="button" class="studio-secondary-action" disabled>恢复当前 Candidate</button>
+                    <button id="studio-cancel-candidate" type="button" class="danger-button" disabled>取消当前 Candidate</button>
+                  </div>
+                </section>
+              </aside>
+            </div>
           </div>
         </main>
       </div>
@@ -341,5 +483,6 @@
     <script src="static/app.js?v=chat-v5.0.0" defer></script>
     <script type="module" src="static/agent-workbench.js?v=chat-v5.0.0"></script>
     <script type="module" src="static/studio/home/index.js?v=studio-v5.0.0"></script>
+    <script type="module" src="static/studio/build/index.js?v=studio-v5.0.0"></script>
   </body>
 </html>
