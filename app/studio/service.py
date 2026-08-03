@@ -4,6 +4,7 @@ from app.agent.service import AgentApplicationService
 from app.agent.store import AgentStore
 from app.agent.state import RunConstraints
 from app.studio.build import BuildCommandMode, ContextCommand, StudioBuildService
+from app.studio.blueprints import StudioBlueprintService
 from app.studio.home import StudioHomeService
 from app.studio.identity import (
     AuthenticatedStudioRequest,
@@ -21,10 +22,12 @@ class StudioApplicationService:
         identity: StudioIdentityService,
         home: StudioHomeService,
         build: StudioBuildService | None = None,
+        blueprints: StudioBlueprintService | None = None,
     ) -> None:
         self.identity = identity
         self.home_service = home
         self.build_service = build
+        self.blueprint_service = blueprints
 
     def issue_session(
         self,
@@ -141,3 +144,32 @@ class StudioApplicationService:
             command=command,
             **kwargs,
         )
+
+    def require_blueprints(self) -> StudioBlueprintService:
+        if self.blueprint_service is None:
+            raise StudioHostUnavailable("Blueprint Gallery requires the v4 safety core.")
+        return self.blueprint_service
+
+    def blueprint_gallery(self, authenticated, **kwargs):
+        return self.require_blueprints().gallery(authenticated, **kwargs)
+
+    def blueprint_detail(self, authenticated, **kwargs):
+        return self.require_blueprints().detail(authenticated, **kwargs)
+
+    def validate_blueprint_setup(self, authenticated, **kwargs):
+        return self.require_blueprints().validate_setup(authenticated, **kwargs)
+
+    def apply_blueprint(self, authenticated, **kwargs):
+        return self.require_blueprints().apply(authenticated, **kwargs)
+
+    def extract_blueprint(self, authenticated, **kwargs):
+        return self.require_blueprints().extract(authenticated, **kwargs)
+
+    def propose_blueprint_version(self, authenticated, **kwargs):
+        return self.require_blueprints().propose_version(authenticated, **kwargs)
+
+    def review_blueprint_version(self, authenticated, **kwargs):
+        return self.require_blueprints().review_version(authenticated, **kwargs)
+
+    def blueprint_upgrade_preview(self, authenticated, **kwargs):
+        return self.require_blueprints().upgrade_preview(authenticated, **kwargs)

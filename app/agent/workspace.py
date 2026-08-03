@@ -18,6 +18,7 @@ from app.agent.patch import (
     PatchDocument,
     RemoveEdge,
     RemoveNode,
+    ReplaceEntry,
     UpdateNode,
 )
 from app.agent.state import (
@@ -487,7 +488,7 @@ def _allocate_temp_refs(
     existing_ids = {node.id for node in before.nodes}
     mapping: dict[str, str] = {}
     for operation in patch.operations:
-        if not isinstance(operation, AddNode):
+        if not isinstance(operation, (AddNode, ReplaceEntry)):
             continue
         if operation.temp_ref in mapping:
             raise WorkspaceOperationError(
@@ -645,6 +646,70 @@ def _apply_operations(
                     ],
                 )
             nodes.remove(node)
+        elif isinstance(operation, ReplaceEntry):
+            if operation.node_id.startswith("tmp_"):
+                raise WorkspaceOperationError(
+                    "PATCH_ENTRY_REPLACE_REQUIRES_EXISTING_NODE",
+                    "entry.replace must reference an authoritative existing entry.",
+                )
+            node = _require_node(nodes, operation.node_id)
+            actual_type = str(node.get("type") or "")
+            if actual_type != operation.expected_type:
+                raise WorkspaceOperationError(
+                    "PATCH_ENTRY_REPLACE_PRECONDITION_FAILED",
+                    "entry.replace expected_type no longer matches the current entry.",
+                    details=[
+                        {
+                            "node_id": operation.node_id,
+                            "expected_type": operation.expected_type,
+                            "actual_type": actual_type,
+                        }
+                    ],
+                )
+            entry_types = {
+                "start",
+                "datasource",
+                "trigger-webhook",
+                "trigger-plugin",
+                "trigger-schedule",
+            }
+            if actual_type not in entry_types:
+                raise WorkspaceOperationError(
+                    "PATCH_ENTRY_REPLACE_TARGET_INVALID",
+                    "entry.replace can only replace an authoritative entry node.",
+                )
+            definition = catalog.get(operation.node_type)
+            if (
+                definition is None
+                or app_mode not in definition.supported_app_modes
+                or "entry.replace" not in definition.mutation_operations
+            ):
+                raise WorkspaceOperationError(
+                    "PATCH_ENTRY_REPLACE_UNSUPPORTED",
+                    f"entry.replace is not available for {operation.node_type} in {app_mode}.",
+                )
+            replacement_id = temp_ref_map[operation.temp_ref]
+            replacement = PlanNode(
+                id=replacement_id,
+                type=operation.node_type,
+                title=operation.title,
+                params=_resolve_temp_refs(operation.params, temp_ref_map),
+            ).model_dump(mode="json")
+            node_index = nodes.index(node)
+            nodes[node_index] = replacement
+            for other in nodes:
+                if other is replacement:
+                    continue
+                other["params"] = _retarget_entry_references(
+                    other.get("params", {}),
+                    operation.node_id,
+                    replacement_id,
+                )
+            for edge in edges:
+                if edge.get("source") == operation.node_id:
+                    edge["source"] = replacement_id
+                if edge.get("target") == operation.node_id:
+                    edge["target"] = replacement_id
         elif isinstance(operation, AddEdge):
             edge = PlanEdge(
                 source=_resolve_node_reference(operation.source, temp_ref_map),
@@ -772,6 +837,47 @@ def _resolve_temp_refs(value: Any, mapping: dict[str, str]) -> Any:
                 resolved,
             )
         return resolved
+    return deepcopy(value)
+
+
+def _retarget_entry_references(
+    value: Any,
+    old: str,
+    new: str,
+    *,
+    field_name: str | None = None,
+) -> Any:
+    """Retarget only recognized node references for one entry replacement."""
+    if isinstance(value, dict):
+        return {
+            key: _retarget_entry_references(
+                item,
+                old,
+                new,
+                field_name=str(key),
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        result = [
+            _retarget_entry_references(item, old, new)
+            for item in value
+        ]
+        if (
+            field_name is not None
+            and (field_name == "selector" or field_name.endswith("_selector"))
+            and result
+            and result[0] == old
+        ):
+            result[0] = new
+        return result
+    if isinstance(value, str):
+        if field_name in {"node_id", "source_node_id", "target_node_id"} and value == old:
+            return new
+        pattern = re.compile(
+            rf"(\{{\{{\s*#?){re.escape(old)}(?=\.)"
+        )
+        return pattern.sub(lambda match: f"{match.group(1)}{new}", value)
     return deepcopy(value)
 
 

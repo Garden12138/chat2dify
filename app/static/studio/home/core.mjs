@@ -1,7 +1,7 @@
 export const STUDIO_NAVIGATION = Object.freeze([
   { id: "home", label: "Studio Home", available: true },
   { id: "build", label: "Build Studio", available: true },
-  { id: "blueprints", label: "Blueprints", available: false },
+  { id: "blueprints", label: "Blueprints", available: true },
   { id: "scenarios", label: "Scenarios", available: false },
   { id: "releases", label: "Reviews & Releases", available: false },
   { id: "runs", label: "Runs", available: false },
@@ -9,7 +9,8 @@ export const STUDIO_NAVIGATION = Object.freeze([
 
 export function isStudioHomeEnabled(config, search = "") {
   const params = new URLSearchParams(search);
-  return Boolean(config?.studioV5Enabled) && params.get("studio") !== "build";
+  return Boolean(config?.studioV5Enabled)
+    && !["build", "blueprints"].includes(params.get("studio"));
 }
 
 export function homeQuery({ projectId = "", search = "", appMode = "" } = {}) {

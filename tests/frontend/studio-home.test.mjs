@@ -19,6 +19,10 @@ test("v5 Home replaces the default surface only while enabled", () => {
     isStudioHomeEnabled({ studioV5Enabled: true }, "?studio=build&intent=modify"),
     false,
   );
+  assert.equal(
+    isStudioHomeEnabled({ studioV5Enabled: true }, "?studio=blueprints"),
+    false,
+  );
   assert.equal(isStudioHomeEnabled({ studioV5Enabled: false }, "?embed=1"), false);
 });
 
@@ -28,7 +32,8 @@ test("Studio navigation exposes the complete product map truthfully", () => {
     ["home", "build", "blueprints", "scenarios", "releases", "runs"],
   );
   assert.equal(STUDIO_NAVIGATION.find(item => item.id === "home").available, true);
-  assert.equal(STUDIO_NAVIGATION.find(item => item.id === "blueprints").available, false);
+  assert.equal(STUDIO_NAVIGATION.find(item => item.id === "blueprints").available, true);
+  assert.equal(STUDIO_NAVIGATION.find(item => item.id === "scenarios").available, false);
 });
 
 test("Home query carries filters but never user or role claims", () => {

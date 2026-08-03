@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="static/styles.css?v=chat-v5.0.0">
     <link rel="stylesheet" href="static/studio/home/styles.css?v=studio-v5.0.0">
     <link rel="stylesheet" href="static/studio/build/styles.css?v=studio-v5.0.0">
+    <link rel="stylesheet" href="static/studio/blueprints/styles.css?v=studio-v5.0.0">
   </head>
   <body>
     <a class="studio-skip-link" href="#studio-main">跳到主要内容</a>
@@ -42,11 +43,10 @@
               <span aria-hidden="true">✦</span>
               <span>Build Studio</span>
             </a>
-            <span class="studio-nav-item studio-nav-disabled" aria-disabled="true">
+            <a id="studio-blueprints-nav" class="studio-nav-item" href="?studio=blueprints">
               <span aria-hidden="true">▱</span>
               <span>Blueprints</span>
-              <small>即将推出</small>
-            </span>
+            </a>
             <span class="studio-nav-item studio-nav-disabled" aria-disabled="true">
               <span aria-hidden="true">◫</span>
               <span>Scenarios</span>
@@ -190,6 +190,7 @@
               </div>
               <div class="studio-build-hero-actions">
                 <span id="studio-build-base" class="studio-project-badge">Base 尚未固定</span>
+                <a id="studio-build-blueprints" class="studio-secondary-action" href="?studio=blueprints">浏览 Blueprints</a>
                 <button id="studio-build-refresh" type="button" class="studio-secondary-action">刷新</button>
               </div>
             </section>
@@ -320,6 +321,121 @@
                 </section>
               </aside>
             </div>
+          </div>
+
+          <div id="studio-blueprint-content" class="studio-blueprints" hidden>
+            <section class="studio-blueprint-hero" aria-labelledby="studio-blueprint-title">
+              <div>
+                <p class="studio-eyebrow">BLUEPRINT GALLERY · GUIDED REUSE</p>
+                <h1 id="studio-blueprint-title">从业务成果出发复用可靠模式</h1>
+                <p>选择兼容 Blueprint，通过 Typed Setup 映射资源，预览后应用成一个独立 Candidate；无需编辑 JSON。</p>
+              </div>
+              <div class="studio-blueprint-hero-actions">
+                <span id="studio-blueprint-context" class="studio-project-badge">正在核对 Build</span>
+                <a id="studio-blueprint-back" class="studio-secondary-action" href="?studio=build&intent=create&app_mode=workflow">返回 Build Studio</a>
+              </div>
+            </section>
+
+            <p id="studio-blueprint-notice" class="studio-build-notice" role="status" aria-live="polite" tabindex="-1"></p>
+
+            <form id="studio-blueprint-filters" class="studio-blueprint-filters" role="search">
+              <label class="studio-search">
+                <span class="studio-visually-hidden">搜索 Blueprint</span>
+                <span aria-hidden="true">⌕</span>
+                <input id="studio-blueprint-search" type="search" autocomplete="off" placeholder="搜索业务成果，例如 knowledge retrieval">
+              </label>
+              <label>
+                <span>分类</span>
+                <select id="studio-blueprint-category" aria-label="按 Blueprint 分类筛选"><option value="">全部分类</option></select>
+              </label>
+              <label>
+                <span>应用类型</span>
+                <select id="studio-blueprint-mode" aria-label="按应用类型筛选">
+                  <option value="">全部类型</option>
+                  <option value="workflow">Workflow</option>
+                  <option value="advanced-chat">Chatflow</option>
+                </select>
+              </label>
+              <label>
+                <span>Dify 版本</span>
+                <input id="studio-blueprint-dify-version" inputmode="decimal" autocomplete="off" maxlength="128" placeholder="例如 1.14.2">
+              </label>
+              <label>
+                <span>资源</span>
+                <select id="studio-blueprint-resource" aria-label="按资源可用性筛选">
+                  <option value="">全部资源状态</option>
+                  <option value="true">资源已就绪</option>
+                  <option value="false">需要补齐资源</option>
+                </select>
+              </label>
+              <label>
+                <span>风险</span>
+                <select id="studio-blueprint-risk" aria-label="按风险筛选">
+                  <option value="">全部风险</option>
+                  <option value="low">低风险</option>
+                  <option value="medium">中风险</option>
+                  <option value="high">高风险</option>
+                </select>
+              </label>
+              <label>
+                <span>范围</span>
+                <select id="studio-blueprint-visibility" aria-label="按共享范围筛选">
+                  <option value="">全部范围</option>
+                  <option value="builtin">内置</option>
+                  <option value="private">我的 Private</option>
+                  <option value="team">Team</option>
+                </select>
+              </label>
+              <label class="studio-blueprint-check">
+                <input id="studio-blueprint-compatible" type="checkbox" checked>
+                <span>只看兼容</span>
+              </label>
+              <button id="studio-blueprint-refresh" type="submit" class="studio-secondary-action">刷新</button>
+            </form>
+
+            <div class="studio-blueprint-layout">
+              <section class="studio-blueprint-gallery" aria-labelledby="studio-blueprint-gallery-title">
+                <div class="studio-section-heading">
+                  <div>
+                    <p class="studio-eyebrow">PROVEN DIFY-NATIVE PATTERNS</p>
+                    <h2 id="studio-blueprint-gallery-title">Gallery</h2>
+                  </div>
+                  <p id="studio-blueprint-gallery-state" class="studio-section-state"></p>
+                </div>
+                <div id="studio-blueprint-list" class="studio-blueprint-list" role="list"></div>
+              </section>
+
+              <aside id="studio-blueprint-detail" class="studio-blueprint-detail" aria-label="Blueprint 配置与预览">
+                <section class="studio-build-card studio-blueprint-empty">
+                  <p class="studio-eyebrow">GUIDED SETUP</p>
+                  <h2>选择一个 Blueprint</h2>
+                  <p>这里会显示业务结果、兼容性、资源要求、Setup 表单、预览图、风险和场景。</p>
+                </section>
+              </aside>
+            </div>
+
+            <section id="studio-blueprint-extract" class="studio-build-card studio-blueprint-extract" hidden aria-labelledby="studio-blueprint-extract-title">
+              <div class="studio-section-heading">
+                <div>
+                  <p class="studio-eyebrow">SAVE SELECTED PATTERN</p>
+                  <h2 id="studio-blueprint-extract-title">把当前选区保存为 Blueprint</h2>
+                </div>
+                <span class="studio-project-badge">Secret Scan 必须通过</span>
+              </div>
+              <form id="studio-blueprint-extract-form">
+                <label>名称<input id="studio-blueprint-extract-name" required maxlength="256" placeholder="例如：团队售后分类模式"></label>
+                <label>业务成果<textarea id="studio-blueprint-extract-outcome" required maxlength="4000" rows="2"></textarea></label>
+                <label>分类<input id="studio-blueprint-extract-category" required maxlength="128" value="Team Patterns"></label>
+                <label>共享范围<select id="studio-blueprint-extract-visibility"><option value="private">Private</option><option value="team">Team（需评审）</option></select></label>
+                <fieldset>
+                  <legend>Typed Interface</legend>
+                  <label>输入变量名<input id="studio-blueprint-interface-input" value="query" pattern="[a-z][a-z0-9_]*" required></label>
+                  <label>输出变量名<input id="studio-blueprint-interface-output" value="result" pattern="[a-z][a-z0-9_]*" required></label>
+                </fieldset>
+                <button type="submit" class="studio-primary-action">扫描并保存</button>
+              </form>
+              <p id="studio-blueprint-extract-result" role="status" aria-live="polite"></p>
+            </section>
           </div>
         </main>
       </div>
@@ -484,5 +600,6 @@
     <script type="module" src="static/agent-workbench.js?v=chat-v5.0.0"></script>
     <script type="module" src="static/studio/home/index.js?v=studio-v5.0.0"></script>
     <script type="module" src="static/studio/build/index.js?v=studio-v5.0.0"></script>
+    <script type="module" src="static/studio/blueprints/index.js?v=studio-v5.0.0"></script>
   </body>
 </html>

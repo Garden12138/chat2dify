@@ -9,7 +9,7 @@
 >   [`docs/goals/v5.0.0-goal-prompts.md`](goals/v5.0.0-goal-prompts.md)
 > - v4 evidence:
 >   [`docs/archive/v4.0.0-tasks.md`](archive/v4.0.0-tasks.md)
-> - Last updated: 2026-08-02
+> - Last updated: 2026-08-03
 
 ## 1. Product outcome
 
@@ -76,7 +76,7 @@ Rules:
 | --- | --- | --- | --- |
 | Phase 0 | Studio shell, Home, projects, identity, and migration foundation | v4.0.0 completed | `completed` |
 | Phase 1 | Build Studio and safe candidate variants | Phase 0 | `completed` |
-| Phase 2 | Blueprint Gallery and guided pattern reuse | Phase 1 | `pending` |
+| Phase 2 | Blueprint Gallery and guided pattern reuse | Phase 1 | `completed` |
 | Phase 3 | Scenario Lab and isolated candidate Preview | Phase 2 | `pending` |
 | Phase 4 | Collaborative Review and Release Center | Phase 3 | `pending` |
 | Phase 5 | Run Center, repair proposals, and safe automation | Phase 4 | `pending` |
@@ -544,7 +544,7 @@ candidate without changing Dify.
 
 ## 8. Phase 2 — Blueprint Gallery and guided reuse
 
-Status: `pending`
+Status: `completed`
 
 Dependencies: Phase 1 `completed`
 
@@ -553,42 +553,42 @@ Dify-native patterns from a productized Gallery.
 
 ### Tasks
 
-- [ ] **P2-01 — Blueprint product model**
+- [x] **P2-01 — Blueprint product model**
   - Define business outcome, preview diagram, supported modes/versions, setup
     schema, capabilities, resource references, estimated cost/risk, validators,
     scenarios, provenance, version, deprecation, and upgrade notes.
   - Treat Blueprint content as untrusted data and never as permission.
 
-- [ ] **P2-02 — Gallery discovery**
+- [x] **P2-02 — Gallery discovery**
   - Add category, use case, app mode, Dify version, resource availability,
     risk, and team/private filters.
   - Rank only compatible Blueprints by default.
   - Explain unavailable requirements before application.
 
-- [ ] **P2-03 — Guided setup**
+- [x] **P2-03 — Guided setup**
   - Render typed setup forms for models, datasets, tools, triggers, prompts,
     variables, and policy options.
   - Show availability without secret values.
   - Validate and preview before creating a Patch.
 
-- [ ] **P2-04 — Safe Blueprint application**
+- [x] **P2-04 — Safe Blueprint application**
   - Expand one Blueprint into one normal transactional Patch.
   - Resolve temporary references and final IDs server-side.
   - Run normal validation, Diff, risk, policy, and candidate comparison.
   - Prove failure leaves the Workspace head unchanged.
 
-- [ ] **P2-05 — Save selected pattern**
+- [x] **P2-05 — Save selected pattern**
   - Let an authorized user extract selected nodes as a private/team Blueprint.
   - Require an explicit typed interface and remove environment-specific IDs or
     secret values.
   - Show a generated preview and compatibility report.
 
-- [ ] **P2-06 — Versioning and upgrades**
+- [x] **P2-06 — Versioning and upgrades**
   - Publish a new Blueprint version through review.
   - Show installed/source version and upgrade Diff.
   - Never auto-upgrade an application.
 
-- [ ] **P2-07 — Initial Gallery**
+- [x] **P2-07 — Initial Gallery**
   - Knowledge retrieval with grounded answer.
   - Human fallback.
   - Structured JSON extraction.
@@ -599,7 +599,7 @@ Dify-native patterns from a productized Gallery.
   - Model fallback/routing.
   - Customer-support classification.
 
-- [ ] **P2-08 — Gallery tests and usability**
+- [x] **P2-08 — Gallery tests and usability**
   - Cover search, compatibility, setup validation, malicious metadata,
     resource availability, extraction secret scan, version upgrade, Patch
     invariants, unrelated preservation, accessibility, and real Workbench use.
@@ -612,13 +612,104 @@ Dify-native patterns from a productized Gallery.
 
 ### Acceptance criteria
 
-- [ ] A user can apply an initial Blueprint without editing raw JSON.
-- [ ] Blueprint application cannot expand Tool visibility or permissions.
-- [ ] Failed application does not change the candidate.
-- [ ] Extracted Blueprints contain no environment-specific secret values.
-- [ ] Initial Blueprint application success is `>= 95%` on the fixed set.
-- [ ] Unrelated graph preservation is `>= 99%`.
-- [ ] Targeted tests, full supported suite, and `git diff --check` pass.
+- [x] A user can apply an initial Blueprint without editing raw JSON.
+- [x] Blueprint application cannot expand Tool visibility or permissions.
+- [x] Failed application does not change the candidate.
+- [x] Extracted Blueprints contain no environment-specific secret values.
+- [x] Initial Blueprint application success is `>= 95%` on the fixed set.
+- [x] Unrelated graph preservation is `>= 99%`.
+- [x] Targeted tests, full supported suite, and `git diff --check` pass.
+
+### Implementation record
+
+- Started: 2026-08-03
+- Fixed Phase 2 user journey:
+  1. Open Blueprint Gallery from the authenticated Studio navigation, search
+     for “knowledge retrieval with human fallback,” and see only compatible
+     patterns by default with business outcome, preview, compatibility,
+     resource, cost, risk, provenance, version, and deprecation evidence.
+  2. Open the Blueprint and map a staging Dataset plus Review Channel through
+     typed guided fields. Test both mappings, enter reviewed Prompt/Variable
+     values, and preview the graph and expected behavior without editing JSON.
+  3. Apply the configured Blueprint to the current Build as one transactional
+     typed Patch. Observe one new valid, reconstructable Candidate and verify
+     that the source Workspace, unrelated graph, permissions, and Dify draft
+     did not change.
+  4. Select authoritative nodes, define a typed input/output/resource
+     interface, scan and remove environment IDs and secret values, then save a
+     Private or Team Blueprint when the current role allows it.
+  5. Inspect installed/source Blueprint versions and the typed upgrade Diff;
+     require an explicit user action for every upgrade and never mutate an
+     application merely because a newer Blueprint exists.
+- Fixed Phase 2 usability and safety targets:
+  - all nine initial Blueprints can be discovered, configured, previewed, and
+    applied through business-readable controls; fixed deterministic success is
+    at least 95 percent;
+  - unrelated graph preservation is at least 99 percent on the fixed set;
+  - missing resources, incompatible versions, insufficient permission,
+    malicious metadata, secret findings, validation failures, and conflicts
+    expose a stable reason and safe next action;
+  - Gallery, detail, setup, preview, extraction, and upgrade controls are
+    keyboard reachable, labelled, responsive in drawer/full-page layouts, and
+    preserve focus across async state changes;
+  - Blueprint content remains untrusted data and cannot add Tool visibility,
+    expand authorization, approve, Commit, Publish, or write Dify.
+- Completed: 2026-08-03
+- Product journey evidence:
+  - The signed-in Dify-hosted Studio exposed Blueprint Gallery in the primary
+    navigation, returned all nine initial patterns, preserved search/filter
+    state in bounded product URLs, and explained the real environment's
+    missing Staging Dataset before application.
+  - Guided Setup rendered only declared typed fields and allowlisted project
+    resources. Mapping and preview produced deterministic validation evidence
+    without raw JSON, credentials, approval, Apply Draft, Publish, or Dify
+    writes.
+  - Applying Document Intake in the real Workbench created one authoritative,
+    reconstructable Candidate from one transactional Patch; authoritative
+    readback reported the source unchanged and `0` Dify writes.
+  - Private extraction, Team review by a distinct reviewer, reviewed version
+    publication, explicit upgrade Diff, and no-auto-upgrade behavior pass in
+    deterministic repository/service coverage.
+- Quality and safety evidence:
+  - All `9/9` initial Blueprints apply successfully on the fixed Workflow set
+    (`100%`, target `>= 95%`), with valid Candidates, two-version
+    reconstructable Workspace history, and one persisted Patch transaction.
+  - Fixed unrelated node fields and internal edges are preserved at `100%`
+    (target `>= 99%`). The Webhook and Scheduled templates intentionally
+    replace the authoritative entry while unrelated branches remain intact.
+  - Malicious metadata cannot add undeclared node capabilities, Tool
+    visibility, permissions, approval, Publish, raw DSL, or arbitrary Patch
+    operations. Invalid Setup and failed Patch validation leave the source
+    head and Candidate list unchanged.
+  - Extraction requires a typed interface, strips final node/environment IDs,
+    and fails closed on secret-like content. Team publication and subsequent
+    versions require a reviewer other than the author.
+- Usability and accessibility evidence:
+  - Real browser acceptance passed at `720x696` and `1280x720` with zero page
+    overflow, zero unnamed visible controls, business-readable compatibility
+    and missing-resource states, and focus transfer to the selected Blueprint
+    detail heading.
+  - Review Channel exposed only the allowlisted Dify Web App Review Inbox;
+    responsive cards, filters, setup, preview, extraction, governance, and
+    return-to-Build paths were exercised without opening a technical JSON
+    editor.
+- Verification:
+  - Targeted Python: `29 passed, 1 skipped`.
+  - Frontend: `27 passed`.
+  - Full Python regression: `496 passed, 14 skipped`.
+  - Opt-in live Dify session/host acceptance: `1 passed` against Dify 1.14.2.
+  - `git diff --check`: passed.
+- Cleanup and limitations:
+  - The temporary local acceptance server was stopped; browser tabs were
+    finalized and its two temporary SQLite databases were removed. No Dify
+    draft, Git, notification, approval, Apply Draft, or Publish write was
+    made.
+  - The available real Dify Workspace had no Dataset, so the live journey
+    truthfully stopped Knowledge Retrieval at its missing-resource gate. The
+    exact Dataset + Review Channel Knowledge path passed against the fixed
+    deterministic Dify 1.14.2 snapshot, while real Candidate creation used
+    Document Intake. A Dataset-backed real-environment rerun remains Release
+    Gate evidence, not a reason to weaken the Phase 2 gate.
 
 ## 9. Phase 3 — Scenario Lab and isolated candidate Preview
 

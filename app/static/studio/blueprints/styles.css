@@ -1,0 +1,516 @@
+.studio-blueprints {
+  min-width: 0;
+  color: var(--studio-ink, #101828);
+}
+
+.studio-blueprint-hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 18px;
+  padding: 24px 26px;
+  overflow: hidden;
+  border: 1px solid #d9e2f0;
+  border-radius: 22px;
+  background:
+    radial-gradient(circle at 92% 10%, rgba(73, 82, 235, .18), transparent 34%),
+    linear-gradient(135deg, #fbfcff 0%, #eef3ff 56%, #f7f2ff 100%);
+}
+
+.studio-blueprint-hero h1 {
+  max-width: 720px;
+  margin: 3px 0 8px;
+  font-size: clamp(24px, 3vw, 38px);
+  line-height: 1.14;
+  letter-spacing: -.035em;
+}
+
+.studio-blueprint-hero p:last-child {
+  max-width: 760px;
+  margin: 0;
+  color: #475467;
+  line-height: 1.7;
+}
+
+.studio-blueprint-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.studio-blueprint-filters {
+  display: grid;
+  grid-template-columns: minmax(240px, 1.7fr) repeat(4, minmax(130px, .7fr)) auto auto;
+  gap: 10px;
+  align-items: end;
+  margin-bottom: 22px;
+  padding: 14px;
+  border: 1px solid #e4e7ec;
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(16, 24, 40, .045);
+}
+
+.studio-blueprint-filters > label:not(.studio-search):not(.studio-blueprint-check) {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: #667085;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.studio-blueprint-filters select,
+.studio-blueprint-filters input,
+.studio-blueprint-detail select,
+.studio-blueprint-detail input,
+.studio-blueprint-detail textarea,
+.studio-blueprint-extract input,
+.studio-blueprint-extract textarea,
+.studio-blueprint-extract select {
+  min-width: 0;
+  width: 100%;
+  border: 1px solid #d0d5dd;
+  border-radius: 10px;
+  background: #fff;
+  color: #101828;
+  font: inherit;
+}
+
+.studio-blueprint-filters select,
+.studio-blueprint-filters input,
+.studio-blueprint-detail select,
+.studio-blueprint-detail input,
+.studio-blueprint-extract input,
+.studio-blueprint-extract select {
+  min-height: 42px;
+  padding: 8px 10px;
+}
+
+.studio-blueprint-detail textarea,
+.studio-blueprint-extract textarea {
+  padding: 10px;
+  resize: vertical;
+  line-height: 1.55;
+}
+
+.studio-blueprint-check {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 42px;
+  white-space: nowrap;
+  color: #344054;
+  font-size: 13px;
+}
+
+.studio-blueprint-check input {
+  width: 17px;
+  height: 17px;
+  accent-color: #4952eb;
+}
+
+.studio-blueprint-layout {
+  display: grid;
+  grid-template-columns: minmax(300px, .86fr) minmax(420px, 1.4fr);
+  gap: 20px;
+  align-items: start;
+  min-width: 0;
+}
+
+.studio-blueprint-gallery,
+.studio-blueprint-detail {
+  min-width: 0;
+}
+
+.studio-blueprint-list {
+  display: grid;
+  gap: 12px;
+}
+
+.studio-blueprint-card {
+  position: relative;
+  display: grid;
+  gap: 10px;
+  width: 100%;
+  padding: 17px;
+  overflow: hidden;
+  border: 1px solid #e4e7ec;
+  border-radius: 16px;
+  background: #fff;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: 0 8px 20px rgba(16, 24, 40, .035);
+  transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease;
+}
+
+.studio-blueprint-card:hover,
+.studio-blueprint-card:focus-visible,
+.studio-blueprint-card[aria-current="true"] {
+  border-color: #7f89f8;
+  box-shadow: 0 12px 30px rgba(73, 82, 235, .12);
+  outline: none;
+  transform: translateY(-1px);
+}
+
+.studio-blueprint-card[aria-current="true"]::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  background: #4952eb;
+  content: "";
+}
+
+.studio-blueprint-card-top,
+.studio-blueprint-badges,
+.studio-blueprint-meta,
+.studio-blueprint-detail-actions,
+.studio-blueprint-version-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.studio-blueprint-card-top {
+  justify-content: space-between;
+}
+
+.studio-blueprint-card h3 {
+  margin: 0;
+  font-size: 17px;
+  line-height: 1.35;
+}
+
+.studio-blueprint-card p {
+  margin: 0;
+  color: #475467;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.studio-blueprint-chip,
+.studio-blueprint-availability {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #f2f4f7;
+  color: #475467;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.studio-blueprint-availability[data-tone="ok"] {
+  background: #eafbf2;
+  color: #087443;
+}
+
+.studio-blueprint-availability[data-tone="warning"] {
+  background: #fff7e6;
+  color: #a15c00;
+}
+
+.studio-blueprint-availability[data-tone="danger"] {
+  background: #fff0f0;
+  color: #b42318;
+}
+
+.studio-blueprint-detail {
+  position: sticky;
+  top: 14px;
+  display: grid;
+  gap: 14px;
+}
+
+.studio-blueprint-detail > .studio-build-card {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.studio-blueprint-detail-title {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.studio-blueprint-detail-title h2 {
+  margin: 2px 0 8px;
+  font-size: 25px;
+  line-height: 1.2;
+}
+
+.studio-blueprint-detail-title p {
+  margin: 0;
+  color: #475467;
+  line-height: 1.6;
+}
+
+.studio-blueprint-preview {
+  min-height: 190px;
+  overflow: auto;
+  border: 1px solid #e4e7ec;
+  border-radius: 14px;
+  background:
+    linear-gradient(#f8faff 1px, transparent 1px),
+    linear-gradient(90deg, #f8faff 1px, transparent 1px),
+    #fcfdff;
+  background-size: 24px 24px;
+}
+
+.studio-blueprint-preview-surface {
+  position: relative;
+  min-width: 640px;
+  min-height: 190px;
+}
+
+.studio-blueprint-preview-node {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  width: 138px;
+  min-height: 64px;
+  padding: 9px;
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  background: #fff;
+  color: #344054;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+  box-shadow: 0 7px 18px rgba(16, 24, 40, .08);
+}
+
+.studio-blueprint-preview-node[data-tone="resource"] { border-color: #66c7a6; background: #f0fdf8; }
+.studio-blueprint-preview-node[data-tone="model"] { border-color: #8e91ff; background: #f4f3ff; }
+.studio-blueprint-preview-node[data-tone="decision"] { border-color: #f3b562; background: #fff9ec; }
+.studio-blueprint-preview-node[data-tone="external"] { border-color: #ef8e89; background: #fff5f4; }
+
+.studio-blueprint-preview-edge {
+  position: absolute;
+  height: 2px;
+  background: #98a2b3;
+  transform-origin: left center;
+}
+
+.studio-blueprint-preview-edge::after {
+  position: absolute;
+  top: -4px;
+  right: -1px;
+  width: 8px;
+  height: 8px;
+  border-top: 2px solid #98a2b3;
+  border-right: 2px solid #98a2b3;
+  content: "";
+  transform: rotate(45deg);
+}
+
+.studio-blueprint-preview-edge span {
+  position: absolute;
+  top: -20px;
+  left: 50%;
+  padding: 2px 5px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .92);
+  color: #667085;
+  font-size: 10px;
+  white-space: nowrap;
+  transform: translateX(-50%);
+}
+
+.studio-blueprint-setup {
+  display: grid;
+  gap: 13px;
+}
+
+.studio-blueprint-setup > label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: #344054;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.studio-blueprint-setup small {
+  color: #667085;
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+.studio-blueprint-field-result {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  border-radius: 9px;
+  background: #f2f4f7;
+  color: #475467;
+  font-size: 12px;
+}
+
+.studio-blueprint-field-result[data-ok="true"] {
+  background: #ecfdf3;
+  color: #067647;
+}
+
+.studio-blueprint-field-result[data-ok="false"] {
+  background: #fef3f2;
+  color: #b42318;
+}
+
+.studio-blueprint-evidence-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.studio-blueprint-evidence-grid section {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #eaecf0;
+  border-radius: 12px;
+  background: #fcfcfd;
+}
+
+.studio-blueprint-evidence-grid h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.studio-blueprint-evidence-grid ul,
+.studio-blueprint-evidence-grid ol,
+.studio-blueprint-reasons {
+  margin: 0;
+  padding-left: 19px;
+  color: #475467;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.studio-blueprint-success {
+  padding: 14px;
+  border: 1px solid #8de1b9;
+  border-radius: 12px;
+  background: #ecfdf3;
+  color: #075f3d;
+}
+
+.studio-blueprint-success strong,
+.studio-blueprint-success p {
+  margin: 0 0 5px;
+}
+
+.studio-blueprint-upgrade {
+  padding: 12px;
+  border: 1px solid #d6d9ff;
+  border-radius: 12px;
+  background: #f7f7ff;
+}
+
+.studio-blueprint-upgrade pre {
+  max-height: 250px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.studio-blueprint-extract {
+  margin-top: 20px;
+}
+
+.studio-blueprint-extract form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.studio-blueprint-extract label,
+.studio-blueprint-extract fieldset {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: #344054;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.studio-blueprint-extract fieldset {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 12px;
+  border: 1px solid #e4e7ec;
+  border-radius: 12px;
+}
+
+.studio-blueprint-extract fieldset legend {
+  padding: 0 6px;
+}
+
+.studio-blueprint-empty {
+  min-height: 240px;
+}
+
+@media (max-width: 1280px) {
+  .studio-blueprint-filters {
+    grid-template-columns: minmax(230px, 1.4fr) repeat(3, minmax(120px, .7fr));
+  }
+
+  .studio-blueprint-layout {
+    grid-template-columns: minmax(280px, .75fr) minmax(390px, 1.25fr);
+  }
+}
+
+@media (max-width: 980px) {
+  .studio-blueprint-hero,
+  .studio-blueprint-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .studio-blueprint-hero {
+    display: grid;
+  }
+
+  .studio-blueprint-hero-actions {
+    justify-content: flex-start;
+  }
+
+  .studio-blueprint-detail {
+    position: static;
+  }
+
+  .studio-blueprint-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .studio-blueprint-hero {
+    padding: 19px;
+  }
+
+  .studio-blueprint-filters,
+  .studio-blueprint-extract form,
+  .studio-blueprint-extract fieldset,
+  .studio-blueprint-evidence-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .studio-blueprint-detail-title {
+    display: grid;
+  }
+
+  .studio-blueprint-detail-actions > *,
+  .studio-blueprint-hero-actions > * {
+    width: 100%;
+    justify-content: center;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .studio-blueprint-card {
+    transition: none;
+  }
+}

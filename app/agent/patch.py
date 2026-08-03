@@ -81,6 +81,36 @@ class RemoveNode(PatchOperationBase):
     expected_title: str | None = Field(default=None, min_length=1, max_length=256)
 
 
+class ReplaceEntry(PatchOperationBase):
+    """Replace one authoritative entry while preserving its incident paths."""
+
+    op: Literal["entry.replace"]
+    node_id: NodeReference
+    expected_type: Literal[
+        "start",
+        "datasource",
+        "trigger-webhook",
+        "trigger-plugin",
+        "trigger-schedule",
+    ]
+    temp_ref: TempReference
+    node_type: Literal[
+        "start",
+        "datasource",
+        "trigger-webhook",
+        "trigger-plugin",
+        "trigger-schedule",
+    ]
+    title: str = Field(min_length=1, max_length=256)
+    params: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("params")
+    @classmethod
+    def validate_params(cls, value: dict[str, Any]) -> dict[str, Any]:
+        _validate_bounded_json(value, field_name="entry.replace.params")
+        return value
+
+
 class AddEdge(PatchOperationBase):
     op: Literal["edge.add"]
     source: NodeReference
@@ -160,6 +190,7 @@ PatchOperation = Annotated[
     AddNode
     | UpdateNode
     | RemoveNode
+    | ReplaceEntry
     | AddEdge
     | RemoveEdge
     | ConversationVariableAdd

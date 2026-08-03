@@ -10,7 +10,7 @@ from app.node_outputs import node_output_types
 
 
 SideEffectClass = Literal["none", "model_cost", "external", "unknown"]
-MutationName = Literal["node.add", "node.update", "node.remove"]
+MutationName = Literal["node.add", "node.update", "node.remove", "entry.replace"]
 
 
 class NodeDefinition(StrictModel):
@@ -82,7 +82,7 @@ def _mvp_definitions() -> list[NodeDefinition]:
             config_schema={"type": "object", "additionalProperties": True},
             output_schema=_output_schema("start"),
             side_effect="none",
-            mutation_operations={"node.update"},
+            mutation_operations={"node.update", "entry.replace"},
             removable=False,
         ),
         NodeDefinition(
@@ -246,7 +246,7 @@ def _mvp_definitions() -> list[NodeDefinition]:
             modes={"workflow"},
             summary="Start a Workflow from an explicitly configured datasource.",
             side_effect="external",
-            mutation_operations={"node.add", "node.update"},
+            mutation_operations={"node.add", "node.update", "entry.replace"},
             removable=False,
         ),
         _permissive_definition(
@@ -266,7 +266,7 @@ def _mvp_definitions() -> list[NodeDefinition]:
             modes={"workflow"},
             summary="Start a Workflow from an explicitly configured webhook trigger.",
             side_effect="external",
-            mutation_operations={"node.add", "node.update"},
+            mutation_operations={"node.add", "node.update", "entry.replace"},
             removable=False,
         ),
         _permissive_definition(
@@ -274,7 +274,7 @@ def _mvp_definitions() -> list[NodeDefinition]:
             modes={"workflow"},
             summary="Start a Workflow from a pinned plugin event.",
             side_effect="external",
-            mutation_operations={"node.add", "node.update"},
+            mutation_operations={"node.add", "node.update", "entry.replace"},
             removable=False,
         ),
         _permissive_definition(
@@ -282,7 +282,7 @@ def _mvp_definitions() -> list[NodeDefinition]:
             modes={"workflow"},
             summary="Start a Workflow on an explicit schedule.",
             side_effect="external",
-            mutation_operations={"node.add", "node.update"},
+            mutation_operations={"node.add", "node.update", "entry.replace"},
             removable=False,
         ),
     ]

@@ -66,7 +66,7 @@ def test_populated_v4_sqlite_migrates_additively_without_data_loss(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }
-    assert studio.schema_version() == 2
+    assert studio.schema_version() == 3
     assert before_session == after_session
     assert before_run_count == after_run_count == 1
     assert before_tables <= after_tables

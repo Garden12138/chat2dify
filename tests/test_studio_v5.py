@@ -20,6 +20,10 @@ from app.studio.identity import (
     StudioIdentityService,
 )
 from app.studio.models import (
+    BlueprintAvailability,
+    BlueprintGallery,
+    BlueprintGalleryItem,
+    BlueprintSetupValidation,
     BuildStudioView,
     CandidatePresentation,
     DifyAppSummary,
@@ -28,6 +32,7 @@ from app.studio.models import (
     StudioCandidate,
     VerifiedHostContext,
 )
+from app.studio.blueprints import BlueprintRegistry
 from app.studio.service import StudioApplicationService
 from app.studio.store import StudioStore
 from app.dify.version import DifyVersionInfo
@@ -157,6 +162,58 @@ class RecordingBuildService:
             "summary": "来自服务器 Workspace。",
             "items": [],
         }
+
+
+class RecordingBlueprintService:
+    def __init__(self) -> None:
+        self.definition = BlueprintRegistry().get(
+            "builtin-knowledge-human-fallback"
+        ).definition
+        self.gallery_kwargs = None
+        self.validated_values = None
+
+    def gallery(self, authenticated, **kwargs):
+        self.gallery_kwargs = kwargs
+        item = BlueprintGalleryItem(
+            blueprint=self.definition,
+            availability=BlueprintAvailability(
+                compatible=True,
+                applicable=True,
+                available_resources={
+                    "dataset": [
+                        {"id": "dataset-staging", "name": "Staging KB"}
+                    ]
+                },
+            ),
+        )
+        return BlueprintGallery(
+            project=authenticated.project,
+            membership=authenticated.membership,
+            items=[item],
+            categories=[self.definition.category],
+            state="ready",
+            message="找到 1 个符合当前筛选的 Blueprint。",
+        )
+
+    def detail(self, authenticated, **kwargs):
+        del authenticated, kwargs
+        return BlueprintGalleryItem(
+            blueprint=self.definition,
+            availability=BlueprintAvailability(
+                compatible=True,
+                applicable=True,
+            ),
+        )
+
+    def validate_setup(self, authenticated, **kwargs):
+        del authenticated
+        self.validated_values = kwargs["values"]
+        return BlueprintSetupValidation(
+            ok=True,
+            preview=self.definition.preview,
+            expected_behavior=self.definition.preview.expected_behavior,
+            risk={"permission_expansion": False, "dify_write": False},
+        )
 
 
 def _settings(tmp_path: Path) -> Settings:
@@ -382,6 +439,78 @@ def test_build_routes_bind_canvas_context_and_explicit_recovery_to_signed_identi
     assert recorder.resume_message == "继续使用显式人工路径"
     assert forged_raw_graph.status_code == 422
     assert "owner" not in forged_raw_graph.text
+
+
+def test_blueprint_api_filters_and_typed_setup_reject_permission_injection(
+    tmp_path: Path,
+) -> None:
+    application, _, _ = _api_app(tmp_path)
+    recorder = RecordingBlueprintService()
+    application.state.studio_service.blueprint_service = recorder
+    with TestClient(application, base_url=ORIGIN) as client:
+        issued = _issue(client)
+        headers = _auth_headers(
+            issued["token"],
+            **{"X-Role": "owner", "X-Project": "forged-project"},
+        )
+        gallery = client.get(
+            "/api/v5/studio/blueprints",
+            headers=headers,
+            params={
+                "project_id": issued["project"]["id"],
+                "build_id": "build-1",
+                "search": "knowledge fallback",
+                "risk": "medium",
+                "compatible_only": "true",
+            },
+        )
+        validated = client.post(
+            "/api/v5/studio/blueprints/builtin-knowledge-human-fallback/validate",
+            headers=headers,
+            json={
+                "project_id": issued["project"]["id"],
+                "build_id": "build-1",
+                "version": recorder.definition.version,
+                "values": [
+                    {
+                        "field_id": "dataset",
+                        "kind": "dataset",
+                        "value": "dataset-staging",
+                    }
+                ],
+            },
+        )
+        forged = client.post(
+            "/api/v5/studio/blueprints/builtin-knowledge-human-fallback/validate",
+            headers=headers,
+            json={
+                "project_id": issued["project"]["id"],
+                "build_id": "build-1",
+                "values": [],
+                "permission": "owner",
+                "raw_patch": {"op": "json.patch", "path": "/tools"},
+            },
+        )
+
+    assert gallery.status_code == 200
+    assert gallery.json()["items"][0]["blueprint"]["id"] == recorder.definition.id
+    assert recorder.gallery_kwargs == {
+        "project_id": issued["project"]["id"],
+        "build_id": "build-1",
+        "search": "knowledge fallback",
+        "category": None,
+        "app_mode": None,
+        "dify_version": None,
+        "risk": "medium",
+        "visibility": None,
+        "resource_available": None,
+        "compatible_only": True,
+    }
+    assert validated.status_code == 200
+    assert recorder.validated_values[0].field_id == "dataset"
+    assert forged.status_code == 422
+    assert "owner" not in forged.text
+    assert "json.patch" not in forged.text
 
 
 def test_identity_forgery_nonce_replay_origin_and_browser_claims_are_rejected(

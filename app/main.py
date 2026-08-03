@@ -117,6 +117,7 @@ from app.models import (
 from app.tasks import TaskContext, TaskManager, TaskNotFound, TaskRepository
 from app.studio.home import StudioHomeService, V4ContinuityReader
 from app.studio.build import StudioBuildService
+from app.studio.blueprints import StudioBlueprintService
 from app.studio.identity import DifyHostVerifier, StudioIdentityService
 from app.studio.service import StudioApplicationService
 from app.studio.store import StudioStore
@@ -289,6 +290,15 @@ async def lifespan(application: FastAPI):
         application.state.agent_registry = registry
     if settings.ai_studio_v5_enabled:
         studio_store = StudioStore(settings.studio_database_url)
+        studio_build_service = (
+            StudioBuildService(
+                store=studio_store,
+                agent_store=agent_store,
+                agent_service=agent_service,
+            )
+            if agent_store is not None and agent_service is not None
+            else None
+        )
         studio_service = StudioApplicationService(
             identity=StudioIdentityService(
                 settings=settings,
@@ -300,13 +310,23 @@ async def lifespan(application: FastAPI):
                 v4_reader=V4ContinuityReader(settings.task_db_path),
                 public_base_path=settings.chat2dify_public_base_path,
             ),
-            build=(
-                StudioBuildService(
+            build=studio_build_service,
+            blueprints=(
+                StudioBlueprintService(
                     store=studio_store,
                     agent_store=agent_store,
                     agent_service=agent_service,
+                    build_service=studio_build_service,
+                    snapshot_service=workflow_snapshot_service,
+                    workspace=workspace,
+                    review=review,
+                    catalog=catalog,
                 )
-                if agent_store is not None and agent_service is not None
+                if (
+                    agent_store is not None
+                    and agent_service is not None
+                    and studio_build_service is not None
+                )
                 else None
             ),
         )

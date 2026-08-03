@@ -20,6 +20,14 @@ from app.studio.identity import (
     StudioOriginDenied,
 )
 from app.studio.models import (
+    BlueprintApplyResult,
+    BlueprintGallery,
+    BlueprintGalleryItem,
+    BlueprintSetupValidation,
+    BlueprintSetupValue,
+    BlueprintTypedInterface,
+    BlueprintUpgradePreview,
+    BlueprintVersionRecord,
     Membership,
     BuildStudioView,
     Principal,
@@ -122,6 +130,37 @@ class BuildContextCommandRequest(CandidateActionRequest):
         "suggest_resources",
     ]
     selected_node_ids: list[str] = Field(default_factory=list, max_length=20)
+
+
+class BlueprintSetupRequest(StrictModel):
+    project_id: str = Field(min_length=1, max_length=128)
+    build_id: str = Field(min_length=1, max_length=128)
+    version: str | None = Field(default=None, pattern=r"^\d+\.\d+\.\d+$")
+    values: list[BlueprintSetupValue] = Field(default_factory=list, max_length=40)
+
+
+class ExtractBlueprintRequest(StrictModel):
+    project_id: str = Field(min_length=1, max_length=128)
+    build_id: str = Field(min_length=1, max_length=128)
+    candidate_id: str = Field(min_length=1, max_length=128)
+    selected_node_ids: list[str] = Field(min_length=1, max_length=40)
+    name: str = Field(min_length=1, max_length=256)
+    business_outcome: str = Field(min_length=1, max_length=4_000)
+    category: str = Field(min_length=1, max_length=128)
+    visibility: Literal["private", "team"]
+    typed_interface: BlueprintTypedInterface
+
+
+class ProposeBlueprintVersionRequest(StrictModel):
+    project_id: str = Field(min_length=1, max_length=128)
+    version: str = Field(pattern=r"^\d+\.\d+\.\d+$")
+    upgrade_notes: list[str] = Field(min_length=1, max_length=40)
+
+
+class ReviewBlueprintVersionRequest(StrictModel):
+    project_id: str = Field(min_length=1, max_length=128)
+    approved: bool
+    note: str = Field(min_length=1, max_length=2_000)
 
 
 ERROR_RESPONSES = {
@@ -429,6 +468,231 @@ def contextual_command(
             candidate_id=payload.candidate_id,
             command=payload.command,
             selected_node_ids=payload.selected_node_ids,
+        )
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
+@router.get(
+    "/blueprints",
+    response_model=BlueprintGallery,
+    responses=ERROR_RESPONSES,
+)
+def list_blueprints(
+    request: Request,
+    response: Response,
+    project_id: str = Query(min_length=1, max_length=128),
+    build_id: str | None = Query(default=None, max_length=128),
+    search: str | None = Query(default=None, max_length=256),
+    category: str | None = Query(default=None, max_length=128),
+    app_mode: str | None = Query(
+        default=None,
+        pattern="^(workflow|advanced-chat|chat|agent-chat|completion)$",
+    ),
+    dify_version: str | None = Query(default=None, max_length=128),
+    risk: str | None = Query(default=None, pattern="^(low|medium|high)$"),
+    visibility: str | None = Query(
+        default=None,
+        pattern="^(builtin|private|team)$",
+    ),
+    resource_available: bool | None = Query(default=None),
+    compatible_only: bool = Query(default=True),
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        return service.blueprint_gallery(
+            authenticated,
+            project_id=project_id,
+            build_id=build_id,
+            search=search,
+            category=category,
+            app_mode=app_mode,
+            dify_version=dify_version,
+            risk=risk,
+            visibility=visibility,
+            resource_available=resource_available,
+            compatible_only=compatible_only,
+        )
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
+@router.post(
+    "/blueprints/extract",
+    response_model=BlueprintVersionRecord,
+    status_code=201,
+    responses=ERROR_RESPONSES,
+)
+def extract_blueprint(
+    payload: ExtractBlueprintRequest,
+    request: Request,
+    response: Response,
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        return service.extract_blueprint(
+            authenticated,
+            project_id=payload.project_id,
+            build_id=payload.build_id,
+            candidate_id=payload.candidate_id,
+            selected_node_ids=payload.selected_node_ids,
+            name=payload.name,
+            business_outcome=payload.business_outcome,
+            category=payload.category,
+            visibility=payload.visibility,
+            typed_interface=payload.typed_interface,
+        )
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
+@router.get(
+    "/blueprints/{blueprint_id}",
+    response_model=BlueprintGalleryItem,
+    responses=ERROR_RESPONSES,
+)
+def get_blueprint(
+    blueprint_id: str,
+    request: Request,
+    response: Response,
+    project_id: str = Query(min_length=1, max_length=128),
+    build_id: str | None = Query(default=None, max_length=128),
+    version: str | None = Query(default=None, pattern=r"^\d+\.\d+\.\d+$"),
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        return service.blueprint_detail(
+            authenticated,
+            project_id=project_id,
+            blueprint_id=blueprint_id,
+            version=version,
+            build_id=build_id,
+        )
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
+@router.post(
+    "/blueprints/{blueprint_id}/validate",
+    response_model=BlueprintSetupValidation,
+    responses=ERROR_RESPONSES,
+)
+def validate_blueprint_setup(
+    blueprint_id: str,
+    payload: BlueprintSetupRequest,
+    request: Request,
+    response: Response,
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        return service.validate_blueprint_setup(
+            authenticated,
+            project_id=payload.project_id,
+            blueprint_id=blueprint_id,
+            values=payload.values,
+            build_id=payload.build_id,
+            version=payload.version,
+        )
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
+@router.post(
+    "/blueprints/{blueprint_id}/apply",
+    response_model=BlueprintApplyResult,
+    status_code=201,
+    responses=ERROR_RESPONSES,
+)
+def apply_blueprint(
+    blueprint_id: str,
+    payload: BlueprintSetupRequest,
+    request: Request,
+    response: Response,
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        return service.apply_blueprint(
+            authenticated,
+            project_id=payload.project_id,
+            blueprint_id=blueprint_id,
+            values=payload.values,
+            build_id=payload.build_id,
+            version=payload.version,
+        )
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
+@router.post(
+    "/blueprints/{blueprint_id}/versions",
+    response_model=BlueprintVersionRecord,
+    status_code=202,
+    responses=ERROR_RESPONSES,
+)
+def propose_blueprint_version(
+    blueprint_id: str,
+    payload: ProposeBlueprintVersionRequest,
+    request: Request,
+    response: Response,
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        return service.propose_blueprint_version(
+            authenticated,
+            project_id=payload.project_id,
+            blueprint_id=blueprint_id,
+            version=payload.version,
+            upgrade_notes=payload.upgrade_notes,
+        )
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
+@router.post(
+    "/blueprints/{blueprint_id}/versions/{version}/review",
+    response_model=BlueprintVersionRecord,
+    responses=ERROR_RESPONSES,
+)
+def review_blueprint_version(
+    blueprint_id: str,
+    version: str,
+    payload: ReviewBlueprintVersionRequest,
+    request: Request,
+    response: Response,
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        return service.review_blueprint_version(
+            authenticated,
+            project_id=payload.project_id,
+            blueprint_id=blueprint_id,
+            version=version,
+            approved=payload.approved,
+            note=payload.note,
+        )
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
+@router.get(
+    "/blueprint-applications/{application_id}/upgrade",
+    response_model=BlueprintUpgradePreview,
+    responses=ERROR_RESPONSES,
+)
+def preview_blueprint_upgrade(
+    application_id: str,
+    request: Request,
+    response: Response,
+    project_id: str = Query(min_length=1, max_length=128),
+    target_version: str | None = Query(default=None, pattern=r"^\d+\.\d+\.\d+$"),
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        return service.blueprint_upgrade_preview(
+            authenticated,
+            project_id=project_id,
+            application_id=application_id,
+            target_version=target_version,
         )
     except Exception as exc:
         return studio_error_response(exc)

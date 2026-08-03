@@ -191,6 +191,7 @@ async function ensureBuild() {
     body: buildCreatePayload(identity, state.projectId, appMode),
   });
   state.buildId = build.id;
+  updateBlueprintLink();
   document.querySelector("#studio-build-app-mode").disabled = true;
   const url = new URL(window.location.href);
   url.searchParams.set("build_id", build.id);
@@ -289,10 +290,30 @@ function renderView() {
     : "还没有 Candidate";
   const visible = selectedCandidate(view, state.activeCandidateId);
   state.activeCandidateId = visible?.candidate?.id || "";
+  updateBlueprintLink();
   renderCandidateTabs();
   renderCandidate(visible);
   renderComparison();
   renderContextActionState();
+}
+
+function updateBlueprintLink() {
+  const link = document.querySelector("#studio-build-blueprints");
+  if (!link) return;
+  const params = new URLSearchParams({
+    studio: "blueprints",
+    app_mode: state.view?.build?.app_mode || identity.appMode,
+  });
+  if (state.buildId) params.set("build_id", state.buildId);
+  const selectedNodes = authoritativeSelection();
+  if (state.activeCandidateId && selectedNodes.length) {
+    params.set("candidate_id", state.activeCandidateId);
+    params.set("node_ids", selectedNodes.join(","));
+  }
+  link.href = `${basePath || ""}/?${params.toString()}`;
+  link.textContent = state.activeCandidateId && selectedNodes.length
+    ? "浏览 / 保存 Blueprint"
+    : "浏览 Blueprints";
 }
 
 function renderEmpty() {

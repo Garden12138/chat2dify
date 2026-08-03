@@ -12,6 +12,9 @@ from uuid import NAMESPACE_URL, uuid5
 from app.agent.trace import redact_sensitive_data
 from app.studio.models import (
     Activity,
+    BlueprintApplication,
+    BlueprintDefinition,
+    BlueprintVersionRecord,
     CandidateStatus,
     DurableJob,
     ExternalReceipt,
@@ -52,7 +55,7 @@ class StudioRecordNotFound(StudioStoreError):
     code = "STUDIO_RECORD_NOT_FOUND"
 
 
-_MIGRATION_VERSION = 2
+_MIGRATION_VERSION = 3
 _SCHEMA_STATEMENTS = [
     """
     CREATE TABLE IF NOT EXISTS studio_schema_migrations (
@@ -237,6 +240,58 @@ _SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS studio_blueprints (
+        id TEXT PRIMARY KEY,
+        project_id TEXT,
+        slug TEXT NOT NULL,
+        visibility TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        current_version TEXT,
+        status TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        UNIQUE(project_id, slug),
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS studio_blueprint_versions (
+        id TEXT PRIMARY KEY,
+        blueprint_id TEXT NOT NULL,
+        project_id TEXT,
+        semantic_version TEXT NOT NULL,
+        status TEXT NOT NULL,
+        definition_json TEXT NOT NULL,
+        template_json TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        reviewed_by TEXT,
+        review_note TEXT,
+        created_at REAL NOT NULL,
+        reviewed_at REAL,
+        UNIQUE(blueprint_id, semantic_version),
+        FOREIGN KEY(blueprint_id) REFERENCES studio_blueprints(id) ON DELETE CASCADE,
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS studio_blueprint_applications (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        build_id TEXT NOT NULL,
+        candidate_id TEXT NOT NULL,
+        blueprint_id TEXT NOT NULL,
+        blueprint_version TEXT NOT NULL,
+        setup_hash TEXT NOT NULL,
+        applied_by TEXT NOT NULL,
+        applied_at REAL NOT NULL,
+        UNIQUE(project_id, candidate_id),
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE,
+        FOREIGN KEY(build_id) REFERENCES studio_builds(id) ON DELETE CASCADE,
+        FOREIGN KEY(candidate_id) REFERENCES studio_candidates(id) ON DELETE CASCADE
+    )
+    """,
+    """
     CREATE INDEX IF NOT EXISTS idx_studio_memberships_principal
         ON studio_memberships(principal_key, updated_at DESC)
     """,
@@ -259,6 +314,18 @@ _SCHEMA_STATEMENTS = [
     """
     CREATE INDEX IF NOT EXISTS idx_studio_candidates_build
         ON studio_candidates(build_id, ordinal)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_studio_blueprints_project
+        ON studio_blueprints(project_id, visibility, updated_at DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_studio_blueprint_versions_lookup
+        ON studio_blueprint_versions(blueprint_id, status, created_at DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_studio_blueprint_applications_build
+        ON studio_blueprint_applications(build_id, applied_at DESC)
     """,
 ]
 
@@ -1165,6 +1232,459 @@ class StudioStore:
             )
         return self.get_build(build_id, project_id=project_id, principal_key=principal_key)
 
+    def create_blueprint(
+        self,
+        *,
+        definition: BlueprintDefinition,
+        template: dict[str, Any],
+        principal_key: str,
+        initial_status: str,
+    ) -> BlueprintVersionRecord:
+        if definition.visibility not in {"private", "team"} or not definition.project_id:
+            raise StudioConflict("Only Project-scoped Private or Team Blueprints can be saved.")
+        _, membership = self.get_project_for_principal(
+            definition.project_id,
+            principal_key,
+        )
+        if membership.role not in {"owner", "admin", "builder"}:
+            raise StudioAccessDenied("Your project role cannot save Blueprints.")
+        if initial_status not in {"published", "pending_review"}:
+            raise ValueError("A saved Blueprint must be published or pending review.")
+        now = utc_now()
+        record_id = new_id()
+        with self._transaction(immediate=True) as connection:
+            self._execute(
+                connection,
+                """
+                INSERT INTO studio_blueprints(
+                    id, project_id, slug, visibility, created_by,
+                    current_version, status, version, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                """,
+                (
+                    definition.id,
+                    definition.project_id,
+                    definition.slug,
+                    definition.visibility,
+                    principal_key,
+                    definition.version if initial_status == "published" else None,
+                    initial_status,
+                    _timestamp(now),
+                    _timestamp(now),
+                ),
+            )
+            self._execute(
+                connection,
+                """
+                INSERT INTO studio_blueprint_versions(
+                    id, blueprint_id, project_id, semantic_version, status,
+                    definition_json, template_json, created_by, reviewed_by,
+                    review_note, created_at, reviewed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL)
+                """,
+                (
+                    record_id,
+                    definition.id,
+                    definition.project_id,
+                    definition.version,
+                    initial_status,
+                    _json_dump(definition.model_dump(mode="json")),
+                    _json_dump(_safe_json(template)),
+                    principal_key,
+                    _timestamp(now),
+                ),
+            )
+            _insert_activity(
+                self,
+                connection,
+                project_id=definition.project_id,
+                principal_key=principal_key,
+                kind=(
+                    "blueprint.saved.private"
+                    if definition.visibility == "private"
+                    else "blueprint.review.requested"
+                ),
+                entity_type="blueprint",
+                entity_id=definition.id,
+                summary={
+                    "name": definition.name,
+                    "version": definition.version,
+                    "visibility": definition.visibility,
+                    "status": initial_status,
+                },
+                now=now,
+            )
+        return self.get_blueprint_version(
+            definition.id,
+            definition.version,
+            project_id=definition.project_id,
+            principal_key=principal_key,
+            include_unpublished=True,
+        )[0]
+
+    def list_published_blueprints(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> list[tuple[BlueprintVersionRecord, dict[str, Any]]]:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT v.*, b.visibility AS blueprint_visibility,
+                       b.created_by AS blueprint_created_by
+                FROM studio_blueprints b
+                JOIN studio_blueprint_versions v
+                  ON v.blueprint_id = b.id
+                 AND v.semantic_version = b.current_version
+                WHERE b.project_id = ? AND v.status = 'published'
+                  AND (
+                    b.visibility = 'team'
+                    OR (b.visibility = 'private' AND b.created_by = ?)
+                  )
+                ORDER BY b.updated_at DESC, b.id ASC
+                """,
+                (project_id, principal_key),
+            ).fetchall()
+        return [(_blueprint_version_from_row(row), _blueprint_template_from_row(row)) for row in rows]
+
+    def list_pending_blueprints(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> list[tuple[BlueprintVersionRecord, dict[str, Any]]]:
+        _, membership = self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT v.*
+                FROM studio_blueprints b
+                JOIN studio_blueprint_versions v ON v.blueprint_id = b.id
+                WHERE b.project_id = ? AND b.visibility = 'team'
+                  AND v.status = 'pending_review'
+                  AND (
+                    v.created_by = ?
+                    OR ? IN ('owner', 'admin', 'reviewer')
+                  )
+                ORDER BY v.created_at DESC, v.id ASC
+                """,
+                (project_id, principal_key, membership.role),
+            ).fetchall()
+        return [
+            (_blueprint_version_from_row(row), _blueprint_template_from_row(row))
+            for row in rows
+        ]
+
+    def get_blueprint_version(
+        self,
+        blueprint_id: str,
+        semantic_version: str | None,
+        *,
+        project_id: str,
+        principal_key: str,
+        include_unpublished: bool = False,
+    ) -> tuple[BlueprintVersionRecord, dict[str, Any]]:
+        _, membership = self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            blueprint = self._execute(
+                connection,
+                "SELECT * FROM studio_blueprints WHERE id = ? AND project_id = ?",
+                (blueprint_id, project_id),
+            ).fetchone()
+            if blueprint is None:
+                raise StudioRecordNotFound("The Project Blueprint was not found.")
+            visibility = str(_row_value(blueprint, "visibility"))
+            created_by = str(_row_value(blueprint, "created_by"))
+            if visibility == "private" and created_by != principal_key:
+                raise StudioRecordNotFound("The Project Blueprint was not found.")
+            version = semantic_version or _optional_string(
+                _row_value(blueprint, "current_version")
+            )
+            if version is None:
+                raise StudioConflict("This Blueprint has no published version yet.")
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_blueprint_versions
+                WHERE blueprint_id = ? AND semantic_version = ?
+                """,
+                (blueprint_id, version),
+            ).fetchone()
+        if row is None:
+            raise StudioRecordNotFound("The Blueprint version was not found.")
+        status = str(_row_value(row, "status"))
+        created_version_by = str(_row_value(row, "created_by"))
+        if status != "published" and not (
+            include_unpublished
+            and (
+                created_version_by == principal_key
+                or membership.role in {"owner", "admin", "reviewer"}
+            )
+        ):
+            raise StudioRecordNotFound("The Blueprint version was not found.")
+        return _blueprint_version_from_row(row), _blueprint_template_from_row(row)
+
+    def propose_blueprint_version(
+        self,
+        *,
+        definition: BlueprintDefinition,
+        template: dict[str, Any],
+        principal_key: str,
+    ) -> BlueprintVersionRecord:
+        if not definition.project_id:
+            raise StudioConflict("Project Blueprint versions require a Project.")
+        _, membership = self.get_project_for_principal(
+            definition.project_id,
+            principal_key,
+        )
+        if membership.role not in {"owner", "admin", "builder"}:
+            raise StudioAccessDenied("Your project role cannot propose Blueprint versions.")
+        with self._reader() as connection:
+            blueprint = self._execute(
+                connection,
+                "SELECT * FROM studio_blueprints WHERE id = ? AND project_id = ?",
+                (definition.id, definition.project_id),
+            ).fetchone()
+        if blueprint is None:
+            raise StudioRecordNotFound("The Project Blueprint was not found.")
+        if (
+            str(_row_value(blueprint, "created_by")) != principal_key
+            and membership.role not in {"owner", "admin"}
+        ):
+            raise StudioAccessDenied("Only the Blueprint author or a Project admin can propose a version.")
+        now = utc_now()
+        record_id = new_id()
+        with self._transaction(immediate=True) as connection:
+            self._execute(
+                connection,
+                """
+                INSERT INTO studio_blueprint_versions(
+                    id, blueprint_id, project_id, semantic_version, status,
+                    definition_json, template_json, created_by, reviewed_by,
+                    review_note, created_at, reviewed_at
+                ) VALUES (?, ?, ?, ?, 'pending_review', ?, ?, ?, NULL, NULL, ?, NULL)
+                """,
+                (
+                    record_id,
+                    definition.id,
+                    definition.project_id,
+                    definition.version,
+                    _json_dump(definition.model_dump(mode="json")),
+                    _json_dump(_safe_json(template)),
+                    principal_key,
+                    _timestamp(now),
+                ),
+            )
+            self._execute(
+                connection,
+                """
+                UPDATE studio_blueprints
+                SET status = 'pending_review', version = version + 1, updated_at = ?
+                WHERE id = ?
+                """,
+                (_timestamp(now), definition.id),
+            )
+            _insert_activity(
+                self,
+                connection,
+                project_id=definition.project_id,
+                principal_key=principal_key,
+                kind="blueprint.version.review.requested",
+                entity_type="blueprint",
+                entity_id=definition.id,
+                summary={"version": definition.version},
+                now=now,
+            )
+        return self.get_blueprint_version(
+            definition.id,
+            definition.version,
+            project_id=definition.project_id,
+            principal_key=principal_key,
+            include_unpublished=True,
+        )[0]
+
+    def review_blueprint_version(
+        self,
+        *,
+        blueprint_id: str,
+        semantic_version: str,
+        project_id: str,
+        principal_key: str,
+        approved: bool,
+        note: str,
+    ) -> BlueprintVersionRecord:
+        _, membership = self.get_project_for_principal(project_id, principal_key)
+        if membership.role not in {"owner", "admin", "reviewer"}:
+            raise StudioAccessDenied("Your project role cannot review Blueprint versions.")
+        now = utc_now()
+        with self._transaction(immediate=True) as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_blueprint_versions
+                WHERE blueprint_id = ? AND project_id = ? AND semantic_version = ?
+                """,
+                (blueprint_id, project_id, semantic_version),
+            ).fetchone()
+            if row is None:
+                raise StudioRecordNotFound("The Blueprint version was not found.")
+            if str(_row_value(row, "status")) != "pending_review":
+                raise StudioConflict("Only a pending Blueprint version can be reviewed.")
+            if str(_row_value(row, "created_by")) == principal_key:
+                raise StudioAccessDenied("A Blueprint version author cannot review their own version.")
+            status = "published" if approved else "rejected"
+            self._execute(
+                connection,
+                """
+                UPDATE studio_blueprint_versions
+                SET status = ?, reviewed_by = ?, review_note = ?, reviewed_at = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    principal_key,
+                    str(redact_sensitive_data(note))[:2_000],
+                    _timestamp(now),
+                    str(_row_value(row, "id")),
+                ),
+            )
+            if approved:
+                self._execute(
+                    connection,
+                    """
+                    UPDATE studio_blueprints
+                    SET current_version = ?, status = 'published',
+                        version = version + 1, updated_at = ?
+                    WHERE id = ? AND project_id = ?
+                    """,
+                    (semantic_version, _timestamp(now), blueprint_id, project_id),
+                )
+            else:
+                self._execute(
+                    connection,
+                    """
+                    UPDATE studio_blueprints
+                    SET status = CASE WHEN current_version IS NULL THEN 'rejected' ELSE 'published' END,
+                        version = version + 1, updated_at = ?
+                    WHERE id = ? AND project_id = ?
+                    """,
+                    (_timestamp(now), blueprint_id, project_id),
+                )
+            _insert_activity(
+                self,
+                connection,
+                project_id=project_id,
+                principal_key=principal_key,
+                kind=(
+                    "blueprint.version.published"
+                    if approved
+                    else "blueprint.version.rejected"
+                ),
+                entity_type="blueprint",
+                entity_id=blueprint_id,
+                summary={"version": semantic_version, "approved": approved},
+                now=now,
+            )
+        return self.get_blueprint_version(
+            blueprint_id,
+            semantic_version,
+            project_id=project_id,
+            principal_key=principal_key,
+            include_unpublished=True,
+        )[0]
+
+    def record_blueprint_application(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+        build_id: str,
+        candidate_id: str,
+        blueprint_id: str,
+        blueprint_version: str,
+        setup_hash: str,
+    ) -> BlueprintApplication:
+        self.get_candidate(
+            candidate_id,
+            build_id=build_id,
+            project_id=project_id,
+            principal_key=principal_key,
+        )
+        now = utc_now()
+        application = BlueprintApplication(
+            id=new_id(),
+            project_id=project_id,
+            build_id=build_id,
+            candidate_id=candidate_id,
+            blueprint_id=blueprint_id,
+            blueprint_version=blueprint_version,
+            setup_hash=setup_hash,
+            applied_by=principal_key,
+            applied_at=now,
+        )
+        with self._transaction(immediate=True) as connection:
+            self._execute(
+                connection,
+                """
+                INSERT INTO studio_blueprint_applications(
+                    id, project_id, build_id, candidate_id, blueprint_id,
+                    blueprint_version, setup_hash, applied_by, applied_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    application.id,
+                    project_id,
+                    build_id,
+                    candidate_id,
+                    blueprint_id,
+                    blueprint_version,
+                    setup_hash,
+                    principal_key,
+                    _timestamp(now),
+                ),
+            )
+            _insert_activity(
+                self,
+                connection,
+                project_id=project_id,
+                principal_key=principal_key,
+                kind="blueprint.applied",
+                entity_type="candidate",
+                entity_id=candidate_id,
+                summary={
+                    "build_id": build_id,
+                    "blueprint_id": blueprint_id,
+                    "blueprint_version": blueprint_version,
+                },
+                now=now,
+            )
+        return application
+
+    def get_blueprint_application(
+        self,
+        application_id: str,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> BlueprintApplication:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_blueprint_applications
+                WHERE id = ? AND project_id = ?
+                """,
+                (application_id, project_id),
+            ).fetchone()
+        if row is None:
+            raise StudioRecordNotFound("The Blueprint application was not found.")
+        return _blueprint_application_from_row(row)
+
     def enqueue_job(
         self,
         *,
@@ -1705,6 +2225,44 @@ def _candidate_from_row(row: Any) -> StudioCandidate:
         version=int(_row_value(row, "version")),
         created_at=_datetime(_row_value(row, "created_at")),
         updated_at=_datetime(_row_value(row, "updated_at")),
+    )
+
+
+def _blueprint_version_from_row(row: Any) -> BlueprintVersionRecord:
+    definition = BlueprintDefinition.model_validate(
+        _json_load(_row_value(row, "definition_json"))
+    )
+    return BlueprintVersionRecord(
+        id=str(_row_value(row, "id")),
+        blueprint_id=str(_row_value(row, "blueprint_id")),
+        project_id=_optional_string(_row_value(row, "project_id")),
+        version=str(_row_value(row, "semantic_version")),
+        status=str(_row_value(row, "status")),
+        definition=definition,
+        created_by=str(_row_value(row, "created_by")),
+        reviewed_by=_optional_string(_row_value(row, "reviewed_by")),
+        review_note=_optional_string(_row_value(row, "review_note")),
+        created_at=_datetime(_row_value(row, "created_at")),
+        reviewed_at=_optional_datetime(_row_value(row, "reviewed_at")),
+    )
+
+
+def _blueprint_template_from_row(row: Any) -> dict[str, Any]:
+    payload = _json_load(_row_value(row, "template_json"))
+    return payload if isinstance(payload, dict) else {}
+
+
+def _blueprint_application_from_row(row: Any) -> BlueprintApplication:
+    return BlueprintApplication(
+        id=str(_row_value(row, "id")),
+        project_id=str(_row_value(row, "project_id")),
+        build_id=str(_row_value(row, "build_id")),
+        candidate_id=str(_row_value(row, "candidate_id")),
+        blueprint_id=str(_row_value(row, "blueprint_id")),
+        blueprint_version=str(_row_value(row, "blueprint_version")),
+        setup_hash=str(_row_value(row, "setup_hash")),
+        applied_by=str(_row_value(row, "applied_by")),
+        applied_at=_datetime(_row_value(row, "applied_at")),
     )
 
 

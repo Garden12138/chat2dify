@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from app.agent.catalog import NodeCapabilityCatalog
 from app.agent.patch import AddNode, PatchDocument, RemoveNode
 from app.agent.registry import ToolExecutionContext, ToolRegistry
+from app.agent.workspace import _retarget_entry_references
 from app.models import NodeType
 
 
@@ -134,6 +135,7 @@ def test_node_capability_catalog_covers_v3_top_level_node_families() -> None:
     assert catalog.require("start").removable is False
     assert catalog.require("iteration").container is True
     assert catalog.require("trigger-webhook").mutation_operations == {
+        "entry.replace",
         "node.add",
         "node.update",
     }
@@ -269,3 +271,26 @@ def test_patch_schema_is_explicit_bounded_and_supports_temp_refs() -> None:
                 ],
             }
         )
+
+
+def test_entry_reference_retargeting_preserves_unrelated_literal_values() -> None:
+    payload = {
+        "value_selector": ["start", "query"],
+        "query_variable_selector": ["start", "query"],
+        "literal": "start",
+        "description": "start",
+        "template": "Use {{#start.query#}} and {{start.files}}.",
+        "nested": {"node_id": "start", "label": "start"},
+    }
+
+    retargeted = _retarget_entry_references(payload, "start", "trigger-1")
+
+    assert retargeted["value_selector"] == ["trigger-1", "query"]
+    assert retargeted["query_variable_selector"] == ["trigger-1", "query"]
+    assert retargeted["template"] == (
+        "Use {{#trigger-1.query#}} and {{trigger-1.files}}."
+    )
+    assert retargeted["nested"]["node_id"] == "trigger-1"
+    assert retargeted["literal"] == "start"
+    assert retargeted["description"] == "start"
+    assert retargeted["nested"]["label"] == "start"
