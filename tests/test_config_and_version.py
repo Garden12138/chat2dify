@@ -235,6 +235,49 @@ def test_ai_studio_v5_rejects_unsafe_origin_and_database_scheme(
         )
 
 
+def test_scenario_preview_requires_explicit_nonproduction_configuration(
+    tmp_path: Path,
+) -> None:
+    base = {
+        "DIFY_SOURCE_DIR": "../dify",
+        "CHAT2DIFY_STUDIO_PREVIEW_ENABLED": "true",
+    }
+    with pytest.raises(ValueError, match="requires explicit settings"):
+        Settings.from_env(base, project_root=tmp_path, validate_dify=False)
+    with pytest.raises(ValueError, match="non-production target"):
+        Settings.from_env(
+            {
+                **base,
+                "CHAT2DIFY_STUDIO_PREVIEW_TARGET_ID": "production",
+                "CHAT2DIFY_STUDIO_PREVIEW_CONSOLE_API_BASE": "http://preview.local/console/api",
+                "CHAT2DIFY_STUDIO_PREVIEW_CONSOLE_WEB_BASE": "http://preview.local",
+                "CHAT2DIFY_STUDIO_PREVIEW_EMAIL": "preview@example.com",
+                "CHAT2DIFY_STUDIO_PREVIEW_PASSWORD": "preview-only",
+            },
+            project_root=tmp_path,
+            validate_dify=False,
+        )
+    settings = Settings.from_env(
+        {
+            **base,
+            "CHAT2DIFY_STUDIO_PREVIEW_TARGET_ID": "isolated-test",
+            "CHAT2DIFY_STUDIO_PREVIEW_TARGET_NAME": "QA Preview",
+            "CHAT2DIFY_STUDIO_PREVIEW_CONSOLE_API_BASE": "http://preview.local/console/api/",
+            "CHAT2DIFY_STUDIO_PREVIEW_CONSOLE_WEB_BASE": "http://preview.local/",
+            "CHAT2DIFY_STUDIO_PREVIEW_EMAIL": "preview@example.com",
+            "CHAT2DIFY_STUDIO_PREVIEW_PASSWORD": "preview-only",
+            "CHAT2DIFY_STUDIO_PREVIEW_TTL_SECONDS": "900",
+        },
+        project_root=tmp_path,
+        validate_dify=False,
+    )
+    assert settings.studio_preview_enabled is True
+    assert settings.studio_preview_target_id == "isolated-test"
+    assert settings.studio_preview_target_name == "QA Preview"
+    assert settings.studio_preview_console_api_base == "http://preview.local/console/api"
+    assert settings.studio_preview_ttl_seconds == 900
+
+
 def test_public_base_path_is_normalized(tmp_path: Path) -> None:
     settings = Settings.from_env(
         {

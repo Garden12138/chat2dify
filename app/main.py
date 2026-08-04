@@ -119,6 +119,8 @@ from app.studio.home import StudioHomeService, V4ContinuityReader
 from app.studio.build import StudioBuildService
 from app.studio.blueprints import StudioBlueprintService
 from app.studio.identity import DifyHostVerifier, StudioIdentityService
+from app.studio.preview import preview_adapter_from_settings
+from app.studio.scenarios import StudioScenarioService
 from app.studio.service import StudioApplicationService
 from app.studio.store import StudioStore
 from app.validator import has_errors, validate_dsl, validate_plan
@@ -290,6 +292,7 @@ async def lifespan(application: FastAPI):
         application.state.agent_registry = registry
     if settings.ai_studio_v5_enabled:
         studio_store = StudioStore(settings.studio_database_url)
+        studio_store.interrupt_active_scenario_runs()
         studio_build_service = (
             StudioBuildService(
                 store=studio_store,
@@ -329,12 +332,30 @@ async def lifespan(application: FastAPI):
                 )
                 else None
             ),
+            scenarios=(
+                StudioScenarioService(
+                    store=studio_store,
+                    build_service=studio_build_service,
+                    agent_store=agent_store,
+                    compiler=compiler,
+                    catalog=catalog,
+                    preview=preview_adapter_from_settings(settings),
+                    background_workers=settings.task_workers,
+                )
+                if (
+                    agent_store is not None
+                    and studio_build_service is not None
+                )
+                else None
+            ),
         )
         application.state.studio_store = studio_store
         application.state.studio_service = studio_service
     try:
         yield
     finally:
+        if application.state.studio_service is not None:
+            application.state.studio_service.close()
         if agent_service is not None:
             agent_service.close()
         task_manager.close()

@@ -2,7 +2,7 @@ export const STUDIO_NAVIGATION = Object.freeze([
   { id: "home", label: "Studio Home", available: true },
   { id: "build", label: "Build Studio", available: true },
   { id: "blueprints", label: "Blueprints", available: true },
-  { id: "scenarios", label: "Scenarios", available: false },
+  { id: "scenarios", label: "Scenarios", available: true },
   { id: "releases", label: "Reviews & Releases", available: false },
   { id: "runs", label: "Runs", available: false },
 ]);
@@ -10,7 +10,7 @@ export const STUDIO_NAVIGATION = Object.freeze([
 export function isStudioHomeEnabled(config, search = "") {
   const params = new URLSearchParams(search);
   return Boolean(config?.studioV5Enabled)
-    && !["build", "blueprints"].includes(params.get("studio"));
+    && !["build", "blueprints", "scenarios"].includes(params.get("studio"));
 }
 
 export function homeQuery({ projectId = "", search = "", appMode = "" } = {}) {
@@ -56,6 +56,17 @@ export function classifyStudioError(status, payload = {}) {
       title: "Studio v5 当前未启用",
       message: "刷新后会回到原有 Chat2Dify 工作台。",
       action: "reload",
+    };
+  }
+  if (status === 409) {
+    return {
+      kind: "conflict",
+      code,
+      title: code === "SCENARIO_SUITE_VERSION_CONFLICT" ? "这个 Suite 版本已存在" : "数据状态已发生变化",
+      message: code === "SCENARIO_SUITE_VERSION_CONFLICT"
+        ? "请选择已有 Suite，或修改版本号后重新保存。"
+        : (error.message || "请刷新权威状态，确认差异后安全重试。"),
+      action: "refresh",
     };
   }
   if (status === 503 || error.retryable) {

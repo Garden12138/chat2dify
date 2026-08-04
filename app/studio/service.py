@@ -13,6 +13,7 @@ from app.studio.identity import (
     StudioHostUnavailable,
 )
 from app.studio.models import StudioHome
+from app.studio.scenarios import StudioScenarioService
 
 
 class StudioApplicationService:
@@ -23,11 +24,17 @@ class StudioApplicationService:
         home: StudioHomeService,
         build: StudioBuildService | None = None,
         blueprints: StudioBlueprintService | None = None,
+        scenarios: StudioScenarioService | None = None,
     ) -> None:
         self.identity = identity
         self.home_service = home
         self.build_service = build
         self.blueprint_service = blueprints
+        self.scenario_service = scenarios
+
+    def close(self) -> None:
+        if self.scenario_service is not None:
+            self.scenario_service.close()
 
     def issue_session(
         self,
@@ -173,3 +180,50 @@ class StudioApplicationService:
 
     def blueprint_upgrade_preview(self, authenticated, **kwargs):
         return self.require_blueprints().upgrade_preview(authenticated, **kwargs)
+
+    def require_scenarios(self) -> StudioScenarioService:
+        if self.scenario_service is None:
+            raise StudioHostUnavailable("Scenario Lab requires the v4 safety core.")
+        return self.scenario_service
+
+    def scenario_lab(self, authenticated, **kwargs):
+        return self.require_scenarios().lab(authenticated, **kwargs)
+
+    def discover_scenario_input_schema(self, authenticated, **kwargs):
+        return self.require_scenarios().discover_input_schema(authenticated, **kwargs)
+
+    def create_scenario_suite(self, authenticated, **kwargs):
+        return self.require_scenarios().create_suite(authenticated, **kwargs)
+
+    def generate_scenario_edge_cases(self, authenticated, **kwargs):
+        return self.require_scenarios().generate_edge_cases(authenticated, **kwargs)
+
+    def approve_scenario_file_fixture(self, authenticated, **kwargs):
+        return self.require_scenarios().approve_file_fixture(authenticated, **kwargs)
+
+    def approve_sanitized_run_source(self, authenticated, **kwargs):
+        return self.require_scenarios().approve_sanitized_run_source(
+            authenticated,
+            **kwargs,
+        )
+
+    def run_scenario_suite(self, authenticated, **kwargs):
+        return self.require_scenarios().run_suite(authenticated, **kwargs)
+
+    def cancel_scenario_run(self, authenticated, **kwargs):
+        return self.require_scenarios().cancel_run(authenticated, **kwargs)
+
+    def get_scenario_run(self, authenticated, **kwargs):
+        return self.require_scenarios().get_run(authenticated, **kwargs)
+
+    def cleanup_preview_fixture(self, authenticated, **kwargs):
+        return self.require_scenarios().cleanup_fixture(authenticated, **kwargs)
+
+    def reap_preview_fixtures(self, authenticated, **kwargs):
+        return self.require_scenarios().reap_expired(authenticated, **kwargs)
+
+    def save_scenario_baseline(self, authenticated, **kwargs):
+        return self.require_scenarios().save_baseline(authenticated, **kwargs)
+
+    def configure_regression_gate(self, authenticated, **kwargs):
+        return self.require_scenarios().configure_gate(authenticated, **kwargs)

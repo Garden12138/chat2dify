@@ -725,6 +725,53 @@ class DifyClient:
             raise DifyClientError("Dify app detail response must be a JSON object.")
         return DifyAppDetail.from_payload(payload)
 
+    def list_apps(
+        self,
+        *,
+        name: str | None = None,
+        mode: str = "all",
+        limit: int = 100,
+    ) -> list[DifyAppDetail]:
+        """List bounded app metadata for Preview reconciliation and cleanup."""
+        self._ensure_logged_in()
+        response = self._get_with_auth_retry(
+            "/apps",
+            params={
+                "page": 1,
+                "limit": max(1, min(limit, 100)),
+                "mode": mode,
+                **({"name": name} if name else {}),
+            },
+        )
+        self._raise_for_response(response)
+        payload = self._json_object(response, "Dify apps response")
+        rows = payload.get("data")
+        if not isinstance(rows, list):
+            raise DifyClientError("Dify apps response must contain a data list.")
+        return [
+            DifyAppDetail.from_payload(item)
+            for item in rows
+            if isinstance(item, dict)
+        ]
+
+    def app_exists(self, app_id: str) -> bool:
+        self._ensure_logged_in()
+        response = self._get_with_auth_retry(f"/apps/{app_id}")
+        if response.status_code == 404:
+            return False
+        self._raise_for_response(response)
+        return True
+
+    def delete_app(self, app_id: str) -> bool:
+        """Delete one exact app and return true only after Dify acknowledges it."""
+        self._ensure_logged_in()
+        response = self._delete_with_auth_retry(f"/apps/{app_id}")
+        if response.status_code == 404:
+            return False
+        if response.status_code != 204:
+            self._raise_for_response(response)
+        return True
+
     def list_datasets(
         self,
         *,
@@ -1546,6 +1593,15 @@ class DifyClient:
         self.login()
         return self._get(path, headers=self._csrf_headers(), **kwargs)
 
+    def _delete_with_auth_retry(self, path: str, **kwargs: Any) -> httpx.Response:
+        response = self._delete(path, headers=self._csrf_headers(), **kwargs)
+        if response.status_code != 401:
+            return response
+        if self.refresh_token():
+            return self._delete(path, headers=self._csrf_headers(), **kwargs)
+        self.login()
+        return self._delete(path, headers=self._csrf_headers(), **kwargs)
+
     def _get(self, path: str, **kwargs: Any) -> httpx.Response:
         try:
             return self._client.get(path, **kwargs)
@@ -1555,6 +1611,12 @@ class DifyClient:
     def _post(self, path: str, **kwargs: Any) -> httpx.Response:
         try:
             return self._client.post(path, **kwargs)
+        except httpx.RequestError as exc:
+            raise DifyClientError(f"Dify request failed: {exc}") from exc
+
+    def _delete(self, path: str, **kwargs: Any) -> httpx.Response:
+        try:
+            return self._client.delete(path, **kwargs)
         except httpx.RequestError as exc:
             raise DifyClientError(f"Dify request failed: {exc}") from exc
 

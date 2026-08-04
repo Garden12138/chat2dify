@@ -23,6 +23,10 @@ test("v5 Home replaces the default surface only while enabled", () => {
     isStudioHomeEnabled({ studioV5Enabled: true }, "?studio=blueprints"),
     false,
   );
+  assert.equal(
+    isStudioHomeEnabled({ studioV5Enabled: true }, "?studio=scenarios"),
+    false,
+  );
   assert.equal(isStudioHomeEnabled({ studioV5Enabled: false }, "?embed=1"), false);
 });
 
@@ -33,7 +37,7 @@ test("Studio navigation exposes the complete product map truthfully", () => {
   );
   assert.equal(STUDIO_NAVIGATION.find(item => item.id === "home").available, true);
   assert.equal(STUDIO_NAVIGATION.find(item => item.id === "blueprints").available, true);
-  assert.equal(STUDIO_NAVIGATION.find(item => item.id === "scenarios").available, false);
+  assert.equal(STUDIO_NAVIGATION.find(item => item.id === "scenarios").available, true);
 });
 
 test("Home query carries filters but never user or role claims", () => {
@@ -71,6 +75,18 @@ test("permission offline disabled and generic failures remain distinct", () => {
       error: { code: "AI_STUDIO_V5_DISABLED" },
     }).kind,
     "disabled",
+  );
+  assert.deepEqual(
+    classifyStudioError(409, {
+      error: { code: "SCENARIO_SUITE_VERSION_CONFLICT", message: "internal" },
+    }),
+    {
+      kind: "conflict",
+      code: "SCENARIO_SUITE_VERSION_CONFLICT",
+      title: "这个 Suite 版本已存在",
+      message: "请选择已有 Suite，或修改版本号后重新保存。",
+      action: "refresh",
+    },
   );
   assert.equal(classifyStudioError(500, {}).kind, "error");
 });

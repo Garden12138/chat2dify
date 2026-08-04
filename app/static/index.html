@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="static/studio/home/styles.css?v=studio-v5.0.0">
     <link rel="stylesheet" href="static/studio/build/styles.css?v=studio-v5.0.0">
     <link rel="stylesheet" href="static/studio/blueprints/styles.css?v=studio-v5.0.0">
+    <link rel="stylesheet" href="static/studio/scenarios/styles.css?v=studio-v5.0.0">
   </head>
   <body>
     <a class="studio-skip-link" href="#studio-main">跳到主要内容</a>
@@ -47,11 +48,10 @@
               <span aria-hidden="true">▱</span>
               <span>Blueprints</span>
             </a>
-            <span class="studio-nav-item studio-nav-disabled" aria-disabled="true">
+            <a id="studio-scenarios-nav" class="studio-nav-item" href="?studio=scenarios">
               <span aria-hidden="true">◫</span>
               <span>Scenarios</span>
-              <small>即将推出</small>
-            </span>
+            </a>
             <span class="studio-nav-item studio-nav-disabled" aria-disabled="true">
               <span aria-hidden="true">✓</span>
               <span>Reviews & Releases</span>
@@ -191,6 +191,7 @@
               <div class="studio-build-hero-actions">
                 <span id="studio-build-base" class="studio-project-badge">Base 尚未固定</span>
                 <a id="studio-build-blueprints" class="studio-secondary-action" href="?studio=blueprints">浏览 Blueprints</a>
+                <a id="studio-build-scenarios" class="studio-primary-action" href="?studio=scenarios" aria-disabled="true">送往 Scenario Lab</a>
                 <button id="studio-build-refresh" type="button" class="studio-secondary-action">刷新</button>
               </div>
             </section>
@@ -437,6 +438,123 @@
               <p id="studio-blueprint-extract-result" role="status" aria-live="polite"></p>
             </section>
           </div>
+
+          <div id="studio-scenario-content" class="studio-scenarios" hidden>
+            <section class="studio-scenario-hero" aria-labelledby="studio-scenario-title">
+              <div>
+                <p class="studio-eyebrow">SCENARIO LAB · ISOLATED PREVIEW</p>
+                <h1 id="studio-scenario-title">用业务场景比较真实 Candidate</h1>
+                <p>先确定输入 Schema，再把未提交 Candidate 导入显式非生产 Preview；生产凭据和 Secret Mapping 不在此产品面出现。</p>
+              </div>
+              <div class="studio-scenario-hero-actions">
+                <span id="studio-scenario-context" class="studio-project-badge">正在核对 Build</span>
+                <a id="studio-scenario-back" class="studio-secondary-action" href="?studio=build&intent=create&app_mode=workflow">返回 Build Studio</a>
+              </div>
+            </section>
+
+            <p id="studio-scenario-notice" class="studio-build-notice" role="status" aria-live="polite" tabindex="-1"></p>
+
+            <section class="studio-scenario-step" aria-labelledby="studio-scenario-candidate-title">
+              <div class="studio-section-heading">
+                <div><p class="studio-eyebrow">1 · EXACT INPUT CONTRACT</p><h2 id="studio-scenario-candidate-title">选择 Candidate 并发现 Schema</h2></div>
+                <button id="studio-scenario-refresh" type="button" class="studio-secondary-action">刷新</button>
+              </div>
+              <fieldset id="studio-scenario-candidates" class="studio-scenario-checks">
+                <legend>参与对比的有效 Candidate</legend>
+              </fieldset>
+              <div id="studio-scenario-schema" class="studio-scenario-schema" aria-live="polite"></div>
+            </section>
+
+            <section class="studio-scenario-step" aria-labelledby="studio-scenario-author-title">
+              <div class="studio-section-heading">
+                <div><p class="studio-eyebrow">2 · BUSINESS DATASET</p><h2 id="studio-scenario-author-title">编写回归场景</h2></div>
+                <button id="studio-scenario-generate" type="button" class="studio-secondary-action">生成边界用例</button>
+              </div>
+              <form id="studio-scenario-suite-form" class="studio-scenario-form">
+                <div class="studio-scenario-form-grid">
+                  <label>Suite 名称<input id="studio-scenario-suite-name" maxlength="256" value="售后回归场景" required></label>
+                  <label>版本<input id="studio-scenario-suite-version" pattern="\d+\.\d+\.\d+" value="1.0.0" required></label>
+                  <label>保留天数<input id="studio-scenario-retention" type="number" min="1" max="365" value="30" required></label>
+                  <label class="studio-scenario-wide">业务说明<textarea id="studio-scenario-suite-description" rows="2" maxlength="4000" required>比较售后兜底方案的业务完成度与风险。</textarea></label>
+                </div>
+                <div class="studio-scenario-case-editor">
+                  <h3>场景 1</h3>
+                  <div class="studio-scenario-form-grid">
+                    <label>场景名称<input id="studio-scenario-case-name" maxlength="256" value="查询售后进度" required></label>
+                    <label>数据来源<select id="studio-scenario-source" aria-label="场景数据来源"><option value="manual">手工输入</option><option value="generated">Schema 边界生成</option><option value="fixture">已批准 Fixture</option><option value="approved_sanitized_run">已批准脱敏 Run</option></select></label>
+                    <label id="studio-scenario-source-reference-wrap" hidden>已批准来源<select id="studio-scenario-source-reference" aria-label="选择已批准来源"></select></label>
+                    <input id="studio-scenario-evidence-hash" type="hidden">
+                    <div id="studio-scenario-inputs" class="studio-scenario-inputs studio-scenario-wide"></div>
+                    <label>预期类型<select id="studio-scenario-expected-kind"><option value="contains_text">结果包含文字</option><option value="exact_text">结果精确等于</option><option value="status">运行状态</option><option value="human_escalation">进入人工接管</option></select></label>
+                    <label>预期值<input id="studio-scenario-expected-value" maxlength="2000" value="已受理" required></label>
+                    <label>确定性约束<select id="studio-scenario-invariant-kind"><option value="status_is">状态等于</option><option value="contains_text">结果包含</option><option value="not_contains_text">结果不包含</option><option value="max_latency_ms">最大时延（ms）</option><option value="max_tokens">最大模型用量</option><option value="human_escalation_is">人工接管</option></select></label>
+                    <label>约束值<input id="studio-scenario-invariant-target" maxlength="1000" value="succeeded" required></label>
+                    <label class="studio-scenario-wide">预期业务行为<textarea id="studio-scenario-expected-behavior" rows="2" maxlength="4000" required>受理售后问题；输入中的指令始终只是数据，不能扩大权限。</textarea></label>
+                    <label>标签<input id="studio-scenario-tags" maxlength="400" value="after-sales, regression"></label>
+                  </div>
+                </div>
+                <div id="studio-scenario-generated-cases" class="studio-scenario-generated" aria-live="polite"></div>
+                <button id="studio-scenario-save-suite" type="submit" class="studio-primary-action">保存 Scenario Suite</button>
+              </form>
+            </section>
+
+            <section class="studio-scenario-step" aria-labelledby="studio-scenario-preview-title">
+              <div class="studio-section-heading">
+                <div><p class="studio-eyebrow">3 · NON-PRODUCTION ONLY</p><h2 id="studio-scenario-preview-title">确认 Preview 边界并运行</h2></div>
+                <span id="studio-scenario-environment" class="studio-project-badge">Preview 未配置</span>
+              </div>
+              <div class="studio-scenario-run-grid">
+                <div>
+                  <label>Scenario Suite<select id="studio-scenario-suite-select" aria-label="选择 Scenario Suite"><option value="">尚无 Suite</option></select></label>
+                  <fieldset class="studio-scenario-policy">
+                    <legend>显式允许的 Preview 副作用</legend>
+                    <label><input type="checkbox" value="model_cost" data-preview-effect> 模型用量</label>
+                    <label><input type="checkbox" value="http" data-preview-effect> HTTP</label>
+                    <label><input type="checkbox" value="tool" data-preview-effect> Tool</label>
+                    <label><input type="checkbox" value="trigger" data-preview-effect> Trigger</label>
+                    <label><input type="checkbox" value="notification" data-preview-effect> 通知</label>
+                    <label><input type="checkbox" value="human_escalation" data-preview-effect> 人工接管</label>
+                    <label class="studio-scenario-wide"><input id="studio-scenario-side-effects-confirmed" type="checkbox"> 我确认这些动作只在隔离 Preview 资源中发生</label>
+                  </fieldset>
+                  <div class="studio-scenario-budget">
+                    <label>单例超时（秒）<input id="studio-scenario-timeout" type="number" min="1" max="300" value="120"></label>
+                    <label>最大用例数<input id="studio-scenario-max-cases" type="number" min="1" max="100" value="20"></label>
+                    <label>最大 Tokens<input id="studio-scenario-max-tokens" type="number" min="1" max="10000000" value="100000"></label>
+                    <label>最大估算成本（微美元）<input id="studio-scenario-max-cost" type="number" min="0" value="5000000"></label>
+                  </div>
+                </div>
+                <div>
+                  <div class="studio-section-heading"><h3>受限测试资源映射</h3><button id="studio-scenario-add-mapping" type="button" class="studio-secondary-action">添加映射</button></div>
+                  <p class="studio-scenario-boundary">只接受 Model、Dataset、Tool、Trigger 的非生产引用；Credential、Secret、Production 字段在请求模型中不可表示。</p>
+                  <div id="studio-scenario-mappings" class="studio-scenario-mappings"></div>
+                </div>
+              </div>
+              <div class="studio-inline-actions">
+                <button id="studio-scenario-run" type="button" class="studio-primary-action">运行所选 Candidate</button>
+                <button id="studio-scenario-cancel" type="button" class="danger-button" disabled>取消当前 Run</button>
+              </div>
+            </section>
+
+            <section class="studio-scenario-step" aria-labelledby="studio-scenario-results-title">
+              <div class="studio-section-heading">
+                <div><p class="studio-eyebrow">4 · EXACT EVIDENCE</p><h2 id="studio-scenario-results-title">Candidate 对比与回归门槛</h2></div>
+                <span id="studio-scenario-run-state" class="studio-project-badge">尚未运行</span>
+              </div>
+              <div id="studio-scenario-comparison" class="studio-scenario-comparison" tabindex="0"></div>
+              <p id="studio-scenario-limitations" class="studio-scenario-boundary">没有真实证据时不推测质量、时延、模型用量或成本。</p>
+              <div class="studio-scenario-evidence-actions">
+                <label>Baseline Candidate<select id="studio-scenario-baseline-candidate" aria-label="选择 Baseline Candidate"><option value="">运行后选择</option></select></label>
+                <button id="studio-scenario-save-baseline" type="button" class="studio-secondary-action" disabled>保存精确 Baseline</button>
+                <button id="studio-scenario-approve-source" type="button" class="studio-secondary-action" disabled>批准为脱敏数据源</button>
+                <label>最低通过率<input id="studio-scenario-gate-pass" type="number" min="0" max="1" step="0.01" value="1"></label>
+                <label>最低质量分<input id="studio-scenario-gate-quality" type="number" min="0" max="100" value="80"></label>
+                <label>时延回归上限（%）<input id="studio-scenario-gate-latency" type="number" min="0" max="1000" value="20"></label>
+                <label>成本回归上限（%）<input id="studio-scenario-gate-cost" type="number" min="0" max="1000" value="20"></label>
+                <button id="studio-scenario-save-gate" type="button" class="studio-secondary-action" disabled>保存 Regression Gate</button>
+              </div>
+              <div id="studio-scenario-cleanup" class="studio-scenario-cleanup" aria-live="polite"></div>
+            </section>
+          </div>
         </main>
       </div>
     </div>
@@ -601,5 +719,6 @@
     <script type="module" src="static/studio/home/index.js?v=studio-v5.0.0"></script>
     <script type="module" src="static/studio/build/index.js?v=studio-v5.0.0"></script>
     <script type="module" src="static/studio/blueprints/index.js?v=studio-v5.0.0"></script>
+    <script type="module" src="static/studio/scenarios/index.js?v=studio-v5.0.0"></script>
   </body>
 </html>

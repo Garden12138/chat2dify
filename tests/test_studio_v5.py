@@ -28,6 +28,8 @@ from app.studio.models import (
     CandidatePresentation,
     DifyAppSummary,
     Principal,
+    ScenarioRun,
+    ScenarioRunPolicy,
     StudioBuild,
     StudioCandidate,
     VerifiedHostContext,
@@ -216,6 +218,30 @@ class RecordingBlueprintService:
         )
 
 
+class RecordingScenarioService:
+    def __init__(self) -> None:
+        self.run_kwargs = None
+
+    def run_suite(self, authenticated, **kwargs):
+        self.run_kwargs = kwargs
+        now = datetime.now(timezone.utc)
+        return ScenarioRun(
+            id="scenario-run-1",
+            project_id=kwargs["project_id"],
+            build_id=kwargs["build_id"],
+            suite_id=kwargs["suite_id"],
+            environment_id=kwargs["environment_id"],
+            candidate_ids=kwargs["candidate_ids"],
+            mappings=kwargs["mappings"],
+            policy=kwargs["policy"],
+            authorized_by=authenticated.principal.key,
+            status="pending",
+            version=1,
+            created_at=now,
+            updated_at=now,
+        )
+
+
 def _settings(tmp_path: Path) -> Settings:
     return Settings.from_env(
         {
@@ -299,6 +325,54 @@ def _api_app(
     application.state.agent_store = None
     application.state.agent_service = None
     return application, store, verifier
+
+
+def test_scenario_run_api_accepts_only_typed_nonproduction_mapping(
+    tmp_path: Path,
+) -> None:
+    application, _, _ = _api_app(tmp_path)
+    scenario = RecordingScenarioService()
+    application.state.studio_service.scenario_service = scenario
+    with TestClient(application, base_url=ORIGIN) as client:
+        issued = _issue(client)
+        headers = _auth_headers(issued["token"])
+        payload = {
+            "project_id": issued["project"]["id"],
+            "build_id": "build-1",
+            "suite_id": "suite-1",
+            "environment_id": "preview-1",
+            "candidate_ids": ["candidate-1"],
+            "mappings": [
+                {
+                    "kind": "model",
+                    "logical_ref": "provider::model-a",
+                    "target_ref": "test-provider::model-b",
+                }
+            ],
+            "policy": ScenarioRunPolicy().model_dump(mode="json"),
+        }
+        started = client.post(
+            "/api/v5/studio/scenario-runs",
+            headers=headers,
+            json=payload,
+        )
+        assert started.status_code == 202, started.text
+        assert started.json()["status"] == "pending"
+        assert scenario.run_kwargs["mappings"][0].production is False
+        assert scenario.run_kwargs["mappings"][0].secret is False
+
+        forged = payload | {
+            "mappings": [payload["mappings"][0] | {"credential": "plaintext"}],
+            "role": "owner",
+        }
+        rejected = client.post(
+            "/api/v5/studio/scenario-runs",
+            headers=headers,
+            json=forged,
+        )
+        assert rejected.status_code == 422
+        assert rejected.json()["error"]["code"] == "STUDIO_REQUEST_INVALID"
+        assert "plaintext" not in rejected.text
 
 
 def _issue(client: TestClient, nonce: str = "nonce-value-1234567890") -> dict:

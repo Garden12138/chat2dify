@@ -20,8 +20,17 @@ from app.studio.models import (
     ExternalReceipt,
     Membership,
     OutboxMessage,
+    PreviewEnvironment,
+    PreviewFixture,
     Principal,
     Project,
+    RegressionGate,
+    ScenarioBaseline,
+    ScenarioEvidenceBinding,
+    ScenarioFileFixture,
+    ScenarioRun,
+    ScenarioSanitizedRunApproval,
+    ScenarioSuite,
     StudioBuild,
     StudioCandidate,
     StudioRole,
@@ -55,7 +64,7 @@ class StudioRecordNotFound(StudioStoreError):
     code = "STUDIO_RECORD_NOT_FOUND"
 
 
-_MIGRATION_VERSION = 3
+_MIGRATION_VERSION = 4
 _SCHEMA_STATEMENTS = [
     """
     CREATE TABLE IF NOT EXISTS studio_schema_migrations (
@@ -292,6 +301,149 @@ _SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS studio_scenario_suites (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        build_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        semantic_version TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        owner_key TEXT NOT NULL,
+        created_at REAL NOT NULL,
+        UNIQUE(project_id, build_id, name, semantic_version),
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE,
+        FOREIGN KEY(build_id) REFERENCES studio_builds(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS studio_scenario_file_fixtures (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        opaque_ref TEXT NOT NULL,
+        media_type TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        content_hash TEXT NOT NULL,
+        approved_by TEXT NOT NULL,
+        expires_at REAL NOT NULL,
+        created_at REAL NOT NULL,
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS studio_scenario_sanitized_run_sources (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        source_run_id TEXT NOT NULL,
+        evidence_hash TEXT NOT NULL,
+        approved_by TEXT NOT NULL,
+        expires_at REAL NOT NULL,
+        created_at REAL NOT NULL,
+        UNIQUE(project_id, source_run_id, evidence_hash),
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS studio_preview_environments (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        target_key TEXT NOT NULL,
+        name TEXT NOT NULL,
+        enabled INTEGER NOT NULL,
+        default_ttl_seconds INTEGER NOT NULL,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        UNIQUE(project_id, target_key),
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS studio_scenario_runs (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        build_id TEXT NOT NULL,
+        suite_id TEXT NOT NULL,
+        environment_id TEXT NOT NULL,
+        candidate_ids_json TEXT NOT NULL,
+        mappings_json TEXT NOT NULL,
+        policy_json TEXT NOT NULL,
+        authorized_by TEXT NOT NULL,
+        status TEXT NOT NULL,
+        cancel_requested INTEGER NOT NULL,
+        reports_json TEXT NOT NULL,
+        comparison_json TEXT,
+        failure_json TEXT,
+        cleanup_verified INTEGER NOT NULL,
+        version INTEGER NOT NULL,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE,
+        FOREIGN KEY(build_id) REFERENCES studio_builds(id) ON DELETE CASCADE,
+        FOREIGN KEY(suite_id) REFERENCES studio_scenario_suites(id) ON DELETE CASCADE,
+        FOREIGN KEY(environment_id) REFERENCES studio_preview_environments(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS studio_preview_fixtures (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        scenario_run_id TEXT NOT NULL,
+        candidate_id TEXT NOT NULL,
+        environment_id TEXT NOT NULL,
+        label TEXT NOT NULL,
+        status TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        import_id TEXT,
+        app_id TEXT,
+        receipt_json TEXT NOT NULL,
+        cleanup_attempts INTEGER NOT NULL,
+        absence_verified_at REAL,
+        expires_at REAL NOT NULL,
+        version INTEGER NOT NULL,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        UNIQUE(project_id, idempotency_key),
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE,
+        FOREIGN KEY(scenario_run_id) REFERENCES studio_scenario_runs(id) ON DELETE CASCADE,
+        FOREIGN KEY(environment_id) REFERENCES studio_preview_environments(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS studio_scenario_baselines (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        build_id TEXT NOT NULL,
+        suite_id TEXT NOT NULL,
+        report_run_id TEXT NOT NULL,
+        candidate_id TEXT NOT NULL,
+        binding_json TEXT NOT NULL,
+        report_hash TEXT NOT NULL,
+        saved_by TEXT NOT NULL,
+        created_at REAL NOT NULL,
+        UNIQUE(project_id, build_id, suite_id),
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE,
+        FOREIGN KEY(build_id) REFERENCES studio_builds(id) ON DELETE CASCADE,
+        FOREIGN KEY(suite_id) REFERENCES studio_scenario_suites(id) ON DELETE CASCADE,
+        FOREIGN KEY(report_run_id) REFERENCES studio_scenario_runs(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS studio_regression_gates (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        build_id TEXT NOT NULL,
+        suite_id TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        UNIQUE(project_id, build_id),
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE,
+        FOREIGN KEY(build_id) REFERENCES studio_builds(id) ON DELETE CASCADE,
+        FOREIGN KEY(suite_id) REFERENCES studio_scenario_suites(id) ON DELETE CASCADE
+    )
+    """,
+    """
     CREATE INDEX IF NOT EXISTS idx_studio_memberships_principal
         ON studio_memberships(principal_key, updated_at DESC)
     """,
@@ -326,6 +478,18 @@ _SCHEMA_STATEMENTS = [
     """
     CREATE INDEX IF NOT EXISTS idx_studio_blueprint_applications_build
         ON studio_blueprint_applications(build_id, applied_at DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_studio_scenario_suites_build
+        ON studio_scenario_suites(build_id, created_at DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_studio_scenario_runs_build
+        ON studio_scenario_runs(build_id, created_at DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_studio_preview_fixtures_cleanup
+        ON studio_preview_fixtures(status, expires_at, updated_at)
     """,
 ]
 
@@ -1124,6 +1288,27 @@ class StudioStore:
             raise StudioRecordNotFound("The Build Studio candidate was not found.")
         return _candidate_from_row(row)
 
+    def get_candidate_for_project(
+        self,
+        candidate_id: str,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> StudioCandidate:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_candidates
+                WHERE id = ? AND project_id = ?
+                """,
+                (candidate_id, project_id),
+            ).fetchone()
+        if row is None:
+            raise StudioRecordNotFound("The Build Studio candidate was not found.")
+        return _candidate_from_row(row)
+
     def reconcile_candidate(
         self,
         candidate_id: str,
@@ -1685,6 +1870,754 @@ class StudioStore:
             raise StudioRecordNotFound("The Blueprint application was not found.")
         return _blueprint_application_from_row(row)
 
+    def create_scenario_suite(
+        self,
+        suite: ScenarioSuite,
+        *,
+        principal_key: str,
+    ) -> ScenarioSuite:
+        self.get_project_for_principal(suite.project_id, principal_key)
+        try:
+            with self._transaction(immediate=True) as connection:
+                self._execute(
+                    connection,
+                    """
+                    INSERT INTO studio_scenario_suites(
+                        id, project_id, build_id, name, semantic_version,
+                        payload_json, content_hash, owner_key, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        suite.id,
+                        suite.project_id,
+                        suite.build_id,
+                        suite.name,
+                        suite.semantic_version,
+                        _json_dump(suite.model_dump(mode="json")),
+                        suite.content_hash,
+                        suite.owner_key,
+                        _timestamp(suite.created_at),
+                    ),
+                )
+                _insert_activity(
+                    self,
+                    connection,
+                    project_id=suite.project_id,
+                    principal_key=principal_key,
+                    kind="scenario.suite.created",
+                    entity_type="scenario_suite",
+                    entity_id=suite.id,
+                    summary={
+                        "name": suite.name,
+                        "version": suite.semantic_version,
+                        "case_count": len(suite.cases),
+                    },
+                    now=suite.created_at,
+                )
+        except Exception as exc:
+            if _is_unique_violation(exc):
+                raise StudioConflict(
+                    "A Scenario Suite with this name and semantic version already exists."
+                ) from exc
+            raise
+        return suite
+
+    def get_scenario_suite(
+        self,
+        suite_id: str,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> ScenarioSuite:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_scenario_suites
+                WHERE id = ? AND project_id = ?
+                """,
+                (suite_id, project_id),
+            ).fetchone()
+        if row is None:
+            raise StudioRecordNotFound("The Scenario suite was not found.")
+        return ScenarioSuite.model_validate(_json_load(_row_value(row, "payload_json")))
+
+    def list_scenario_suites(
+        self,
+        build_id: str,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> list[ScenarioSuite]:
+        self.get_build(
+            build_id,
+            project_id=project_id,
+            principal_key=principal_key,
+        )
+        with self._reader() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT payload_json FROM studio_scenario_suites
+                WHERE build_id = ? AND project_id = ?
+                ORDER BY created_at DESC
+                """,
+                (build_id, project_id),
+            ).fetchall()
+        return [
+            ScenarioSuite.model_validate(_json_load(_row_value(row, "payload_json")))
+            for row in rows
+        ]
+
+    def create_scenario_file_fixture(
+        self,
+        fixture: ScenarioFileFixture,
+        *,
+        principal_key: str,
+    ) -> ScenarioFileFixture:
+        self.get_project_for_principal(fixture.project_id, principal_key)
+        with self._transaction(immediate=True) as connection:
+            self._execute(
+                connection,
+                """
+                INSERT INTO studio_scenario_file_fixtures(
+                    id, project_id, name, opaque_ref, media_type, size_bytes,
+                    content_hash, approved_by, expires_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    fixture.id,
+                    fixture.project_id,
+                    fixture.name,
+                    fixture.opaque_ref,
+                    fixture.media_type,
+                    fixture.size_bytes,
+                    fixture.content_hash,
+                    fixture.approved_by,
+                    _timestamp(fixture.expires_at),
+                    _timestamp(fixture.created_at),
+                ),
+            )
+        return fixture
+
+    def get_scenario_file_fixture(
+        self,
+        fixture_id: str,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> ScenarioFileFixture:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_scenario_file_fixtures
+                WHERE id = ? AND project_id = ?
+                """,
+                (fixture_id, project_id),
+            ).fetchone()
+        if row is None:
+            raise StudioRecordNotFound("The approved Scenario file fixture was not found.")
+        return _scenario_file_fixture_from_row(row)
+
+    def list_scenario_file_fixtures(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+        current_at: datetime | None = None,
+    ) -> list[ScenarioFileFixture]:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_scenario_file_fixtures
+                WHERE project_id = ? AND expires_at > ?
+                ORDER BY created_at DESC
+                """,
+                (project_id, _timestamp(current_at or utc_now())),
+            ).fetchall()
+        return [_scenario_file_fixture_from_row(row) for row in rows]
+
+    def save_sanitized_run_source(
+        self,
+        approval: ScenarioSanitizedRunApproval,
+        *,
+        principal_key: str,
+    ) -> ScenarioSanitizedRunApproval:
+        self.get_project_for_principal(approval.project_id, principal_key)
+        with self._transaction(immediate=True) as connection:
+            self._execute(
+                connection,
+                """
+                INSERT INTO studio_scenario_sanitized_run_sources(
+                    id, project_id, source_run_id, evidence_hash,
+                    approved_by, expires_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project_id, source_run_id, evidence_hash) DO NOTHING
+                """,
+                (
+                    approval.id,
+                    approval.project_id,
+                    approval.source_run_id,
+                    approval.evidence_hash,
+                    approval.approved_by,
+                    _timestamp(approval.expires_at),
+                    _timestamp(approval.created_at),
+                ),
+            )
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_scenario_sanitized_run_sources
+                WHERE project_id = ? AND source_run_id = ? AND evidence_hash = ?
+                """,
+                (
+                    approval.project_id,
+                    approval.source_run_id,
+                    approval.evidence_hash,
+                ),
+            ).fetchone()
+        assert row is not None
+        return _scenario_sanitized_run_source_from_row(row)
+
+    def get_sanitized_run_source(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+        source_run_id: str,
+        evidence_hash: str,
+    ) -> ScenarioSanitizedRunApproval:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_scenario_sanitized_run_sources
+                WHERE project_id = ? AND source_run_id = ? AND evidence_hash = ?
+                """,
+                (project_id, source_run_id, evidence_hash),
+            ).fetchone()
+        if row is None:
+            raise StudioRecordNotFound(
+                "The approved sanitized Run source was not found."
+            )
+        return _scenario_sanitized_run_source_from_row(row)
+
+    def list_sanitized_run_sources(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+        current_at: datetime | None = None,
+    ) -> list[ScenarioSanitizedRunApproval]:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_scenario_sanitized_run_sources
+                WHERE project_id = ? AND expires_at > ?
+                ORDER BY created_at DESC
+                """,
+                (project_id, _timestamp(current_at or utc_now())),
+            ).fetchall()
+        return [_scenario_sanitized_run_source_from_row(row) for row in rows]
+
+    def ensure_preview_environment(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+        target_key: str,
+        name: str,
+        enabled: bool,
+        default_ttl_seconds: int,
+    ) -> PreviewEnvironment:
+        self.get_project_for_principal(project_id, principal_key)
+        now = utc_now()
+        environment_id = str(
+            uuid5(NAMESPACE_URL, f"chat2dify:preview:{project_id}:{target_key}")
+        )
+        with self._transaction(immediate=True) as connection:
+            self._execute(
+                connection,
+                """
+                INSERT INTO studio_preview_environments(
+                    id, project_id, target_key, name, enabled,
+                    default_ttl_seconds, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project_id, target_key) DO UPDATE SET
+                    name = excluded.name,
+                    enabled = excluded.enabled,
+                    default_ttl_seconds = excluded.default_ttl_seconds,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    environment_id,
+                    project_id,
+                    target_key,
+                    name,
+                    int(enabled),
+                    default_ttl_seconds,
+                    _timestamp(now),
+                    _timestamp(now),
+                ),
+            )
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_preview_environments
+                WHERE project_id = ? AND target_key = ?
+                """,
+                (project_id, target_key),
+            ).fetchone()
+        assert row is not None
+        return _preview_environment_from_row(row)
+
+    def get_preview_environment(
+        self,
+        environment_id: str,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> PreviewEnvironment:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_preview_environments
+                WHERE id = ? AND project_id = ?
+                """,
+                (environment_id, project_id),
+            ).fetchone()
+        if row is None:
+            raise StudioRecordNotFound("The isolated Preview Environment was not found.")
+        return _preview_environment_from_row(row)
+
+    def create_scenario_run(
+        self,
+        run: ScenarioRun,
+        *,
+        principal_key: str,
+    ) -> ScenarioRun:
+        self.get_project_for_principal(run.project_id, principal_key)
+        with self._transaction(immediate=True) as connection:
+            self._execute(
+                connection,
+                """
+                INSERT INTO studio_scenario_runs(
+                    id, project_id, build_id, suite_id, environment_id,
+                    candidate_ids_json, mappings_json, policy_json,
+                    authorized_by, status, cancel_requested, reports_json,
+                    comparison_json, failure_json, cleanup_verified, version,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                _scenario_run_values(run),
+            )
+            _insert_activity(
+                self,
+                connection,
+                project_id=run.project_id,
+                principal_key=principal_key,
+                kind="scenario.run.created",
+                entity_type="scenario_run",
+                entity_id=run.id,
+                summary={
+                    "suite_id": run.suite_id,
+                    "candidate_count": len(run.candidate_ids),
+                    "status": run.status,
+                },
+                now=run.created_at,
+            )
+        return run
+
+    def get_scenario_run(
+        self,
+        run_id: str,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> ScenarioRun:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_scenario_runs
+                WHERE id = ? AND project_id = ?
+                """,
+                (run_id, project_id),
+            ).fetchone()
+        if row is None:
+            raise StudioRecordNotFound("The Scenario Run was not found.")
+        return _scenario_run_from_row(row)
+
+    def list_scenario_runs(
+        self,
+        build_id: str,
+        *,
+        project_id: str,
+        principal_key: str,
+        limit: int = 20,
+    ) -> list[ScenarioRun]:
+        self.get_build(
+            build_id,
+            project_id=project_id,
+            principal_key=principal_key,
+        )
+        with self._reader() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_scenario_runs
+                WHERE build_id = ? AND project_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (build_id, project_id, max(1, min(limit, 100))),
+            ).fetchall()
+        return [_scenario_run_from_row(row) for row in rows]
+
+    def update_scenario_run(
+        self,
+        run: ScenarioRun,
+        *,
+        principal_key: str,
+        expected_version: int,
+    ) -> ScenarioRun:
+        self.get_project_for_principal(run.project_id, principal_key)
+        updated = run.model_copy(update={"version": expected_version + 1, "updated_at": utc_now()})
+        with self._transaction(immediate=True) as connection:
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE studio_scenario_runs SET
+                    build_id = ?, suite_id = ?, environment_id = ?,
+                    candidate_ids_json = ?, mappings_json = ?, policy_json = ?,
+                    authorized_by = ?, status = ?, cancel_requested = ?,
+                    reports_json = ?, comparison_json = ?, failure_json = ?,
+                    cleanup_verified = ?, version = ?, updated_at = ?
+                WHERE id = ? AND project_id = ? AND version = ?
+                """,
+                (
+                    updated.build_id,
+                    updated.suite_id,
+                    updated.environment_id,
+                    _json_dump(updated.candidate_ids),
+                    _json_dump([item.model_dump(mode="json") for item in updated.mappings]),
+                    _json_dump(updated.policy.model_dump(mode="json")),
+                    updated.authorized_by,
+                    updated.status,
+                    int(updated.cancel_requested),
+                    _json_dump([item.model_dump(mode="json") for item in updated.reports]),
+                    _json_dump(updated.comparison.model_dump(mode="json")) if updated.comparison else None,
+                    _json_dump(_safe_json(updated.failure)) if updated.failure else None,
+                    int(updated.cleanup_verified),
+                    updated.version,
+                    _timestamp(updated.updated_at),
+                    updated.id,
+                    updated.project_id,
+                    expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StudioConflict("The Scenario Run changed while it was being updated.")
+        return updated
+
+    def request_scenario_run_cancel(
+        self,
+        run_id: str,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> ScenarioRun:
+        run = self.get_scenario_run(
+            run_id,
+            project_id=project_id,
+            principal_key=principal_key,
+        )
+        if run.status not in {"pending", "running"}:
+            return run
+        return self.update_scenario_run(
+            run.model_copy(update={"cancel_requested": True}),
+            principal_key=principal_key,
+            expected_version=run.version,
+        )
+
+    def interrupt_active_scenario_runs(self) -> int:
+        """Persist restart state without replaying Preview or cleanup work."""
+        now = utc_now()
+        with self._transaction(immediate=True) as connection:
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE studio_scenario_runs
+                SET status = 'interrupted',
+                    failure_json = ?,
+                    version = version + 1,
+                    updated_at = ?
+                WHERE status IN ('pending', 'running')
+                """,
+                (
+                    _json_dump(
+                        {
+                            "code": "SCENARIO_RUN_INTERRUPTED",
+                            "message": (
+                                "The service restarted. Preview import, execution, and "
+                                "cleanup were not replayed; reconcile fixtures explicitly."
+                            ),
+                        }
+                    ),
+                    _timestamp(now),
+                ),
+            )
+        return int(cursor.rowcount)
+
+    def create_preview_fixture(
+        self,
+        fixture: PreviewFixture,
+        *,
+        principal_key: str,
+    ) -> PreviewFixture:
+        self.get_project_for_principal(fixture.project_id, principal_key)
+        with self._transaction(immediate=True) as connection:
+            self._execute(
+                connection,
+                """
+                INSERT INTO studio_preview_fixtures(
+                    id, project_id, scenario_run_id, candidate_id,
+                    environment_id, label, status, idempotency_key,
+                    import_id, app_id, receipt_json, cleanup_attempts,
+                    absence_verified_at, expires_at, version, created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                _preview_fixture_values(fixture),
+            )
+        return fixture
+
+    def get_preview_fixture(
+        self,
+        fixture_id: str,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> PreviewFixture:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_preview_fixtures
+                WHERE id = ? AND project_id = ?
+                """,
+                (fixture_id, project_id),
+            ).fetchone()
+        if row is None:
+            raise StudioRecordNotFound("The Preview fixture was not found.")
+        return _preview_fixture_from_row(row)
+
+    def list_preview_fixtures(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+        scenario_run_id: str | None = None,
+        expired_before: datetime | None = None,
+    ) -> list[PreviewFixture]:
+        self.get_project_for_principal(project_id, principal_key)
+        predicates = ["project_id = ?"]
+        params: list[Any] = [project_id]
+        if scenario_run_id is not None:
+            predicates.append("scenario_run_id = ?")
+            params.append(scenario_run_id)
+        if expired_before is not None:
+            predicates.append("expires_at <= ?")
+            params.append(_timestamp(expired_before))
+        with self._reader() as connection:
+            rows = self._execute(
+                connection,
+                f"""
+                SELECT * FROM studio_preview_fixtures
+                WHERE {' AND '.join(predicates)}
+                ORDER BY created_at ASC
+                """,
+                tuple(params),
+            ).fetchall()
+        return [_preview_fixture_from_row(row) for row in rows]
+
+    def update_preview_fixture(
+        self,
+        fixture: PreviewFixture,
+        *,
+        principal_key: str,
+        expected_version: int,
+    ) -> PreviewFixture:
+        self.get_project_for_principal(fixture.project_id, principal_key)
+        updated = fixture.model_copy(update={"version": expected_version + 1, "updated_at": utc_now()})
+        with self._transaction(immediate=True) as connection:
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE studio_preview_fixtures SET
+                    status = ?, import_id = ?, app_id = ?, receipt_json = ?,
+                    cleanup_attempts = ?, absence_verified_at = ?, expires_at = ?,
+                    version = ?, updated_at = ?
+                WHERE id = ? AND project_id = ? AND version = ?
+                """,
+                (
+                    updated.status,
+                    updated.import_id,
+                    updated.app_id,
+                    _json_dump(_safe_json(updated.receipt)),
+                    updated.cleanup_attempts,
+                    _timestamp(updated.absence_verified_at) if updated.absence_verified_at else None,
+                    _timestamp(updated.expires_at),
+                    updated.version,
+                    _timestamp(updated.updated_at),
+                    updated.id,
+                    updated.project_id,
+                    expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StudioConflict("The Preview fixture changed while it was being updated.")
+        return updated
+
+    def save_scenario_baseline(
+        self,
+        baseline: ScenarioBaseline,
+        *,
+        principal_key: str,
+    ) -> ScenarioBaseline:
+        self.get_project_for_principal(baseline.project_id, principal_key)
+        with self._transaction(immediate=True) as connection:
+            self._execute(
+                connection,
+                """
+                INSERT INTO studio_scenario_baselines(
+                    id, project_id, build_id, suite_id, report_run_id,
+                    candidate_id, binding_json, report_hash, saved_by, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project_id, build_id, suite_id) DO UPDATE SET
+                    id = excluded.id,
+                    report_run_id = excluded.report_run_id,
+                    candidate_id = excluded.candidate_id,
+                    binding_json = excluded.binding_json,
+                    report_hash = excluded.report_hash,
+                    saved_by = excluded.saved_by,
+                    created_at = excluded.created_at
+                """,
+                (
+                    baseline.id,
+                    baseline.project_id,
+                    baseline.build_id,
+                    baseline.suite_id,
+                    baseline.report_run_id,
+                    baseline.candidate_id,
+                    _json_dump(baseline.binding.model_dump(mode="json")),
+                    baseline.report_hash,
+                    baseline.saved_by,
+                    _timestamp(baseline.created_at),
+                ),
+            )
+        return baseline
+
+    def get_scenario_baseline(
+        self,
+        build_id: str,
+        *,
+        project_id: str,
+        principal_key: str,
+        suite_id: str | None = None,
+    ) -> ScenarioBaseline | None:
+        self.get_build(
+            build_id,
+            project_id=project_id,
+            principal_key=principal_key,
+        )
+        predicate = "build_id = ? AND project_id = ?"
+        params: tuple[Any, ...] = (build_id, project_id)
+        if suite_id is not None:
+            predicate += " AND suite_id = ?"
+            params = (*params, suite_id)
+        with self._reader() as connection:
+            row = self._execute(
+                connection,
+                f"""
+                SELECT * FROM studio_scenario_baselines
+                WHERE {predicate}
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                params,
+            ).fetchone()
+        return _scenario_baseline_from_row(row) if row is not None else None
+
+    def upsert_regression_gate(
+        self,
+        gate: RegressionGate,
+        *,
+        principal_key: str,
+    ) -> RegressionGate:
+        self.get_project_for_principal(gate.project_id, principal_key)
+        with self._transaction(immediate=True) as connection:
+            self._execute(
+                connection,
+                """
+                INSERT INTO studio_regression_gates(
+                    id, project_id, build_id, suite_id, payload_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project_id, build_id) DO UPDATE SET
+                    id = excluded.id,
+                    suite_id = excluded.suite_id,
+                    payload_json = excluded.payload_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    gate.id,
+                    gate.project_id,
+                    gate.build_id,
+                    gate.suite_id,
+                    _json_dump(gate.model_dump(mode="json")),
+                    _timestamp(gate.created_at),
+                    _timestamp(gate.updated_at),
+                ),
+            )
+        return gate
+
+    def get_regression_gate(
+        self,
+        build_id: str,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> RegressionGate | None:
+        self.get_build(
+            build_id,
+            project_id=project_id,
+            principal_key=principal_key,
+        )
+        with self._reader() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT payload_json FROM studio_regression_gates
+                WHERE build_id = ? AND project_id = ?
+                """,
+                (build_id, project_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return RegressionGate.model_validate(_json_load(_row_value(row, "payload_json")))
+
     def enqueue_job(
         self,
         *,
@@ -2033,26 +2966,51 @@ class StudioStore:
         self.get_project_for_principal(project_id, principal_key)
         now = utc_now()
         with self._transaction(immediate=True) as connection:
-            self._execute(
+            existing_row = self._execute(
                 connection,
                 """
-                INSERT INTO studio_receipts(
-                    id, project_id, operation, idempotency_key, outcome,
-                    external_ref, details_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(project_id, operation, idempotency_key) DO NOTHING
+                SELECT * FROM studio_receipts
+                WHERE project_id = ? AND operation = ? AND idempotency_key = ?
                 """,
-                (
-                    new_id(),
-                    project_id,
-                    operation,
-                    idempotency_key,
-                    outcome,
-                    external_ref,
-                    _json_dump(_safe_json(details)),
-                    _timestamp(now),
-                ),
-            )
+                (project_id, operation, idempotency_key),
+            ).fetchone()
+            if existing_row is None:
+                self._execute(
+                    connection,
+                    """
+                    INSERT INTO studio_receipts(
+                        id, project_id, operation, idempotency_key, outcome,
+                        external_ref, details_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        new_id(),
+                        project_id,
+                        operation,
+                        idempotency_key,
+                        outcome,
+                        external_ref,
+                        _json_dump(_safe_json(details)),
+                        _timestamp(now),
+                    ),
+                )
+            else:
+                existing = _receipt_from_row(existing_row)
+                if existing.outcome == "pending" and outcome != "pending":
+                    self._execute(
+                        connection,
+                        """
+                        UPDATE studio_receipts
+                        SET outcome = ?, external_ref = ?, details_json = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            outcome,
+                            external_ref,
+                            _json_dump(_safe_json(details)),
+                            existing.id,
+                        ),
+                    )
             row = self._execute(
                 connection,
                 """
@@ -2068,6 +3026,37 @@ class StudioStore:
                 "An external receipt already exists for this idempotency key."
             )
         return receipt
+
+    def list_receipts(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+        operation_prefix: str | None = None,
+    ) -> list[ExternalReceipt]:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            if operation_prefix is None:
+                rows = self._execute(
+                    connection,
+                    """
+                    SELECT * FROM studio_receipts
+                    WHERE project_id = ?
+                    ORDER BY created_at ASC, id ASC
+                    """,
+                    (project_id,),
+                ).fetchall()
+            else:
+                rows = self._execute(
+                    connection,
+                    """
+                    SELECT * FROM studio_receipts
+                    WHERE project_id = ? AND operation LIKE ?
+                    ORDER BY created_at ASC, id ASC
+                    """,
+                    (project_id, f"{operation_prefix}%"),
+                ).fetchall()
+        return [_receipt_from_row(row) for row in rows]
 
 
 def _insert_activity(
@@ -2266,6 +3255,165 @@ def _blueprint_application_from_row(row: Any) -> BlueprintApplication:
     )
 
 
+def _scenario_file_fixture_from_row(row: Any) -> ScenarioFileFixture:
+    return ScenarioFileFixture(
+        id=str(_row_value(row, "id")),
+        project_id=str(_row_value(row, "project_id")),
+        name=str(_row_value(row, "name")),
+        opaque_ref=str(_row_value(row, "opaque_ref")),
+        media_type=str(_row_value(row, "media_type")),
+        size_bytes=int(_row_value(row, "size_bytes")),
+        content_hash=str(_row_value(row, "content_hash")),
+        approved_by=str(_row_value(row, "approved_by")),
+        expires_at=_datetime(_row_value(row, "expires_at")),
+        created_at=_datetime(_row_value(row, "created_at")),
+    )
+
+
+def _scenario_sanitized_run_source_from_row(
+    row: Any,
+) -> ScenarioSanitizedRunApproval:
+    return ScenarioSanitizedRunApproval(
+        id=str(_row_value(row, "id")),
+        project_id=str(_row_value(row, "project_id")),
+        source_run_id=str(_row_value(row, "source_run_id")),
+        evidence_hash=str(_row_value(row, "evidence_hash")),
+        approved_by=str(_row_value(row, "approved_by")),
+        expires_at=_datetime(_row_value(row, "expires_at")),
+        created_at=_datetime(_row_value(row, "created_at")),
+    )
+
+
+def _preview_environment_from_row(row: Any) -> PreviewEnvironment:
+    return PreviewEnvironment(
+        id=str(_row_value(row, "id")),
+        project_id=str(_row_value(row, "project_id")),
+        target_key=str(_row_value(row, "target_key")),
+        name=str(_row_value(row, "name")),
+        enabled=bool(_row_value(row, "enabled")),
+        default_ttl_seconds=int(_row_value(row, "default_ttl_seconds")),
+        created_at=_datetime(_row_value(row, "created_at")),
+        updated_at=_datetime(_row_value(row, "updated_at")),
+    )
+
+
+def _scenario_run_values(run: ScenarioRun) -> tuple[Any, ...]:
+    return (
+        run.id,
+        run.project_id,
+        run.build_id,
+        run.suite_id,
+        run.environment_id,
+        _json_dump(run.candidate_ids),
+        _json_dump([item.model_dump(mode="json") for item in run.mappings]),
+        _json_dump(run.policy.model_dump(mode="json")),
+        run.authorized_by,
+        run.status,
+        int(run.cancel_requested),
+        _json_dump([item.model_dump(mode="json") for item in run.reports]),
+        _json_dump(run.comparison.model_dump(mode="json")) if run.comparison else None,
+        _json_dump(_safe_json(run.failure)) if run.failure else None,
+        int(run.cleanup_verified),
+        run.version,
+        _timestamp(run.created_at),
+        _timestamp(run.updated_at),
+    )
+
+
+def _scenario_run_from_row(row: Any) -> ScenarioRun:
+    return ScenarioRun.model_validate(
+        {
+            "id": str(_row_value(row, "id")),
+            "project_id": str(_row_value(row, "project_id")),
+            "build_id": str(_row_value(row, "build_id")),
+            "suite_id": str(_row_value(row, "suite_id")),
+            "environment_id": str(_row_value(row, "environment_id")),
+            "candidate_ids": _json_value(_row_value(row, "candidate_ids_json")),
+            "mappings": _json_value(_row_value(row, "mappings_json")),
+            "policy": _json_load(_row_value(row, "policy_json")),
+            "authorized_by": str(_row_value(row, "authorized_by")),
+            "status": str(_row_value(row, "status")),
+            "cancel_requested": bool(_row_value(row, "cancel_requested")),
+            "reports": _json_value(_row_value(row, "reports_json")),
+            "comparison": (
+                _json_load(_row_value(row, "comparison_json"))
+                if _row_value(row, "comparison_json") is not None
+                else None
+            ),
+            "failure": (
+                _json_load(_row_value(row, "failure_json"))
+                if _row_value(row, "failure_json") is not None
+                else None
+            ),
+            "cleanup_verified": bool(_row_value(row, "cleanup_verified")),
+            "version": int(_row_value(row, "version")),
+            "created_at": _datetime(_row_value(row, "created_at")),
+            "updated_at": _datetime(_row_value(row, "updated_at")),
+        }
+    )
+
+
+def _preview_fixture_values(fixture: PreviewFixture) -> tuple[Any, ...]:
+    return (
+        fixture.id,
+        fixture.project_id,
+        fixture.scenario_run_id,
+        fixture.candidate_id,
+        fixture.environment_id,
+        fixture.label,
+        fixture.status,
+        fixture.idempotency_key,
+        fixture.import_id,
+        fixture.app_id,
+        _json_dump(_safe_json(fixture.receipt)),
+        fixture.cleanup_attempts,
+        _timestamp(fixture.absence_verified_at) if fixture.absence_verified_at else None,
+        _timestamp(fixture.expires_at),
+        fixture.version,
+        _timestamp(fixture.created_at),
+        _timestamp(fixture.updated_at),
+    )
+
+
+def _preview_fixture_from_row(row: Any) -> PreviewFixture:
+    return PreviewFixture(
+        id=str(_row_value(row, "id")),
+        project_id=str(_row_value(row, "project_id")),
+        scenario_run_id=str(_row_value(row, "scenario_run_id")),
+        candidate_id=str(_row_value(row, "candidate_id")),
+        environment_id=str(_row_value(row, "environment_id")),
+        label=str(_row_value(row, "label")),
+        status=str(_row_value(row, "status")),
+        idempotency_key=str(_row_value(row, "idempotency_key")),
+        import_id=_optional_string(_row_value(row, "import_id")),
+        app_id=_optional_string(_row_value(row, "app_id")),
+        receipt=_json_load(_row_value(row, "receipt_json")),
+        cleanup_attempts=int(_row_value(row, "cleanup_attempts")),
+        absence_verified_at=_optional_datetime(_row_value(row, "absence_verified_at")),
+        expires_at=_datetime(_row_value(row, "expires_at")),
+        version=int(_row_value(row, "version")),
+        created_at=_datetime(_row_value(row, "created_at")),
+        updated_at=_datetime(_row_value(row, "updated_at")),
+    )
+
+
+def _scenario_baseline_from_row(row: Any) -> ScenarioBaseline:
+    return ScenarioBaseline(
+        id=str(_row_value(row, "id")),
+        project_id=str(_row_value(row, "project_id")),
+        build_id=str(_row_value(row, "build_id")),
+        suite_id=str(_row_value(row, "suite_id")),
+        report_run_id=str(_row_value(row, "report_run_id")),
+        candidate_id=str(_row_value(row, "candidate_id")),
+        binding=ScenarioEvidenceBinding.model_validate(
+            _json_load(_row_value(row, "binding_json"))
+        ),
+        report_hash=str(_row_value(row, "report_hash")),
+        saved_by=str(_row_value(row, "saved_by")),
+        created_at=_datetime(_row_value(row, "created_at")),
+    )
+
+
 def _job_from_row(row: Any) -> DurableJob:
     return DurableJob(
         id=str(_row_value(row, "id")),
@@ -2346,6 +3494,10 @@ def _json_dump(value: Any) -> str:
 def _json_load(value: Any) -> dict[str, Any]:
     parsed = json.loads(str(value))
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _json_value(value: Any) -> Any:
+    return json.loads(str(value))
 
 
 def _safe_json(value: dict[str, Any]) -> dict[str, Any]:

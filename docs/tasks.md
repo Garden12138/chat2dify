@@ -9,7 +9,7 @@
 >   [`docs/goals/v5.0.0-goal-prompts.md`](goals/v5.0.0-goal-prompts.md)
 > - v4 evidence:
 >   [`docs/archive/v4.0.0-tasks.md`](archive/v4.0.0-tasks.md)
-> - Last updated: 2026-08-03
+> - Last updated: 2026-08-04
 
 ## 1. Product outcome
 
@@ -77,7 +77,7 @@ Rules:
 | Phase 0 | Studio shell, Home, projects, identity, and migration foundation | v4.0.0 completed | `completed` |
 | Phase 1 | Build Studio and safe candidate variants | Phase 0 | `completed` |
 | Phase 2 | Blueprint Gallery and guided pattern reuse | Phase 1 | `completed` |
-| Phase 3 | Scenario Lab and isolated candidate Preview | Phase 2 | `pending` |
+| Phase 3 | Scenario Lab and isolated candidate Preview | Phase 2 | `completed` |
 | Phase 4 | Collaborative Review and Release Center | Phase 3 | `pending` |
 | Phase 5 | Run Center, repair proposals, and safe automation | Phase 4 | `pending` |
 | Release Gate | v5.0.0 product, safety, migration, and real user journeys | Phases 0–5 | `pending` |
@@ -713,7 +713,7 @@ Dify-native patterns from a productized Gallery.
 
 ## 9. Phase 3 — Scenario Lab and isolated candidate Preview
 
-Status: `pending`
+Status: `completed`
 
 Dependencies: Phase 2 `completed`
 
@@ -722,50 +722,50 @@ safe Preview target, compare candidates, and define regression gates.
 
 ### Tasks
 
-- [ ] **P3-01 — Scenario and dataset product model**
+- [x] **P3-01 — Scenario and dataset product model**
   - Add manual, generated, fixture, and explicitly approved sanitized-run
     sources.
   - Support expected output, invariants, rubric, tags, owner, retention, and
     version.
   - Mark all dataset content untrusted.
 
-- [ ] **P3-02 — Scenario authoring**
+- [x] **P3-02 — Scenario authoring**
   - Generate edge cases only after deterministic input schema discovery.
   - Add business-readable expected behavior and invariant editors.
   - Require user files or approved fixtures for file inputs.
 
-- [ ] **P3-03 — Isolated Preview Environment**
+- [x] **P3-03 — Isolated Preview Environment**
   - Use an explicitly configured non-production Dify target.
   - Make production credentials and secret mappings structurally unavailable.
   - Persist intent/receipt before follow-up actions.
   - Label every temporary app with project, candidate, and TTL.
 
-- [ ] **P3-04 — Cleanup and reconciliation**
+- [x] **P3-04 — Cleanup and reconciliation**
   - Add idempotent cleanup, independent absence verification, orphan reaper,
     and operator reconciliation.
   - Never blind-retry an ambiguous import.
   - Keep the normal Dify `1.14.x` adapter fail-closed when no Preview target is
     configured.
 
-- [ ] **P3-05 — Candidate runs**
+- [x] **P3-05 — Candidate runs**
   - Run one or more candidates over selected scenarios.
   - Normalize output, failed node, latency, model usage, estimated cost, and
     side effects.
   - Store only sanitized evidence.
 
-- [ ] **P3-06 — Side-by-side comparison**
+- [x] **P3-06 — Side-by-side comparison**
   - Compare quality, pass rate, regressions, latency, usage/cost, side effects,
     and failure clusters.
   - Explain metric limitations and missing evidence.
   - Allow one report to become the candidate baseline.
 
-- [ ] **P3-07 — Regression gates**
+- [x] **P3-07 — Regression gates**
   - Define project/app thresholds and required scenario suites.
   - Bind evidence to exact candidate, resource mapping, suite, policy, and
     expiry.
   - Invalidate stale evidence after any bound input changes.
 
-- [ ] **P3-08 — Scenario Lab tests and usability**
+- [x] **P3-08 — Scenario Lab tests and usability**
   - Cover dataset injection, secret scan, file boundary, restricted mappings,
     side-effect approval, budget, timeout, cancellation, ambiguity, cleanup,
     metric determinism, stale evidence, accessibility, and real Preview use.
@@ -779,15 +779,131 @@ safe Preview target, compare candidates, and define regression gates.
 
 ### Acceptance criteria
 
-- [ ] Candidate execution never targets production.
-- [ ] Preview cannot resolve production secret mappings.
-- [ ] Every Preview write has a receipt and cleanup state.
-- [ ] Ambiguous import requires reconciliation, not re-import.
-- [ ] Comparison evidence is exact and reproducible for fixed fixtures.
-- [ ] Scenario Lab fixed goal completion is `>= 90%`.
-- [ ] Preview fixture cleanup is independently verified.
-- [ ] Targeted tests, real Preview acceptance, full suite, and
+- [x] Candidate execution never targets production.
+- [x] Preview cannot resolve production secret mappings.
+- [x] Every Preview write has a receipt and cleanup state.
+- [x] Ambiguous import requires reconciliation, not re-import.
+- [x] Comparison evidence is exact and reproducible for fixed fixtures.
+- [x] Scenario Lab fixed goal completion is `>= 90%`.
+- [x] Preview fixture cleanup is independently verified.
+- [x] Targeted tests, real Preview acceptance, full suite, and
       `git diff --check` pass.
+
+### Implementation record
+
+- Started: 2026-08-04
+- Fixed Phase 3 user journey:
+  1. Open Scenario Lab from a Build containing the two after-sales fallback
+     Candidates; deterministically discover the authoritative input schema
+     before authoring or generating cases.
+  2. Create an after-sales regression Dataset from manual, generated,
+     approved fixture, and explicitly approved sanitized-run sources. Define
+     expected outcomes, invariants, rubric, tags, owner, retention, and
+     version without exposing raw secrets or accepting dataset instructions
+     as authority.
+  3. Select both Candidates and one explicitly configured non-production
+     Preview Environment. Map only restricted test resources, review model,
+     HTTP, Tool, trigger, notification, budget, timeout, and file boundaries,
+     then start one durable Scenario Run.
+  4. For each Candidate, persist import intent before the Dify write, bind the
+     temporary App to Project/Candidate/TTL, execute the exact imported
+     candidate, and record sanitized receipts and normalized evidence. An
+     ambiguous import stops for operator reconciliation and is never retried
+     blindly.
+  5. Compare quality, pass rate, regressions, response latency, model usage,
+     estimated cost, human escalations, side effects, and missing evidence
+     side by side; save the selected exact report as the baseline and define
+     an expiry-bound regression gate.
+  6. Cancel or finish the Run, clean every temporary fixture idempotently,
+     independently verify its absence, and show cleanup/reconciliation state
+     before allowing the report to count as release evidence.
+- Fixed Phase 3 usability and safety targets:
+  - at least 90 percent of the fixed Scenario Lab task set completes without
+    raw Plan, DSL, provider payload, or copied object IDs;
+  - all Scenario, Dataset, Preview, Run, comparison, baseline, cleanup, and
+    reconciliation controls are keyboard reachable, labelled, focus-safe,
+    responsive in drawer/full-page layouts, and truthful for loading, empty,
+    permission, offline, conflict, timeout, cancellation, partial, ambiguous,
+    and failed states;
+  - fixed fixture metrics are deterministic and every report is bound to the
+    exact Candidate, mapping, suite, policy, environment, and expiry;
+  - production targets and production secret mappings are structurally
+    unrepresentable in Preview requests;
+  - every external Preview write has persisted intent, receipt, cleanup state,
+    and independent absence verification; restart never replays an ambiguous
+    write.
+- Completed: 2026-08-04
+- Product journey evidence:
+  - The signed-in Dify-hosted Studio opened Scenario Lab directly from Build
+    with two valid Candidates and no copied IDs. It discovered one shared
+    authoritative paragraph input before enabling Dataset authoring.
+  - The real surface generated three deterministic Schema edge cases, combined
+    them with one manual after-sales case, and saved a four-case, versioned,
+    retention-bound Suite whose contents remain explicitly untrusted.
+  - One asynchronous Run imported and executed both exact Candidates in the
+    explicitly configured `Local-Isolated-Preview`, then displayed pass rate,
+    quality, latency, Tokens, estimated cost, human escalation, regression,
+    Gate, and Cleanup evidence side by side. A second Run evaluated the saved
+    Baseline and Regression Gate and reported the Gate as passed.
+  - The user flow saved an exact Candidate Baseline, approved the completed
+    Report as an expiring sanitized source, and exposed that source through a
+    labelled selector rather than a copied Run or evidence ID.
+- Preview, receipt, and cleanup evidence:
+  - Every real import, draft execution, and cleanup had a persisted pending
+    intent followed by a terminal receipt. Both real Runs created two TTL-
+    labelled temporary Apps and recorded one cleanup attempt per App.
+  - All four product-journey App IDs reached `verified_absent`; an independent
+    adapter readback queried Dify again and returned absent for `4/4` Apps.
+  - A separate opt-in live protocol test imported a deterministic Workflow,
+    verified its presence, ran its Draft, deleted it, and independently
+    verified absence. Ambiguous imports remain terminal reconciliation work and
+    are never retried blindly.
+- Quality and safety evidence:
+  - Fixed Scenario Lab goal completion is `6/6` journey steps (`100%`, target
+    `>= 90%`). Deterministic comparison coverage runs the two named fallback
+    candidates; the signed-in real Preview journey used two valid
+    Blueprint-derived Candidates from the same pinned base after the local
+    model provider could not synthesize the fallback variants.
+  - Production target, credential, Secret, arbitrary mapping, approval, Apply,
+    Publish, and raw DSL fields are structurally absent from browser/API
+    request models. Mapping accepts only explicit non-production Model,
+    Dataset, Tool, and Trigger references.
+  - Dataset injection remains data, secret-like content fails closed, file
+    inputs require a user upload or approved fixture, and side-effect approval,
+    timeout, budget, cancellation, restart, stale binding, cross-project read,
+    and cleanup failure paths have deterministic coverage.
+- Usability and accessibility evidence:
+  - Signed-in browser acceptance passed at `1280x720` and `720x696`: both had
+    zero page-level horizontal overflow and zero unnamed visible controls; the
+    comparison table scrolls inside its labelled region on the narrow layout.
+  - Candidate selection, generated cases, expected outcome/invariant editors,
+    restricted mappings, budgets, Run/Cancel, Baseline, Gate, sanitized source,
+    return-to-Build, skip-link focus, visible focus styling, and reduced-motion
+    rules are present without a raw Plan, DSL, provider payload, or technical
+    JSON editor.
+  - Empty, loading, permission, offline, conflict, timeout, cancellation,
+    interrupted, ambiguous, partial evidence, failed cleanup, and stale Gate
+    states have stable product copy and safe next actions. Duplicate Suite
+    name/version is a recoverable `409` conflict rather than a false server
+    outage.
+- Verification:
+  - Targeted Scenario/API Python: `19 passed`.
+  - Opt-in real Preview protocol acceptance: `1 passed` against localhost Dify
+    `1.14.2`.
+  - Frontend: `35 passed`.
+  - Full Python regression: `506 passed, 15 skipped`; skips remain explicit
+    provider, PostgreSQL, and real-service opt-ins.
+  - `node --check app/static/studio/scenarios/index.js`: passed.
+  - `git diff --check`: passed.
+- Cleanup and limitations:
+  - The browser tabs were finalized. Product and protocol acceptance left no
+    temporary Preview App behind and performed no approval, Apply Draft,
+    Publish, Git, notification, repository commit, push, or pull request.
+  - SQLite schema v4 is additive and covered by migration/restart tests.
+    PostgreSQL and production-scale worker concurrency remain deployment-gate
+    evidence for the full v5 release rather than a claimed Phase 3 result.
+  - Cost is a deterministic estimate from observed model usage and a fixed
+    rate; missing Dify metrics are labelled as missing and are never inferred.
 
 ## 10. Phase 4 — Collaborative Review and Release Center
 

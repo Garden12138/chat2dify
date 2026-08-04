@@ -314,6 +314,24 @@ function updateBlueprintLink() {
   link.textContent = state.activeCandidateId && selectedNodes.length
     ? "浏览 / 保存 Blueprint"
     : "浏览 Blueprints";
+  updateScenarioLink();
+}
+
+function updateScenarioLink() {
+  const link = document.querySelector("#studio-build-scenarios");
+  if (!link) return;
+  const candidateIds = (state.view?.candidates || [])
+    .filter(item => item?.candidate?.status === "valid" && item.reconstructable)
+    .map(item => item.candidate.id)
+    .slice(0, 20);
+  const params = new URLSearchParams({ studio: "scenarios" });
+  if (state.buildId) params.set("build_id", state.buildId);
+  if (candidateIds.length) params.set("candidate_ids", candidateIds.join(","));
+  link.href = `${basePath || ""}/?${params.toString()}`;
+  const available = Boolean(state.buildId && candidateIds.length);
+  link.setAttribute("aria-disabled", String(!available));
+  link.tabIndex = available ? 0 : -1;
+  link.title = available ? "在隔离 Preview 中比较有效 Candidate" : "先生成至少一个有效 Candidate";
 }
 
 function renderEmpty() {

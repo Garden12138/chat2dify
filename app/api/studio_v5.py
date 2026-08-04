@@ -30,12 +30,30 @@ from app.studio.models import (
     BlueprintVersionRecord,
     Membership,
     BuildStudioView,
+    PreviewFixture,
+    PreviewResourceMapping,
     Principal,
     Project,
+    RegressionGate,
+    ScenarioBaseline,
+    ScenarioCase,
+    ScenarioExpectedOutput,
+    ScenarioFileFixture,
+    ScenarioFileReference,
+    ScenarioInputSchema,
+    ScenarioInvariant,
+    ScenarioLabView,
+    ScenarioRubricCriterion,
+    ScenarioRun,
+    ScenarioRunPolicy,
+    ScenarioSanitizedRunApproval,
+    ScenarioSuite,
     StrictModel,
     StudioHome,
 )
 from app.studio.service import StudioApplicationService
+from app.studio.preview import PreviewAdapterError
+from app.studio.scenarios import ScenarioError
 from app.studio.store import (
     StudioAccessDenied,
     StudioConflict,
@@ -161,6 +179,89 @@ class ReviewBlueprintVersionRequest(StrictModel):
     project_id: str = Field(min_length=1, max_length=128)
     approved: bool
     note: str = Field(min_length=1, max_length=2_000)
+
+
+class ScenarioSourceRequest(StrictModel):
+    kind: Literal["manual", "generated", "fixture", "approved_sanitized_run"]
+    input_schema_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    fixture_id: str | None = Field(default=None, max_length=128)
+    source_run_id: str | None = Field(default=None, max_length=128)
+    evidence_hash: str | None = Field(default=None, min_length=64, max_length=64)
+
+
+class ScenarioCaseRequest(StrictModel):
+    name: str = Field(min_length=1, max_length=256)
+    source: ScenarioSourceRequest
+    inputs: dict[str, Any] = Field(default_factory=dict)
+    files: list[ScenarioFileReference] = Field(default_factory=list, max_length=20)
+    expected_output: ScenarioExpectedOutput
+    expected_behavior: str = Field(min_length=1, max_length=4_000)
+    invariants: list[ScenarioInvariant] = Field(min_length=1, max_length=30)
+    rubric: list[ScenarioRubricCriterion] = Field(default_factory=list, max_length=20)
+    tags: list[str] = Field(default_factory=list, max_length=20)
+
+
+class CreateScenarioSuiteRequest(StrictModel):
+    project_id: str = Field(min_length=1, max_length=128)
+    build_id: str = Field(min_length=1, max_length=128)
+    candidate_ids: list[str] = Field(min_length=1, max_length=20)
+    name: str = Field(min_length=1, max_length=256)
+    description: str = Field(min_length=1, max_length=4_000)
+    retention_days: int = Field(default=30, ge=1, le=365)
+    semantic_version: str = Field(default="1.0.0", pattern=r"^\d+\.\d+\.\d+$")
+    input_schema_hash: str = Field(min_length=64, max_length=64)
+    cases: list[ScenarioCaseRequest] = Field(min_length=1, max_length=100)
+
+
+class GenerateScenarioCasesRequest(StrictModel):
+    project_id: str = Field(min_length=1, max_length=128)
+    build_id: str = Field(min_length=1, max_length=128)
+    candidate_ids: list[str] = Field(min_length=1, max_length=20)
+    input_schema_hash: str = Field(min_length=64, max_length=64)
+
+
+class ApproveScenarioFixtureRequest(StrictModel):
+    project_id: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=256)
+    opaque_ref: str = Field(min_length=1, max_length=512)
+    media_type: str = Field(min_length=1, max_length=128)
+    size_bytes: int = Field(ge=1, le=50_000_000)
+    content_hash: str = Field(pattern=r"^[a-fA-F0-9]{64}$")
+    ttl_seconds: int = Field(default=86_400, ge=60, le=2_592_000)
+
+
+class RunScenarioSuiteRequest(StrictModel):
+    project_id: str = Field(min_length=1, max_length=128)
+    build_id: str = Field(min_length=1, max_length=128)
+    suite_id: str = Field(min_length=1, max_length=128)
+    environment_id: str = Field(min_length=1, max_length=128)
+    candidate_ids: list[str] = Field(min_length=1, max_length=20)
+    mappings: list[PreviewResourceMapping] = Field(default_factory=list, max_length=100)
+    policy: ScenarioRunPolicy
+
+
+class ApproveSanitizedRunSourceRequest(StrictModel):
+    project_id: str = Field(min_length=1, max_length=128)
+    ttl_seconds: int = Field(default=604_800, ge=60, le=2_592_000)
+
+
+class ProjectActionRequest(StrictModel):
+    project_id: str = Field(min_length=1, max_length=128)
+
+
+class SaveScenarioBaselineRequest(ProjectActionRequest):
+    candidate_id: str = Field(min_length=1, max_length=128)
+
+
+class ConfigureRegressionGateRequest(ProjectActionRequest):
+    build_id: str = Field(min_length=1, max_length=128)
+    suite_id: str = Field(min_length=1, max_length=128)
+    min_pass_rate: float = Field(default=1.0, ge=0, le=1)
+    min_quality_score: float = Field(default=80, ge=0, le=100)
+    max_latency_regression_percent: float = Field(default=20, ge=0, le=1_000)
+    max_cost_regression_percent: float = Field(default=20, ge=0, le=1_000)
+    evidence_ttl_seconds: int = Field(default=604_800, ge=60, le=2_592_000)
+    required_policy: ScenarioRunPolicy
 
 
 ERROR_RESPONSES = {
@@ -698,6 +799,319 @@ def preview_blueprint_upgrade(
         return studio_error_response(exc)
 
 
+@router.get(
+    "/scenario-lab",
+    response_model=ScenarioLabView,
+    responses=ERROR_RESPONSES,
+)
+def get_scenario_lab(
+    request: Request,
+    response: Response,
+    project_id: str = Query(min_length=1, max_length=128),
+    build_id: str = Query(min_length=1, max_length=128),
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        return service.scenario_lab(
+            authenticated,
+            project_id=project_id,
+            build_id=build_id,
+        )
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
+@router.get(
+    "/scenario-lab/input-schema",
+    response_model=ScenarioInputSchema,
+    responses=ERROR_RESPONSES,
+)
+def get_scenario_input_schema(
+    request: Request,
+    response: Response,
+    project_id: str = Query(min_length=1, max_length=128),
+    build_id: str = Query(min_length=1, max_length=128),
+    candidate_ids: list[str] = Query(min_length=1, max_length=20),
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        return service.discover_scenario_input_schema(
+            authenticated,
+            project_id=project_id,
+            build_id=build_id,
+            candidate_ids=candidate_ids,
+        )
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
+@router.post(
+    "/scenario-suites",
+    response_model=ScenarioSuite,
+    status_code=201,
+    responses=ERROR_RESPONSES,
+)
+def create_scenario_suite(
+    payload: CreateScenarioSuiteRequest,
+    request: Request,
+    response: Response,
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        return service.create_scenario_suite(
+            authenticated,
+            project_id=payload.project_id,
+            build_id=payload.build_id,
+            candidate_ids=payload.candidate_ids,
+            name=payload.name,
+            description=payload.description,
+            retention_days=payload.retention_days,
+            semantic_version=payload.semantic_version,
+            input_schema_hash=payload.input_schema_hash,
+            case_specs=[item.model_dump(mode="json") for item in payload.cases],
+        )
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
+@router.post(
+    "/scenario-suites/generate-edge-cases",
+    response_model=list[ScenarioCase],
+    responses=ERROR_RESPONSES,
+)
+def generate_scenario_edge_cases(
+    payload: GenerateScenarioCasesRequest,
+    request: Request,
+    response: Response,
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        return service.generate_scenario_edge_cases(
+            authenticated,
+            project_id=payload.project_id,
+            build_id=payload.build_id,
+            candidate_ids=payload.candidate_ids,
+            input_schema_hash=payload.input_schema_hash,
+        )
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
+@router.post(
+    "/scenario-file-fixtures",
+    response_model=ScenarioFileFixture,
+    status_code=201,
+    responses=ERROR_RESPONSES,
+)
+def approve_scenario_file_fixture(
+    payload: ApproveScenarioFixtureRequest,
+    request: Request,
+    response: Response,
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        return service.approve_scenario_file_fixture(
+            authenticated,
+            project_id=payload.project_id,
+            name=payload.name,
+            opaque_ref=payload.opaque_ref,
+            media_type=payload.media_type,
+            size_bytes=payload.size_bytes,
+            content_hash=payload.content_hash.lower(),
+            ttl_seconds=payload.ttl_seconds,
+        )
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
+@router.post(
+    "/scenario-runs",
+    response_model=ScenarioRun,
+    status_code=202,
+    responses=ERROR_RESPONSES,
+)
+def run_scenario_suite(
+    payload: RunScenarioSuiteRequest,
+    request: Request,
+    response: Response,
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        return service.run_scenario_suite(
+            authenticated,
+            project_id=payload.project_id,
+            build_id=payload.build_id,
+            suite_id=payload.suite_id,
+            environment_id=payload.environment_id,
+            candidate_ids=payload.candidate_ids,
+            mappings=payload.mappings,
+            policy=payload.policy,
+        )
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
+@router.post(
+    "/scenario-runs/{run_id}/approve-sanitized-source",
+    response_model=ScenarioSanitizedRunApproval,
+    status_code=201,
+    responses=ERROR_RESPONSES,
+)
+def approve_sanitized_run_source(
+    run_id: str,
+    payload: ApproveSanitizedRunSourceRequest,
+    request: Request,
+    response: Response,
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        return service.approve_sanitized_run_source(
+            authenticated,
+            project_id=payload.project_id,
+            run_id=run_id,
+            ttl_seconds=payload.ttl_seconds,
+        )
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
+@router.get(
+    "/scenario-runs/{run_id}",
+    response_model=ScenarioRun,
+    responses=ERROR_RESPONSES,
+)
+def get_scenario_run(
+    run_id: str,
+    request: Request,
+    response: Response,
+    project_id: str = Query(min_length=1, max_length=128),
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        return service.get_scenario_run(
+            authenticated,
+            project_id=project_id,
+            run_id=run_id,
+        )
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
+@router.post(
+    "/scenario-runs/{run_id}/cancel",
+    response_model=ScenarioRun,
+    responses=ERROR_RESPONSES,
+)
+def cancel_scenario_run(
+    run_id: str,
+    payload: ProjectActionRequest,
+    request: Request,
+    response: Response,
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        return service.cancel_scenario_run(
+            authenticated,
+            project_id=payload.project_id,
+            run_id=run_id,
+        )
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
+@router.post(
+    "/scenario-runs/{run_id}/baseline",
+    response_model=ScenarioBaseline,
+    responses=ERROR_RESPONSES,
+)
+def save_scenario_baseline(
+    run_id: str,
+    payload: SaveScenarioBaselineRequest,
+    request: Request,
+    response: Response,
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        return service.save_scenario_baseline(
+            authenticated,
+            project_id=payload.project_id,
+            run_id=run_id,
+            candidate_id=payload.candidate_id,
+        )
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
+@router.post(
+    "/preview-fixtures/{fixture_id}/cleanup",
+    response_model=PreviewFixture,
+    responses=ERROR_RESPONSES,
+)
+def cleanup_preview_fixture(
+    fixture_id: str,
+    payload: ProjectActionRequest,
+    request: Request,
+    response: Response,
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        return service.cleanup_preview_fixture(
+            authenticated,
+            project_id=payload.project_id,
+            fixture_id=fixture_id,
+        )
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
+@router.post(
+    "/preview-environments/reap",
+    response_model=list[PreviewFixture],
+    responses=ERROR_RESPONSES,
+)
+def reap_preview_fixtures(
+    payload: ProjectActionRequest,
+    request: Request,
+    response: Response,
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        return service.reap_preview_fixtures(
+            authenticated,
+            project_id=payload.project_id,
+        )
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
+@router.put(
+    "/regression-gates",
+    response_model=RegressionGate,
+    responses=ERROR_RESPONSES,
+)
+def configure_regression_gate(
+    payload: ConfigureRegressionGateRequest,
+    request: Request,
+    response: Response,
+):
+    try:
+        service, authenticated = _authenticated_service(request, response)
+        return service.configure_regression_gate(
+            authenticated,
+            project_id=payload.project_id,
+            build_id=payload.build_id,
+            suite_id=payload.suite_id,
+            min_pass_rate=payload.min_pass_rate,
+            min_quality_score=payload.min_quality_score,
+            max_latency_regression_percent=payload.max_latency_regression_percent,
+            max_cost_regression_percent=payload.max_cost_regression_percent,
+            evidence_ttl_seconds=payload.evidence_ttl_seconds,
+            required_policy=payload.required_policy,
+        )
+    except Exception as exc:
+        return studio_error_response(exc)
+
+
 def _authenticated_service(
     request: Request,
     response: Response,
@@ -776,6 +1190,10 @@ def _error_shape(exc: Exception) -> tuple[int, str, bool]:
         return 404, code, False
     if isinstance(exc, (StudioConflict, V4ContinuityError)):
         return 409, getattr(exc, "code", "STUDIO_CONFLICT"), False
+    if isinstance(exc, ScenarioError):
+        return 409, exc.code, False
+    if isinstance(exc, PreviewAdapterError):
+        return 503, exc.code, True
     if isinstance(exc, StudioHostUnavailable):
         return 503, exc.code, True
     if isinstance(exc, StudioIdentityError):

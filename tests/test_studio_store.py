@@ -66,7 +66,7 @@ def test_populated_v4_sqlite_migrates_additively_without_data_loss(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }
-    assert studio.schema_version() == 3
+    assert studio.schema_version() == 4
     assert before_session == after_session
     assert before_run_count == after_run_count == 1
     assert before_tables <= after_tables
@@ -76,6 +76,8 @@ def test_populated_v4_sqlite_migrates_additively_without_data_loss(
     assert "studio_receipts" in after_tables
     assert "studio_builds" in after_tables
     assert "studio_candidates" in after_tables
+    assert "studio_scenario_runs" in after_tables
+    assert "studio_preview_fixtures" in after_tables
     assert v4.get_run(run.id).goal == "Keep me."
 
 

@@ -96,6 +96,14 @@ class Settings:
     studio_allowed_origins: list[str]
     task_db_path: Path
     task_workers: int
+    studio_preview_enabled: bool = False
+    studio_preview_target_id: str | None = None
+    studio_preview_target_name: str = "Isolated Preview"
+    studio_preview_console_api_base: str | None = None
+    studio_preview_console_web_base: str | None = None
+    studio_preview_email: str | None = None
+    studio_preview_password: str | None = None
+    studio_preview_ttl_seconds: int = 1_800
 
     @classmethod
     def from_env(
@@ -141,6 +149,48 @@ class Settings:
             source.get("CHAT2DIFY_STUDIO_ALLOWED_ORIGINS"),
             fallback=dify_console_web_base,
         )
+        studio_preview_enabled = _boolean(
+            source.get("CHAT2DIFY_STUDIO_PREVIEW_ENABLED", "false"),
+            name="CHAT2DIFY_STUDIO_PREVIEW_ENABLED",
+        )
+        studio_preview_target_id = _empty_to_none(
+            source.get("CHAT2DIFY_STUDIO_PREVIEW_TARGET_ID")
+        )
+        studio_preview_console_api_base = _empty_to_none(
+            source.get("CHAT2DIFY_STUDIO_PREVIEW_CONSOLE_API_BASE")
+        )
+        studio_preview_console_web_base = _empty_to_none(
+            source.get("CHAT2DIFY_STUDIO_PREVIEW_CONSOLE_WEB_BASE")
+        )
+        studio_preview_email = _empty_to_none(
+            source.get("CHAT2DIFY_STUDIO_PREVIEW_EMAIL")
+        )
+        studio_preview_password = _empty_to_none(
+            source.get("CHAT2DIFY_STUDIO_PREVIEW_PASSWORD")
+        )
+        if studio_preview_enabled:
+            missing_preview = [
+                name
+                for name, value in {
+                    "CHAT2DIFY_STUDIO_PREVIEW_TARGET_ID": studio_preview_target_id,
+                    "CHAT2DIFY_STUDIO_PREVIEW_CONSOLE_API_BASE": studio_preview_console_api_base,
+                    "CHAT2DIFY_STUDIO_PREVIEW_CONSOLE_WEB_BASE": studio_preview_console_web_base,
+                    "CHAT2DIFY_STUDIO_PREVIEW_EMAIL": studio_preview_email,
+                    "CHAT2DIFY_STUDIO_PREVIEW_PASSWORD": studio_preview_password,
+                }.items()
+                if value is None
+            ]
+            if missing_preview:
+                raise ConfigurationError(
+                    "An enabled isolated Preview target requires explicit settings: "
+                    + ", ".join(missing_preview)
+                    + "."
+                )
+            normalized_target = (studio_preview_target_id or "").lower()
+            if normalized_target in {"prod", "production"} or "production" in normalized_target:
+                raise ConfigurationError(
+                    "CHAT2DIFY_STUDIO_PREVIEW_TARGET_ID must identify a non-production target."
+                )
 
         return cls(
             project_root=root,
@@ -245,6 +295,31 @@ class Settings:
             task_workers=_positive_int(
                 source.get("CHAT2DIFY_TASK_WORKERS", "2"),
                 name="CHAT2DIFY_TASK_WORKERS",
+            ),
+            studio_preview_enabled=studio_preview_enabled,
+            studio_preview_target_id=studio_preview_target_id,
+            studio_preview_target_name=(
+                source.get(
+                    "CHAT2DIFY_STUDIO_PREVIEW_TARGET_NAME",
+                    "Isolated Preview",
+                ).strip()
+                or "Isolated Preview"
+            ),
+            studio_preview_console_api_base=(
+                studio_preview_console_api_base.rstrip("/")
+                if studio_preview_console_api_base
+                else None
+            ),
+            studio_preview_console_web_base=(
+                studio_preview_console_web_base.rstrip("/")
+                if studio_preview_console_web_base
+                else None
+            ),
+            studio_preview_email=studio_preview_email,
+            studio_preview_password=studio_preview_password,
+            studio_preview_ttl_seconds=_positive_int(
+                source.get("CHAT2DIFY_STUDIO_PREVIEW_TTL_SECONDS", "1800"),
+                name="CHAT2DIFY_STUDIO_PREVIEW_TTL_SECONDS",
             ),
         )
 

@@ -36,6 +36,55 @@ def test_sensitive_login_payload_repr_is_redacted() -> None:
     assert "encoded-secret" not in repr({"json": payload})
 
 
+def test_preview_reconciliation_lists_checks_and_deletes_exact_app() -> None:
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        if request.url.path == "/console/api/login":
+            return httpx.Response(
+                200,
+                json={"result": "success"},
+                headers=[("set-cookie", "csrf_token=csrf123; Path=/")],
+            )
+        if request.url.path == "/console/api/apps" and request.method == "GET":
+            assert request.url.params["name"] == "c2-preview-fixture"
+            assert request.url.params["limit"] == "100"
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "preview-app-1",
+                            "name": "c2-preview-fixture",
+                            "mode": "workflow",
+                            "description": "temporary",
+                        }
+                    ]
+                },
+            )
+        if request.url.path == "/console/api/apps/preview-app-1":
+            if request.method == "GET":
+                return httpx.Response(200, json={"id": "preview-app-1"})
+            if request.method == "DELETE":
+                assert request.headers[CSRF_HEADER_NAME] == "csrf123"
+                return httpx.Response(204)
+        if request.url.path == "/console/api/apps/missing" and request.method in {"GET", "DELETE"}:
+            return httpx.Response(404)
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = DifyClient(_settings(), transport=httpx.MockTransport(handler))
+    apps = client.list_apps(name="c2-preview-fixture")
+    assert [(item.id, item.name) for item in apps] == [
+        ("preview-app-1", "c2-preview-fixture")
+    ]
+    assert client.app_exists("preview-app-1") is True
+    assert client.delete_app("preview-app-1") is True
+    assert client.app_exists("missing") is False
+    assert client.delete_app("missing") is False
+    assert ("DELETE", "/console/api/apps/preview-app-1") in seen
+
+
 def test_login_encodes_password_and_import_sends_csrf_cookie() -> None:
     seen: dict[str, str] = {}
 

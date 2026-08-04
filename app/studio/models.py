@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
@@ -173,7 +173,7 @@ class ExternalReceipt(StrictModel):
     project_id: str
     operation: str
     idempotency_key: str
-    outcome: Literal["succeeded", "failed", "ambiguous"]
+    outcome: Literal["pending", "succeeded", "failed", "ambiguous"]
     external_ref: str | None = None
     details: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
@@ -505,3 +505,405 @@ class BlueprintUpgradePreview(StrictModel):
     changes: list[dict[str, Any]]
     automatic: Literal[False] = False
     action_required: Literal["apply_as_new_candidate"] = "apply_as_new_candidate"
+
+
+ScenarioSourceKind = Literal[
+    "manual",
+    "generated",
+    "fixture",
+    "approved_sanitized_run",
+]
+ScenarioRunStatus = Literal[
+    "pending",
+    "running",
+    "completed",
+    "failed",
+    "cancelled",
+    "interrupted",
+    "reconciliation_required",
+    "cleanup_failed",
+]
+PreviewFixtureStatus = Literal[
+    "intent_recorded",
+    "imported",
+    "running",
+    "cleanup_pending",
+    "verified_absent",
+    "failed",
+    "ambiguous",
+]
+PreviewSideEffect = Literal[
+    "model_cost",
+    "http",
+    "tool",
+    "human_escalation",
+    "trigger",
+    "notification",
+]
+
+
+class ScenarioInputField(StrictModel):
+    name: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z][a-zA-Z0-9_.-]*$")
+    value_type: Literal[
+        "text",
+        "paragraph",
+        "number",
+        "boolean",
+        "json",
+        "file",
+        "file-list",
+    ]
+    required: bool = True
+    label: str = Field(min_length=1, max_length=256)
+
+
+class ScenarioInputSchema(StrictModel):
+    app_mode: Literal["workflow", "advanced-chat"]
+    fields: list[ScenarioInputField] = Field(min_length=1, max_length=100)
+    schema_hash: str = Field(min_length=64, max_length=64)
+    candidate_ids: list[str] = Field(min_length=1, max_length=20)
+
+
+class ManualScenarioSource(StrictModel):
+    kind: Literal["manual"] = "manual"
+    untrusted_data: Literal[True] = True
+
+
+class GeneratedScenarioSource(StrictModel):
+    kind: Literal["generated"] = "generated"
+    input_schema_hash: str = Field(min_length=64, max_length=64)
+    generator_version: Literal["deterministic-edge-v1"] = "deterministic-edge-v1"
+    untrusted_data: Literal[True] = True
+
+
+class FixtureScenarioSource(StrictModel):
+    kind: Literal["fixture"] = "fixture"
+    fixture_id: str = Field(min_length=1, max_length=128)
+    approved_by: str = Field(min_length=1, max_length=768)
+    untrusted_data: Literal[True] = True
+
+
+class ApprovedSanitizedRunScenarioSource(StrictModel):
+    kind: Literal["approved_sanitized_run"] = "approved_sanitized_run"
+    source_run_id: str = Field(min_length=1, max_length=128)
+    evidence_hash: str = Field(min_length=64, max_length=64)
+    approved_by: str = Field(min_length=1, max_length=768)
+    untrusted_data: Literal[True] = True
+
+
+ScenarioSource = Annotated[
+    ManualScenarioSource
+    | GeneratedScenarioSource
+    | FixtureScenarioSource
+    | ApprovedSanitizedRunScenarioSource,
+    Field(discriminator="kind"),
+]
+
+
+class ScenarioFileReference(StrictModel):
+    field_name: str = Field(min_length=1, max_length=128)
+    source: Literal["user_upload", "approved_fixture"]
+    opaque_ref: str = Field(min_length=1, max_length=512)
+    name: str = Field(min_length=1, max_length=256)
+    media_type: str = Field(min_length=1, max_length=128)
+    size_bytes: int = Field(ge=1, le=50_000_000)
+    fixture_id: str | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_file_boundary(self) -> "ScenarioFileReference":
+        if "://" in self.opaque_ref or self.opaque_ref.startswith(("/", "~", ".")):
+            raise ValueError("Scenario file references cannot contain paths or URLs.")
+        if self.source == "approved_fixture" and not self.fixture_id:
+            raise ValueError("Approved file references require a persisted fixture ID.")
+        if self.source == "user_upload" and self.fixture_id is not None:
+            raise ValueError("User uploads cannot claim a persisted fixture approval.")
+        return self
+
+
+class ScenarioExpectedOutput(StrictModel):
+    kind: Literal[
+        "exact_text",
+        "contains_text",
+        "json_fields",
+        "status",
+        "human_escalation",
+    ]
+    value: str | dict[str, Any] | bool
+
+    @model_validator(mode="after")
+    def validate_expected_value(self) -> "ScenarioExpectedOutput":
+        if self.kind in {"exact_text", "contains_text", "status"} and not isinstance(
+            self.value, str
+        ):
+            raise ValueError(f"{self.kind} requires a string value.")
+        if self.kind == "json_fields" and not isinstance(self.value, dict):
+            raise ValueError("json_fields requires an object value.")
+        if self.kind == "human_escalation" and not isinstance(self.value, bool):
+            raise ValueError("human_escalation requires a boolean value.")
+        return self
+
+
+class ScenarioInvariant(StrictModel):
+    kind: Literal[
+        "contains_text",
+        "not_contains_text",
+        "json_field_equals",
+        "status_is",
+        "max_latency_ms",
+        "max_tokens",
+        "human_escalation_is",
+    ]
+    target: str | int | bool | dict[str, Any]
+    description: str = Field(min_length=1, max_length=1_000)
+
+
+class ScenarioRubricCriterion(StrictModel):
+    name: str = Field(min_length=1, max_length=128)
+    description: str = Field(min_length=1, max_length=1_000)
+    weight: int = Field(ge=1, le=100)
+    invariant_indexes: list[int] = Field(default_factory=list, max_length=40)
+
+
+class ScenarioCase(StrictModel):
+    id: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=256)
+    source: ScenarioSource
+    inputs: dict[str, Any] = Field(default_factory=dict)
+    files: list[ScenarioFileReference] = Field(default_factory=list, max_length=20)
+    expected_output: ScenarioExpectedOutput
+    expected_behavior: str = Field(min_length=1, max_length=4_000)
+    invariants: list[ScenarioInvariant] = Field(default_factory=list, max_length=40)
+    rubric: list[ScenarioRubricCriterion] = Field(default_factory=list, max_length=20)
+    tags: list[str] = Field(default_factory=list, max_length=40)
+
+    @model_validator(mode="after")
+    def validate_rubric(self) -> "ScenarioCase":
+        if self.rubric and sum(item.weight for item in self.rubric) != 100:
+            raise ValueError("Scenario rubric weights must total 100.")
+        for criterion in self.rubric:
+            if any(index >= len(self.invariants) for index in criterion.invariant_indexes):
+                raise ValueError("Scenario rubric references an unknown invariant.")
+        return self
+
+
+class ScenarioSuite(StrictModel):
+    id: str = Field(min_length=1, max_length=128)
+    project_id: str = Field(min_length=1, max_length=128)
+    build_id: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=256)
+    description: str = Field(min_length=1, max_length=4_000)
+    owner_key: str = Field(min_length=1, max_length=768)
+    retention_days: int = Field(ge=1, le=365)
+    semantic_version: str = Field(pattern=r"^\d+\.\d+\.\d+$")
+    input_schema_hash: str = Field(min_length=64, max_length=64)
+    cases: list[ScenarioCase] = Field(min_length=1, max_length=100)
+    content_hash: str = Field(min_length=64, max_length=64)
+    untrusted_data: Literal[True] = True
+    created_at: datetime
+
+
+class ScenarioFileFixture(StrictModel):
+    id: str
+    project_id: str
+    name: str = Field(min_length=1, max_length=256)
+    opaque_ref: str = Field(min_length=1, max_length=512)
+    media_type: str = Field(min_length=1, max_length=128)
+    size_bytes: int = Field(ge=1, le=50_000_000)
+    content_hash: str = Field(min_length=64, max_length=64)
+    approved_by: str = Field(min_length=1, max_length=768)
+    expires_at: datetime
+    created_at: datetime
+
+
+class ScenarioSanitizedRunApproval(StrictModel):
+    id: str
+    project_id: str
+    source_run_id: str
+    evidence_hash: str = Field(min_length=64, max_length=64)
+    approved_by: str = Field(min_length=1, max_length=768)
+    expires_at: datetime
+    created_at: datetime
+
+
+class PreviewResourceMapping(StrictModel):
+    kind: Literal["model", "dataset", "tool", "trigger"]
+    logical_ref: str = Field(min_length=1, max_length=512)
+    target_ref: str = Field(min_length=1, max_length=512)
+    secret: Literal[False] = False
+    production: Literal[False] = False
+
+
+class PreviewEnvironment(StrictModel):
+    id: str
+    project_id: str
+    target_key: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=256)
+    classification: Literal["non_production"] = "non_production"
+    enabled: bool
+    default_ttl_seconds: int = Field(ge=60, le=86_400)
+    production_secret_mapping: None = None
+    credential_plaintext: None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ScenarioRunPolicy(StrictModel):
+    timeout_seconds: int = Field(default=120, ge=1, le=300)
+    max_cases: int = Field(default=20, ge=1, le=100)
+    max_total_tokens: int = Field(default=100_000, ge=1, le=10_000_000)
+    max_estimated_cost_microusd: int = Field(default=5_000_000, ge=0)
+    token_cost_microusd_per_1k: int = Field(default=5_000, ge=0, le=10_000_000)
+    allowed_side_effects: set[PreviewSideEffect] = Field(default_factory=set)
+    external_side_effects_confirmed: bool = False
+
+
+class ScenarioEvidenceBinding(StrictModel):
+    candidate_id: str
+    candidate_workspace_version_id: str
+    candidate_hash: str = Field(min_length=64, max_length=64)
+    mapping_hash: str = Field(min_length=64, max_length=64)
+    suite_id: str
+    suite_version: str
+    suite_hash: str = Field(min_length=64, max_length=64)
+    policy_hash: str = Field(min_length=64, max_length=64)
+    environment_id: str
+    expires_at: datetime
+    binding_hash: str = Field(min_length=64, max_length=64)
+
+
+class ScenarioCaseEvidence(StrictModel):
+    scenario_id: str
+    scenario_name: str
+    status: Literal["passed", "failed", "timeout", "cancelled", "error"]
+    passed: bool
+    quality_score: float = Field(ge=0, le=100)
+    invariant_results: list[dict[str, Any]] = Field(default_factory=list)
+    output_summary: dict[str, Any] = Field(default_factory=dict)
+    input_shape: dict[str, str] = Field(default_factory=dict)
+    failed_node_id: str | None = Field(default=None, max_length=128)
+    error_code: str | None = Field(default=None, max_length=128)
+    error_message: str | None = Field(default=None, max_length=1_000)
+    latency_ms: int | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
+    estimated_cost_microusd: int | None = Field(default=None, ge=0)
+    human_escalations: int = Field(default=0, ge=0)
+    side_effects: list[PreviewSideEffect] = Field(default_factory=list)
+
+
+class CandidateScenarioReport(StrictModel):
+    candidate_id: str
+    candidate_label: str
+    binding: ScenarioEvidenceBinding
+    cases: list[ScenarioCaseEvidence]
+    pass_rate: float = Field(ge=0, le=1)
+    quality_score: float = Field(ge=0, le=100)
+    latency_ms: int | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
+    estimated_cost_microusd: int | None = Field(default=None, ge=0)
+    human_escalations: int = Field(default=0, ge=0)
+    side_effects: list[PreviewSideEffect] = Field(default_factory=list)
+    failure_clusters: list[dict[str, Any]] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+    cleanup_verified: bool = False
+
+
+class ScenarioComparison(StrictModel):
+    candidate_ids: list[str] = Field(min_length=1, max_length=20)
+    dimensions: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    regressions: dict[str, list[str]] = Field(default_factory=dict)
+    missing_evidence: dict[str, list[str]] = Field(default_factory=dict)
+    gate_status: Literal["unconfigured", "passed", "failed", "stale"] = (
+        "unconfigured"
+    )
+    gate_failures: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class PreviewFixture(StrictModel):
+    id: str
+    project_id: str
+    scenario_run_id: str
+    candidate_id: str
+    environment_id: str
+    label: str
+    status: PreviewFixtureStatus
+    idempotency_key: str
+    import_id: str | None = None
+    app_id: str | None = None
+    receipt: dict[str, Any] = Field(default_factory=dict)
+    cleanup_attempts: int = Field(default=0, ge=0)
+    absence_verified_at: datetime | None = None
+    expires_at: datetime
+    version: int = Field(ge=1)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ScenarioRun(StrictModel):
+    id: str
+    project_id: str
+    build_id: str
+    suite_id: str
+    environment_id: str
+    candidate_ids: list[str] = Field(min_length=1, max_length=20)
+    mappings: list[PreviewResourceMapping] = Field(default_factory=list, max_length=100)
+    policy: ScenarioRunPolicy
+    authorized_by: str
+    status: ScenarioRunStatus
+    cancel_requested: bool = False
+    reports: list[CandidateScenarioReport] = Field(default_factory=list)
+    comparison: ScenarioComparison | None = None
+    failure: dict[str, Any] | None = None
+    cleanup_verified: bool = False
+    version: int = Field(ge=1)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ScenarioBaseline(StrictModel):
+    id: str
+    project_id: str
+    build_id: str
+    suite_id: str
+    report_run_id: str
+    candidate_id: str
+    binding: ScenarioEvidenceBinding
+    report_hash: str = Field(min_length=64, max_length=64)
+    saved_by: str
+    created_at: datetime
+
+
+class RegressionGate(StrictModel):
+    id: str
+    project_id: str
+    build_id: str
+    suite_id: str
+    suite_version: str
+    min_pass_rate: float = Field(ge=0, le=1)
+    min_quality_score: float = Field(ge=0, le=100)
+    max_latency_regression_percent: float = Field(ge=0, le=1_000)
+    max_cost_regression_percent: float = Field(ge=0, le=1_000)
+    evidence_ttl_seconds: int = Field(ge=60, le=2_592_000)
+    policy_hash: str = Field(min_length=64, max_length=64)
+    configured_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ScenarioLabView(StrictModel):
+    project: Project
+    membership: Membership
+    build: BuildStudioView
+    input_schema: ScenarioInputSchema | None = None
+    environment: PreviewEnvironment | None = None
+    suites: list[ScenarioSuite] = Field(default_factory=list)
+    file_fixtures: list[ScenarioFileFixture] = Field(default_factory=list)
+    sanitized_run_sources: list[ScenarioSanitizedRunApproval] = Field(
+        default_factory=list
+    )
+    runs: list[ScenarioRun] = Field(default_factory=list)
+    baseline: ScenarioBaseline | None = None
+    baseline_state: dict[str, Any] = Field(default_factory=dict)
+    gate: RegressionGate | None = None
+    state: Literal["ready", "empty", "partial_error", "permission_denied", "offline"]
+    message: str
+    generated_at: datetime = Field(default_factory=utc_now)
