@@ -818,7 +818,7 @@ def test_bad_setup_and_failed_patch_do_not_move_a_source_head(tmp_path) -> None:
 
 def test_store_migration_and_blueprint_visibility_are_project_scoped(tmp_path) -> None:
     service, _build_service, studio_store, _agent_store, auth, project, build = _stack(tmp_path)
-    assert studio_store.schema_version() == 4
+    assert studio_store.schema_version() == 7
     gallery = service.gallery(
         auth,
         project_id=project.id,

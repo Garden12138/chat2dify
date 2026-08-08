@@ -132,6 +132,7 @@ class AgentApplicationService:
         message: str,
         constraints: RunConstraints | None = None,
         budget: AgentBudget | None = None,
+        dispatch: bool = True,
     ) -> AgentRun:
         session = self.store.get_session(session_id)
         if session.status != SessionStatus.ACTIVE:
@@ -175,8 +176,16 @@ class AgentApplicationService:
                 budget=budget or AgentBudget(),
             )
         )
-        self.dispatcher.submit(run.id)
+        if dispatch:
+            self.dispatcher.submit(run.id)
         return run
+
+    def execute_run(self, run_id: str) -> AgentRun:
+        runtime = getattr(self.dispatcher, "runtime", None)
+        if runtime is None:
+            raise RuntimeError("The configured dispatcher cannot execute a durable Run inline.")
+        runtime.run(run_id)
+        return self.store.get_run(run_id)
 
     def cancel(self, run_id: str) -> AgentRun:
         run = self.store.get_run(run_id)

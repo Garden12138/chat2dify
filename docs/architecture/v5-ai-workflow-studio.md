@@ -1,9 +1,10 @@
 # Chat2Dify v5.0.0: AI Workflow Studio
 
-> - Status: Proposed
+> - Status: Released and release-gate verified
 > - Target branch: `v5.0.0`
 > - Baseline: released Chat2Dify `v4.0.0`
 > - Decision date: 2026-07-30
+> - Release verification date: 2026-08-08
 > - Product direction: make Dify application building, testing, releasing, and
 >   operating feel like one coherent AI-native product.
 
@@ -298,6 +299,18 @@ Run Center shows:
 It must not persist raw secrets, full sensitive payloads, or model
 chain-of-thought.
 
+An execution is associated with an Artifact only when the target Environment,
+successful Release Record, Dify published-workflow identity, and exact
+published version form one unambiguous chain. Apply Draft alone is not proof
+of the version that executed. Unsupported or missing upstream evidence remains
+visibly uncorrelated rather than being inferred from time or the current Draft.
+
+Execution persistence is deliberately shape-based: allowlisted status,
+latency, token/cost estimates, stable error class, affected node/path, and
+bounded input/output type shapes. The incident-to-repair handoff creates a
+normal typed Build context and a project-scoped Change Request; it carries no
+approval, Apply, or Publish authority.
+
 ## 7. Supporting platform capabilities
 
 These capabilities exist to enable the product surfaces:
@@ -368,6 +381,19 @@ SQLite remains available for local/single-user use. PostgreSQL and durable
 leases/outbox workers support team deployments. At-least-once job delivery
 must never become duplicate Dify, Git, notification, or cleanup writes.
 
+Build Agent Runs, isolated Scenario/Preview work, cleanup, scheduled
+regressions, notification delivery, and Release delivery use persisted jobs or
+outbox messages with leases, heartbeat, cancellation, bounded attempts,
+operation-specific intent/receipt, and terminal dead-letter or reconciliation
+states. A restarted worker never invokes a handler when a prior pending worker
+receipt makes the external outcome ambiguous.
+
+Release delivery is a transport boundary, not delegated release authority.
+The human Owner/Admin first creates and consumes the exact Apply Draft or
+separate Publish authorization in the request path. A worker may deliver only
+that persisted binding, with one attempt and an immediate authoritative Dify
+readback; it cannot originate, alter, broaden, or reuse the authorization.
+
 ### 7.6 Safe API and MCP
 
 External clients may inspect projects/artifacts, create a Change Request,
@@ -375,6 +401,13 @@ propose typed changes, run/read scenarios, read review, and preview a release.
 
 Approval decisions, Commit, Publish, credential plaintext, raw DSL, and
 arbitrary Patch remain unavailable to model-visible MCP tools.
+
+Scoped tokens are stored only as hashes, bind one human Principal membership
+and one Project, carry an explicit allowlist of the eight safe capabilities,
+expire, rotate and revoke atomically, and enforce a persisted per-minute rate
+limit. Project identity is derived from the token rather than accepted as a
+tool argument. Tool input uses extra-forbid schemas, so client content cannot
+add scopes or server-owned fields.
 
 ## 8. Product architecture
 

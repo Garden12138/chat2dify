@@ -530,6 +530,100 @@ class DifyPublishResult:
 
 
 @dataclass(frozen=True)
+class DifyPublishedWorkflow:
+    id: str
+    hash: str
+    version: str
+    created_at: int | None = None
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "DifyPublishedWorkflow":
+        return cls(
+            id=str(payload.get("id") or ""),
+            hash=str(payload.get("hash") or ""),
+            version=str(payload.get("version") or ""),
+            created_at=_int_or_none(payload.get("created_at")),
+        )
+
+
+@dataclass(frozen=True)
+class DifyWorkflowRunSummary:
+    id: str
+    version: str
+    status: str
+    elapsed_time: float | None
+    total_tokens: int | None
+    total_steps: int | None
+    created_at: int | None
+    finished_at: int | None
+    exceptions_count: int | None
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "DifyWorkflowRunSummary":
+        return cls(
+            id=str(payload.get("id") or ""),
+            version=str(payload.get("version") or ""),
+            status=str(payload.get("status") or ""),
+            elapsed_time=_float_or_none(payload.get("elapsed_time")),
+            total_tokens=_int_or_none(payload.get("total_tokens")),
+            total_steps=_int_or_none(payload.get("total_steps")),
+            created_at=_int_or_none(payload.get("created_at")),
+            finished_at=_int_or_none(payload.get("finished_at")),
+            exceptions_count=_int_or_none(payload.get("exceptions_count")),
+        )
+
+
+@dataclass(frozen=True)
+class DifyWorkflowRunDetail(DifyWorkflowRunSummary):
+    inputs: Any = None
+    outputs: Any = None
+    error: str | None = None
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "DifyWorkflowRunDetail":
+        summary = DifyWorkflowRunSummary.from_payload(payload)
+        return cls(
+            **summary.__dict__,
+            inputs=payload.get("inputs"),
+            outputs=payload.get("outputs"),
+            error=(str(payload.get("error")) if payload.get("error") else None),
+        )
+
+
+@dataclass(frozen=True)
+class DifyWorkflowNodeExecution:
+    id: str
+    predecessor_node_id: str | None
+    node_id: str | None
+    node_type: str | None
+    title: str | None
+    status: str
+    error: str | None
+    elapsed_time: float | None
+    inputs: Any = None
+    outputs: Any = None
+    process_data: Any = None
+    execution_metadata: Any = None
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "DifyWorkflowNodeExecution":
+        return cls(
+            id=str(payload.get("id") or ""),
+            predecessor_node_id=_string_or_none(payload.get("predecessor_node_id")),
+            node_id=_string_or_none(payload.get("node_id")),
+            node_type=_string_or_none(payload.get("node_type")),
+            title=_string_or_none(payload.get("title")),
+            status=str(payload.get("status") or ""),
+            error=(str(payload.get("error")) if payload.get("error") else None),
+            elapsed_time=_float_or_none(payload.get("elapsed_time")),
+            inputs=payload.get("inputs"),
+            outputs=payload.get("outputs"),
+            process_data=payload.get("process_data"),
+            execution_metadata=payload.get("execution_metadata"),
+        )
+
+
+@dataclass(frozen=True)
 class DifyWorkflowTrigger:
     id: str
     trigger_type: str
@@ -995,6 +1089,112 @@ class DifyClient:
         self._raise_for_response(response)
         body = self._json_object(response, "Dify publish response")
         return DifyPublishResult.from_payload(body)
+
+    def get_published_workflow(
+        self,
+        app_id: str,
+    ) -> DifyPublishedWorkflow | None:
+        """Read only the published identity needed for release correlation."""
+        self._ensure_logged_in()
+        response = self._get_with_auth_retry(f"/apps/{app_id}/workflows/publish")
+        self._raise_for_response(response)
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise DifyClientError(
+                f"Invalid Dify published workflow response: {response.text}"
+            ) from exc
+        if body is None:
+            return None
+        if not isinstance(body, dict):
+            raise DifyClientError(
+                "Dify published workflow response must be an object or null."
+            )
+        published = DifyPublishedWorkflow.from_payload(body)
+        if not published.id or not published.version or not published.hash:
+            raise DifyClientError(
+                "Dify published workflow identity is incomplete."
+            )
+        return published
+
+    def list_workflow_runs(
+        self,
+        app_id: str,
+        *,
+        status: str | None = None,
+        triggered_from: str = "app-run",
+        limit: int = 100,
+    ) -> list[DifyWorkflowRunSummary]:
+        """List bounded production run metadata without exporting payloads."""
+        self._ensure_logged_in()
+        params: dict[str, Any] = {
+            "limit": max(1, min(limit, 100)),
+            "triggered_from": triggered_from,
+        }
+        if status:
+            params["status"] = status
+        response = self._get_with_auth_retry(
+            f"/apps/{app_id}/workflow-runs",
+            params=params,
+        )
+        self._raise_for_response(response)
+        body = self._json_object(response, "Dify workflow run list response")
+        rows = body.get("data")
+        if not isinstance(rows, list):
+            raise DifyClientError(
+                "Dify workflow run list response must contain a data list."
+            )
+        return [
+            item
+            for row in rows
+            if isinstance(row, dict)
+            for item in [DifyWorkflowRunSummary.from_payload(row)]
+            if item.id
+        ]
+
+    def get_workflow_run(
+        self,
+        app_id: str,
+        run_id: str,
+    ) -> DifyWorkflowRunDetail:
+        self._ensure_logged_in()
+        response = self._get_with_auth_retry(
+            f"/apps/{app_id}/workflow-runs/{run_id}"
+        )
+        self._raise_for_response(response)
+        detail = DifyWorkflowRunDetail.from_payload(
+            self._json_object(response, "Dify workflow run detail response")
+        )
+        if not detail.id:
+            raise DifyClientError("Dify workflow run detail is missing its ID.")
+        return detail
+
+    def list_workflow_node_executions(
+        self,
+        app_id: str,
+        run_id: str,
+    ) -> list[DifyWorkflowNodeExecution]:
+        self._ensure_logged_in()
+        response = self._get_with_auth_retry(
+            f"/apps/{app_id}/workflow-runs/{run_id}/node-executions"
+        )
+        self._raise_for_response(response)
+        body = self._json_object(
+            response,
+            "Dify workflow node execution list response",
+        )
+        rows = body.get("data")
+        if not isinstance(rows, list):
+            raise DifyClientError(
+                "Dify workflow node execution response must contain a data list."
+            )
+        return [
+            item
+            for row in rows
+            if isinstance(row, dict)
+            for item in [DifyWorkflowNodeExecution.from_payload(row)]
+            if item.id
+        ]
 
     def list_workflow_triggers(self, app_id: str) -> list[DifyWorkflowTrigger]:
         self._ensure_logged_in()

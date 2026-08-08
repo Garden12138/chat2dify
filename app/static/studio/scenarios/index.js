@@ -81,6 +81,7 @@ function bindActions() {
   document.querySelector("#studio-scenario-save-baseline").addEventListener("click", () => void saveBaseline());
   document.querySelector("#studio-scenario-save-gate").addEventListener("click", () => void saveGate());
   document.querySelector("#studio-scenario-approve-source").addEventListener("click", () => void approveSanitizedSource());
+  document.querySelector("#studio-scenario-baseline-candidate").addEventListener("change", updateReviewHandoff);
 }
 
 async function reconnect() {
@@ -532,6 +533,7 @@ function renderRun(run) {
   document.querySelector("#studio-scenario-cleanup").textContent = presentation.cleanupMessage;
   document.querySelector("#studio-scenario-cleanup").dataset.ok = String(presentation.releaseEligible);
   setEvidenceActions(presentation.releaseEligible && rows.length > 0);
+  updateReviewHandoff();
 }
 
 function comparisonTable(rows) {
@@ -567,6 +569,32 @@ function setEvidenceActions(enabledValue) {
   document.querySelector("#studio-scenario-save-baseline").disabled = !enabledValue;
   document.querySelector("#studio-scenario-save-gate").disabled = !enabledValue || !value("#studio-scenario-suite-select");
   document.querySelector("#studio-scenario-approve-source").disabled = !enabledValue;
+  const review = document.querySelector("#studio-scenario-review");
+  review.setAttribute("aria-disabled", String(!enabledValue));
+  review.tabIndex = enabledValue ? 0 : -1;
+}
+
+function updateReviewHandoff() {
+  const review = document.querySelector("#studio-scenario-review");
+  if (!state.currentRun || state.currentRun.status !== "completed" || state.currentRun.cleanup_verified !== true) {
+    review.href = "?studio=releases";
+    return;
+  }
+  const candidateId = value("#studio-scenario-baseline-candidate")
+    || state.currentRun.reports?.[0]?.candidate_id
+    || "";
+  if (!candidateId) return;
+  const params = new URLSearchParams({
+    studio: "releases",
+    build_id: state.buildId,
+    candidate_id: candidateId,
+    scenario_run_id: state.currentRun.id,
+  });
+  if (identity.repairProposalId) {
+    params.set("repair_proposal_id", identity.repairProposalId);
+    params.set("repair_proposal_version", String(identity.repairProposalVersion || 1));
+  }
+  review.href = `?${params.toString()}`;
 }
 
 async function saveBaseline() {

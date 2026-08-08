@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import AbstractContextManager
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from hashlib import sha256
 import threading
 from typing import Any, Callable, Literal, Protocol
@@ -69,6 +69,118 @@ class CommitServiceError(RuntimeError):
         self.status_code = status_code
 
 
+class SafeDraftHashConflict(CommitServiceError):
+    def __init__(self, *, expected_hash: str, current_hash: str) -> None:
+        super().__init__(
+            "DIFY_DRAFT_HASH_CONFLICT",
+            "Current Dify draft Hash differs from the exact authorized target Hash.",
+            status_code=409,
+        )
+        self.expected_hash = expected_hash
+        self.current_hash = current_hash
+
+
+@dataclass(frozen=True)
+class SafeDraftPreparation:
+    plan: WorkflowPlan
+    changes: list[dict[str, Any]]
+    guard: Any
+
+
+@dataclass(frozen=True)
+class SafeDraftWriteResult:
+    write_performed: bool
+    before_hash: str
+    after_hash: str
+    sync: dict[str, Any] | None
+
+
+class SafeWorkflowDraftWriter:
+    """Shared deterministic Commit boundary for v4 and governed v5 releases."""
+
+    def __init__(
+        self,
+        *,
+        validation: WorkflowValidationService,
+        compiler: DifyDslCompiler,
+        client_factory: Callable[[], AbstractContextManager[CommitClient]],
+    ) -> None:
+        self.validation = validation
+        self.compiler = compiler
+        self.client_factory = client_factory
+
+    def prepare(
+        self,
+        *,
+        before: WorkflowPlan,
+        proposed: WorkflowPlan,
+    ) -> SafeDraftPreparation:
+        normalized = normalize_plan_payload(
+            proposed.model_dump(mode="json"),
+            app_name=proposed.name,
+            app_description=proposed.description,
+            app_mode=proposed.app_mode,
+        )
+        final_plan = WorkflowPlan.model_validate(normalized.payload)
+        report = self.validation.validate(final_plan)
+        if not report.ok:
+            raise CommitServiceError(
+                "COMMIT_VALIDATION_FAILED",
+                "Proposed Workflow failed the final deterministic validation chain.",
+            )
+        changes = diff_plans(before, final_plan)
+        guard = guard_plan_change(before, final_plan, changes)
+        return SafeDraftPreparation(
+            plan=final_plan,
+            changes=changes,
+            guard=guard,
+        )
+
+    def apply(
+        self,
+        *,
+        app_id: str,
+        expected_hash: str,
+        preparation: SafeDraftPreparation,
+    ) -> SafeDraftWriteResult:
+        with self.client_factory() as client:
+            current = client.get_draft_workflow(app_id)
+            if current.hash != expected_hash:
+                raise SafeDraftHashConflict(
+                    expected_hash=expected_hash,
+                    current_hash=current.hash,
+                )
+            if preparation.guard.no_op:
+                return SafeDraftWriteResult(
+                    write_performed=False,
+                    before_hash=current.hash,
+                    after_hash=current.hash,
+                    sync=None,
+                )
+            graph = compile_plan_to_dify_graph(
+                preparation.plan,
+                compiler=self.compiler,
+                base_graph=deepcopy(current.graph),
+            )
+            sync = client.sync_draft_workflow(
+                app_id,
+                graph=graph,
+                features=deepcopy(current.features),
+                hash=current.hash,
+                environment_variables=deepcopy(current.environment_variables),
+                conversation_variables=[
+                    variable.model_dump(mode="json")
+                    for variable in preparation.plan.conversation_variables
+                ],
+            )
+        return SafeDraftWriteResult(
+            write_performed=True,
+            before_hash=current.hash,
+            after_hash=sync.hash,
+            sync=asdict(sync),
+        )
+
+
 class CommitResult(StrictModel):
     kind: Literal["modify"] = "modify"
     run_id: str
@@ -130,6 +242,11 @@ class ModificationCommitService:
         self.validation = validation
         self.compiler = compiler
         self.client_factory = client_factory
+        self.safe_writer = SafeWorkflowDraftWriter(
+            validation=validation,
+            compiler=compiler,
+            client_factory=client_factory,
+        )
         self._locks_guard = threading.Lock()
         self._locks: dict[str, threading.Lock] = {}
 
@@ -219,82 +336,36 @@ class ModificationCommitService:
             },
         )
         try:
-            normalized = normalize_plan_payload(
-                plan.model_dump(mode="json"),
-                app_name=plan.name,
-                app_description=plan.description,
-                app_mode=plan.app_mode,
-            )
-            final_plan = WorkflowPlan.model_validate(normalized.payload)
-            report = self.validation.validate(final_plan)
-            if not report.ok:
-                raise CommitServiceError(
-                    "COMMIT_VALIDATION_FAILED",
-                    "Workspace head failed the final deterministic validation chain.",
-                )
             before = WorkflowPlan.model_validate(run.snapshot.base_plan)
-            changes = diff_plans(before, final_plan)
-            guard = guard_plan_change(before, final_plan, changes)
-            if not guard.ok:
+            preparation = self.safe_writer.prepare(
+                before=before,
+                proposed=plan,
+            )
+            if not preparation.guard.ok:
                 self.approval.assert_destructive_approval(
                     run,
                     workspace_version_id,
                 )
-            with self.client_factory() as client:
-                current = client.get_draft_workflow(run.snapshot.app_id)
-                if current.hash != run.base_hash:
-                    return self._conflict(
-                        committing,
-                        approval,
-                        workspace_version_id,
-                        current_hash=current.hash,
-                    )
-                idempotency_key = _idempotency_key(
+            written = self.safe_writer.apply(
+                app_id=run.snapshot.app_id,
+                expected_hash=run.base_hash,
+                preparation=preparation,
+            )
+            result = CommitResult(
+                run_id=run.id,
+                workspace_version_id=workspace_version_id,
+                approval_id=approval.id,
+                idempotency_key=_idempotency_key(
                     run.id,
                     workspace_version_id,
                     approval.id,
-                )
-                if guard.no_op:
-                    result = CommitResult(
-                        run_id=run.id,
-                        workspace_version_id=workspace_version_id,
-                        approval_id=approval.id,
-                        idempotency_key=idempotency_key,
-                        status="noop",
-                        write_performed=False,
-                        base_hash=run.base_hash,
-                        new_hash=run.base_hash,
-                    )
-                else:
-                    graph = compile_plan_to_dify_graph(
-                        final_plan,
-                        compiler=self.compiler,
-                        base_graph=deepcopy(run.snapshot.base_graph),
-                    )
-                    sync = client.sync_draft_workflow(
-                        run.snapshot.app_id,
-                        graph=graph,
-                        features=deepcopy(current.features),
-                        hash=current.hash,
-                        environment_variables=deepcopy(
-                            current.environment_variables
-                        ),
-                        conversation_variables=[
-                            variable.model_dump(mode="json")
-                            for variable in final_plan.conversation_variables
-                        ],
-                    )
-                    result = CommitResult(
-                        run_id=run.id,
-                        workspace_version_id=workspace_version_id,
-                        approval_id=approval.id,
-                        idempotency_key=idempotency_key,
-                        status="committed",
-                        write_performed=True,
-                        base_hash=run.base_hash,
-                        new_hash=sync.hash,
-                        sync=asdict(sync),
-                    )
+                ),
+                status="committed" if written.write_performed else "noop",
+                write_performed=written.write_performed,
+                base_hash=run.base_hash,
+                new_hash=written.after_hash,
+                sync=written.sync,
+            )
             completed = AgentRun.model_validate(
                 {
                     **committing.transition_to(RunPhase.COMPLETED).model_dump(),
@@ -326,6 +397,14 @@ class ModificationCommitService:
                 data={"status": result.status},
             )
             return result
+        except SafeDraftHashConflict as exc:
+            return self._conflict(
+                committing,
+                approval,
+                workspace_version_id,
+                current_hash=exc.current_hash,
+                message=str(exc),
+            )
         except DifyConflictError as exc:
             return self._conflict(
                 committing,

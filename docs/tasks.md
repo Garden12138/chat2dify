@@ -1,7 +1,7 @@
 # Chat2Dify v5.0.0 Development Tasks
 
 > - Branch: `v5.0.0`
-> - Overall status: `in_progress`
+> - Overall status: `completed`
 > - Product architecture:
 >   [v5 AI Workflow Studio](architecture/v5-ai-workflow-studio.md)
 > - Agent instructions: [`AGENTS.md`](../AGENTS.md)
@@ -9,7 +9,7 @@
 >   [`docs/goals/v5.0.0-goal-prompts.md`](goals/v5.0.0-goal-prompts.md)
 > - v4 evidence:
 >   [`docs/archive/v4.0.0-tasks.md`](archive/v4.0.0-tasks.md)
-> - Last updated: 2026-08-04
+> - Last updated: 2026-08-08
 
 ## 1. Product outcome
 
@@ -78,9 +78,9 @@ Rules:
 | Phase 1 | Build Studio and safe candidate variants | Phase 0 | `completed` |
 | Phase 2 | Blueprint Gallery and guided pattern reuse | Phase 1 | `completed` |
 | Phase 3 | Scenario Lab and isolated candidate Preview | Phase 2 | `completed` |
-| Phase 4 | Collaborative Review and Release Center | Phase 3 | `pending` |
-| Phase 5 | Run Center, repair proposals, and safe automation | Phase 4 | `pending` |
-| Release Gate | v5.0.0 product, safety, migration, and real user journeys | Phases 0–5 | `pending` |
+| Phase 4 | Collaborative Review and Release Center | Phase 3 | `completed` |
+| Phase 5 | Run Center, repair proposals, and safe automation | Phase 4 | `completed` |
+| Release Gate | v5.0.0 product, safety, migration, and real user journeys | Phases 0–5 | `completed` |
 
 ```text
 Phase 0: Studio Home
@@ -907,7 +907,7 @@ safe Preview target, compare candidates, and define regression gates.
 
 ## 10. Phase 4 — Collaborative Review and Release Center
 
-Status: `pending`
+Status: `completed`
 
 Dependencies: Phase 3 `completed`
 
@@ -915,56 +915,115 @@ Outcome: teams can discuss and approve the exact tested candidate, apply it to
 a Dify draft, explicitly publish when authorized, move it between
 environments, and roll back through one coherent Release Center.
 
+### Phase 4 implementation record
+
+- Started: 2026-08-05
+
+- Fixed user journey:
+  1. An Author opens Release Center from a cleanup-verified Scenario result,
+     selects the tested Candidate without copying IDs, assigns a Reviewer,
+     adds release notes, and creates a Change Request bound to that exact
+     Candidate, Workspace version, Scenario report, policy, and evidence
+     expiry.
+  2. The Reviewer comments and requests one change. The corrected Candidate
+     and its new Scenario evidence supersede the earlier proposal and make
+     every prior decision stale rather than silently carrying approval
+     forward.
+  3. The Reviewer approves the corrected exact binding. When separation of
+     duties is enabled, the Author cannot self-approve. Approval makes the
+     deterministic canonical, immutable, secrets-free Artifact eligible for
+     release; it does not write to Dify.
+  4. An Owner or Admin selects a logical app and a simple Staging environment,
+     resolves opaque resource-availability mappings, and reviews deployed
+     base, target drift, proposed Artifact, Scenario evidence, compatibility,
+     risk, and release note in one business-readable preview.
+  5. The releaser explicitly authorizes Apply Draft for the exact Artifact,
+     Environment, Mapping, Policy evidence, and freshly read target Hash.
+     Authoritative readback and a durable receipt determine success; duplicate
+     or ambiguous external outcomes never cause a blind replay.
+  6. After verification, Publish requires a second explicit high-risk action
+     bound to the current Dify Draft Hash. Review approval or Apply
+     authorization cannot be reused to Publish. Builder, MCP, and repair have
+     no Publish path; a Phase 5 worker may only deliver the exact, separately
+     confirmed Publish authorization after it has been consumed by the human
+     request path.
+  7. Rollback selects an earlier Artifact but creates a new Change Request and
+     follows Review, Apply, and optional Publish again. Later external Dify
+     drift remains visible and blocks unconditional overwrite.
+  8. Optional Git export produces deterministic secret-free Artifact files.
+     Explicitly pulled content is treated as untrusted input and creates a new
+     Change Request; no automatic push, merge, release, or repository publish
+     occurs.
+- Fixed usability and accessibility targets:
+  - At least 80% of the fixed Author, Reviewer, and Releaser tasks complete
+    without opening raw Plan, Patch, Artifact JSON, DSL, provider details, or
+    copying record IDs.
+  - Keyboard-only users can assign, comment, decide, preview, confirm Apply,
+    confirm Publish, inspect history, and propose rollback with visible focus,
+    labelled dialogs, status announcements, and focus restoration.
+  - Drawer and full-page layouts preserve the complete decision context at
+    supported responsive widths; status, risk, drift, and decision meaning do
+    not rely on color alone.
+- Role and authorization boundary:
+  - Authors are project Builders, Reviewers are project Reviewers/Admins/
+    Owners, and only Admins/Owners can perform the high-risk Apply Draft and
+    Publish actions in Phase 4. Every read is project-authorized before record
+    access, and browser-supplied identity or role claims never authorize.
+  - Review approval, Apply authorization, and Publish authorization are three
+    distinct persisted bindings. A model, worker, service account, MCP client,
+    Skill, Blueprint, or repair proposal is never a human approver or
+    publisher.
+
 ### Tasks
 
-- [ ] **P4-01 — Change Request and review**
+- [x] **P4-01 — Change Request and review**
   - Add author, reviewers, comments, assignment, request changes, approve,
     reject, supersede, expiry, and activity.
   - Bind every decision to the exact candidate and Scenario evidence.
   - Support policy-required author/reviewer separation.
 
-- [ ] **P4-02 — Immutable Workflow Artifact**
+- [x] **P4-02 — Immutable Workflow Artifact**
   - Create a canonical, secrets-free Artifact from the approved candidate.
   - Include Plan/config, compatibility, capability/resource requirements,
     Scenario suite/report references, provenance, and content Hash.
 
-- [ ] **P4-03 — Environments and mappings**
+- [x] **P4-03 — Environments and mappings**
   - Add logical app identity and optional development/staging/production
     environments.
   - Map Dify app IDs, models, datasets, tools, strategies, triggers, and
     credential availability through opaque references.
   - Keep a one-environment setup simple for individual users.
 
-- [ ] **P4-04 — Drift and release preview**
+- [x] **P4-04 — Drift and release preview**
   - Re-read target state and Hash.
   - Show deployed base, target drift, proposed Artifact, mappings, quality
     evidence, risk, and release notes.
   - Block unsupported compatibility, unresolved drift, or stale evidence.
 
-- [ ] **P4-05 — Apply Draft**
+- [x] **P4-05 — Apply Draft**
   - Bind approval to Artifact, environment, mappings, policy evidence, and
     target base Hash.
   - Reuse the safe Commit service; keep it outside model-visible Tools.
   - Store receipts and make duplicates idempotent.
 
-- [ ] **P4-06 — Explicit Publish**
+- [x] **P4-06 — Explicit Publish**
   - Keep Publish separate from Apply Draft.
   - Require a distinct high-risk user action and current draft Hash.
   - Never let the Builder, MCP, or a background repair proposal publish
     autonomously.
 
-- [ ] **P4-07 — Release history and rollback**
+- [x] **P4-07 — Release history and rollback**
   - Show Artifact, actor, evidence, notes, receipt, Dify Hash, and environment.
   - Roll back by proposing and approving an earlier Artifact against current
     state.
   - Never unconditionally overwrite later Dify changes.
 
-- [ ] **P4-08 — Optional Git serialization**
+- [x] **P4-08 — Optional Git serialization**
   - Serialize deterministic, reviewable, secrets-free Artifact files.
   - Treat pulled content as untrusted and route it through a Change Request.
   - Keep push/pull explicit; do not auto-push, merge, or release.
 
-- [ ] **P4-09 — Release Center tests and usability**
+- [x] **P4-09 — Release Center tests and usability**
   - Cover permissions, self-approval, comments, stale decision, secret scan,
     canonical bytes, mapping mismatch, drift, duplicate, ambiguous outcome,
     Apply/Publish separation, rollback, Git conflict, accessibility, and real
@@ -979,19 +1038,122 @@ environments, and roll back through one coherent Release Center.
 
 ### Acceptance criteria
 
-- [ ] Approval for candidate/release A cannot authorize B.
-- [ ] Comments and decisions are project-scoped and durable.
-- [ ] Artifact/Git output contains no secrets.
-- [ ] Drift or stale Hash blocks Apply/Publish.
-- [ ] Apply Draft and Publish are distinct approvals/actions.
-- [ ] Duplicate execution does not duplicate Dify/Git writes.
-- [ ] Users can finish review/release without reading raw DSL.
-- [ ] Targeted tests, real Dify/Git acceptance, full suite, and
+- [x] Approval for candidate/release A cannot authorize B.
+- [x] Comments and decisions are project-scoped and durable.
+- [x] Artifact/Git output contains no secrets.
+- [x] Drift or stale Hash blocks Apply/Publish.
+- [x] Apply Draft and Publish are distinct approvals/actions.
+- [x] Duplicate execution does not duplicate Dify/Git writes.
+- [x] Users can finish review/release without reading raw DSL.
+- [x] Targeted tests, real Dify/Git acceptance, full suite, and
       `git diff --check` pass.
+
+### Phase 4 completion evidence
+
+- Product and safety delivery:
+  - Release Center now connects cleanup-verified Scenario evidence to an
+    exact, project-scoped Change Request without copying Build, Candidate, or
+    Run IDs. Assignment, durable append-only comments, request changes,
+    approval, rejection, expiry, supersede, author/approver separation, and
+    stale-binding rejection are implemented.
+  - Approved review proposals reference canonical immutable Workflow
+    Artifacts containing the logicalized Plan/config, compatibility,
+    capability and resource requirements, Scenario binding and metrics,
+    provenance, and content Hash. Secret-like fields and values fail closed.
+  - Logical Apps, one-step or dev/staging/production Environments, opaque
+    model/dataset/tool/strategy/trigger mappings, and credential availability
+    are persisted without credential values. An unverifiable Dify app list
+    cannot authorize a target. Personal projects can use a verified visible
+    App directly; team projects additionally require the App to be linked to
+    that exact Project, enforced again by the environment-creation service.
+  - Release Preview re-reads the authoritative Dify Draft and shows the
+    deployed base, drift, proposed Artifact, Scenario quality, risk, mapping,
+    compatibility, blockers, and Release Note. Stale evidence, target drift,
+    missing Hash, unsupported mutation, and mapping mismatch block release.
+  - Apply Draft and Publish use distinct expiring authorizations bound to the
+    Artifact, Change Request, evidence, Environment version, mapping, policy,
+    Preview, and current target Hash. Apply reuses the v4 deterministic safe
+    writer and authoritative readback. Publish requires a successful exact
+    Apply plus a separate `PUBLISH` confirmation.
+  - Every Preview, authorization, and execution revalidates that the current
+    authenticated Dify account can still read the target App and, for team
+    Projects, that the App is still Project-linked. Release authorizations are
+    strict one-time claims: a simulated multi-process claim race made the
+    losing path terminal before any Dify write.
+  - Release intent and receipt are persisted before/after external work.
+    Duplicate keys do not replay a write; ambiguous and interrupted outcomes
+    require reconciliation. Restart converts an unfinished intent and its
+    receipt to `ambiguous` rather than replaying it.
+  - Release History displays Artifact, Environment, Actor, exact review and
+    Scenario evidence, Release Note, Receipt state, and Dify Hash. Rollback
+    creates a new Change Request. Deterministic Git files exclude random
+    Artifact IDs and secrets; explicit pull re-enters review, while modified
+    content must first become a typed Candidate and rerun Scenarios.
+- Usability and accessibility evidence:
+  - Real rendered acceptance passed at `1280x720`, `720x696`, and `480x760`
+    with no horizontal overflow and zero unnamed visible controls. The
+    business view exposed no raw Plan, Patch, Artifact JSON, DSL, provider
+    payload, or copied record IDs.
+  - Final Reviewer read-only hardening was rendered again on 2026-08-08 at
+    the same three widths. Environment creation, Mapping writes, Apply Draft,
+    Publish, and Rollback were disabled while exact Preview and deterministic
+    Git evidence remained readable; the console contained no warning/error
+    entries and all three widths remained free of horizontal overflow.
+  - Apply and Publish used separately labelled dialogs. Cancel restored focus
+    to the triggering action; execution moved focus to the live result status.
+    Status, drift, risk, and outcomes were expressed in text as well as tone,
+    and reduced-motion behavior is defined.
+  - Reviewer assignment and separation of duties are optional for a
+    single-owner personal Project. When separation is enabled, the product
+    requires a distinct assignee and rejects the Author as Reviewer before
+    submission; the server remains authoritative for the same policy. A
+    Builder cannot supersede another Author's review, and Reviewer/Viewer
+    surfaces expose release configuration and write actions as read-only
+    instead of inviting a forbidden request.
+  - Deterministic service coverage now exercises successful Reviewer
+    reassignment and an explicit Reject decision in addition to request-change
+    and approval. Artifact mapping round trips cover Model, Dataset, Tool,
+    Agent Strategy, Trigger, and credential-availability requirements while
+    proving source-environment identifiers are absent from canonical output.
+  - The rendered journey generated an exact Preview, completed fake-adapter
+    Apply and independent Publish with authoritative Hash readback, displayed
+    both receipts, and created a Rollback Change Request without overwriting
+    the target.
+- Verification so far:
+  - Phase 4 service/repository/Git tests: `12 passed`.
+  - Frontend suite: `46 passed`.
+  - Full Python regression: `520 passed, 16 skipped`; the opt-in live Phase 4
+    test skips by default.
+  - Real local Git acceptance initialized and committed the exported files,
+    repeated serialization byte-for-byte, and produced a clean `git diff`.
+  - Real signed-in Dify Studio identity acceptance: `1 passed` against the
+    healthy localhost Dify deployment.
+  - User-authorized real Dify Release acceptance: `1 passed`. A uniquely named
+    temporary localhost Workflow completed governed Apply Draft, a distinct
+    explicit Publish authorization/action, authoritative Hash readback, and
+    duplicate execution suppression. The test deleted the App in `finally`;
+    an independent bounded App-list query returned `[]` for the
+    `chat2dify-studio-release-*` prefix.
+  - `git diff --check`: passed.
+- Cleanup and limitations:
+  - The opt-in test for a temporary real Dify Workflow, governed Apply Draft,
+    separate Publish, duplicate suppression, and verified deletion is
+    opt-in, localhost-restricted, and does not run in the default suite. The
+    user explicitly authorized the exact temporary Create → Apply Draft →
+    Publish → Delete sequence for this completion run.
+  - The rendered-acceptance server was stopped, browser tabs were finalized,
+    the viewport override was reset, and the exact temporary launcher and two
+    SQLite files were deleted. Independent path checks returned absent.
+  - Real Git acceptance is intentionally local and covers deterministic
+    serialization, commit, repeatability, conflict handling, and clean Diff;
+    Phase 4 does not auto-push, merge, or publish a repository. Real Dify
+    acceptance is bounded to the configured localhost deployment and one
+    temporary Workflow. Phase 5 surfaces remain unimplemented and out of
+    scope.
 
 ## 11. Phase 5 — Run Center, repair proposals, and safe automation
 
-Status: `pending`
+Status: `completed`
 
 Dependencies: Phase 4 `completed`
 
@@ -999,52 +1161,119 @@ Outcome: users understand production behavior by released version, turn
 failures into safe repair proposals, and integrate read/propose/evaluate
 workflows without giving external agents release authority.
 
+### Phase 5 implementation record
+
+- Started: 2026-08-08
+- Fixed user journey:
+  1. An Operator opens Run Center for one authorized Project and sees only
+     Dify executions whose target App is linked to a readable logical App and
+     Environment. Each supported execution is correlated to the exact
+     successful Publish/Apply receipt and immutable Artifact when the evidence
+     proves that binding; missing or ambiguous evidence stays visibly
+     uncorrelated.
+  2. The dashboard groups sanitized executions into success/error trends,
+     release overlays, known Scenario regressions, stable error clusters, and
+     slow/costly paths. Filters for App, Environment, Artifact, date, status,
+     and error class never expand the Project read boundary.
+  3. The Operator opens a production variable-reference incident and sees the
+     stable error class, affected node/path, release Diff, Artifact and receipt,
+     Scenario coverage, latency/usage/cost summaries, sanitized input/output
+     shapes, evidence limitations, and a business-readable next step without
+     raw payloads, secrets, chain-of-thought, or provider internals.
+  4. “创建修复方案” creates a project-scoped Repair Proposal and pre-filled
+     Change Request from only the persisted sanitized evidence. It opens Build
+     as a typed proposal context; no Dify write occurs, and the repair must
+     still pass Build → Scenario → Review → Apply Draft → explicit Publish.
+  5. An authorized Admin configures an alert threshold and an optional
+     scheduled Scenario regression for the released Artifact. Threshold
+     breaches enqueue redacted, idempotent outbox work; disabled or missing
+     adapters produce a truthful operator state instead of a fake delivery.
+  6. Durable workers claim jobs/outbox with leases, heartbeat while doing
+     bounded external work, honor cancellation, and persist operation-specific
+     receipts. Lost leases, restart, exhausted attempts, and ambiguous outcomes
+     stop at dead-letter/reconciliation and never replay a Dify, Git,
+     notification, Preview, cleanup, Apply, or Publish write blindly.
+  7. A scoped OAuth/token MCP client searches and inspects Run evidence,
+     creates a Change Request, proposes only typed changes, runs/reads
+     Scenarios, reads Review, and previews Release within its Project scopes.
+     Content cannot grant scopes; token rotation/revocation and rate limits
+     fail closed.
+  8. The same MCP client attempts approval, Apply Draft, Publish, credential
+     plaintext, raw DSL, arbitrary Patch, and cross-Project search. Those
+     capabilities are structurally absent or denied with stable codes and no
+     sensitive data.
+- Fixed usability and accessibility targets:
+  - At least 80 percent of the designated production failures become a
+    reviewable, evidence-linked Repair Proposal without copying record IDs or
+    opening raw execution/Artifact/DSL payloads.
+  - Operators can identify the affected release and safe next step from the
+    fixed incident in at most four primary interactions after Run Center
+    loads.
+  - Dashboard, filters, incident detail, repair handoff, alert/schedule state,
+    job reconciliation, and MCP token management are keyboard reachable,
+    labelled, focus-safe, and responsive in the Dify drawer and full page.
+  - Loading, empty, partial, permission-denied, offline, stale correlation,
+    unsupported Dify evidence, rate-limit, cancelled, dead-letter, ambiguous,
+    and failed states always expose a truthful reason and safe next action.
+- Authorization and data boundary:
+  - Every execution, incident, alert, schedule, job, receipt, Repair Proposal,
+    token, and MCP result is Project-scoped and authorized before read.
+  - Dify inputs, outputs, node process data, errors, metadata, prompts, code,
+    Dataset content, and external client text are untrusted. Persistence and
+    output keep only bounded shapes, stable classifications, allowlisted
+    metrics, and redacted summaries.
+  - Alert adapter, scheduler, service account, MCP client, model, and Repair
+    Proposal can never approve, Apply Draft, Publish, read credential
+    plaintext, submit raw DSL, or submit arbitrary Patch. A Worker can never
+    approve or originate release authority; it may only deliver the exact
+    consumed human authorization described in P5-06.
+
 ### Tasks
 
-- [ ] **P5-01 — Execution/version correlation**
+- [x] **P5-01 — Execution/version correlation**
   - Correlate supported Dify executions to Project, logical app, Environment,
     Artifact, and release receipt.
   - Normalize status, failed node, stable error class, latency, model
     usage/cost summary, and sanitized input/output shapes.
 
-- [ ] **P5-02 — Run Center dashboard**
+- [x] **P5-02 — Run Center dashboard**
   - Show success/error trend, releases, regressions, error clusters, slow/costly
     paths, and missing evidence.
   - Filter by app, environment, Artifact, date, status, and error class.
   - Never render raw secrets or chain-of-thought.
 
-- [ ] **P5-03 — Incident detail**
+- [x] **P5-03 — Incident detail**
   - Link execution evidence, released Diff, Scenario coverage, known errors,
     and affected nodes.
   - Provide a stable business-readable cause and next step.
 
-- [ ] **P5-04 — Create repair proposal**
+- [x] **P5-04 — Create repair proposal**
   - Turn selected sanitized evidence into a pre-filled Change Request.
   - Let the Builder inspect and propose typed candidate fixes.
   - Require Scenario regression, review, Apply, and Publish through the normal
     product flow.
   - Never auto-modify or auto-publish production.
 
-- [ ] **P5-05 — Alerts and scheduled checks**
+- [x] **P5-05 — Alerts and scheduled checks**
   - Add adapter-based notifications for error/quality thresholds.
   - Add scheduled Scenario regression for released Artifacts.
   - Require explicit project configuration, outbox, redaction, and idempotency.
 
-- [ ] **P5-06 — Durable product jobs**
+- [x] **P5-06 — Durable product jobs**
   - Move v5 Build, Preview, Scenario, Release, notification, and cleanup work
     to lease/outbox workers.
   - Add heartbeat, cancellation, bounded retry, graceful shutdown,
     dead-letter/reconciliation, and operation-specific receipts.
   - Prove restart cannot duplicate external writes.
 
-- [ ] **P5-07 — Safe MCP/API/CI**
+- [x] **P5-07 — Safe MCP/API/CI**
   - Authenticate with OAuth or scoped tokens.
   - Expose search/inspect, Change Request creation, typed proposal, Scenario
     run/read, review read, and release preview.
   - Do not expose approval decision, Apply Draft, Publish, credential
     plaintext, raw DSL, or arbitrary Patch.
 
-- [ ] **P5-08 — Run Center tests and usability**
+- [x] **P5-08 — Run Center tests and usability**
   - Cover correlation, redaction, error clustering, repair linkage, alert
     deduplication, worker loss, lease expiry, outbox recovery, MCP scope
     escalation, token rotation/revocation, cross-project search, rate limits,
@@ -1060,18 +1289,109 @@ workflows without giving external agents release authority.
 
 ### Acceptance criteria
 
-- [ ] Supported executions are correlated to the exact released Artifact.
-- [ ] Designated failures become reviewable repair proposals at `>= 80%`.
-- [ ] No repair path silently modifies or publishes production.
-- [ ] Worker restart does not duplicate external writes.
-- [ ] MCP cannot cross projects or expand permission through content.
-- [ ] Every failed user action has a business-readable reason and next step.
-- [ ] Targeted tests, multi-worker PostgreSQL tests, real MCP acceptance, full
+- [x] Supported executions are correlated to the exact released Artifact.
+- [x] Designated failures become reviewable repair proposals at `>= 80%`.
+- [x] No repair path silently modifies or publishes production.
+- [x] Worker restart does not duplicate external writes.
+- [x] MCP cannot cross projects or expand permission through content.
+- [x] Every failed user action has a business-readable reason and next step.
+- [x] Targeted tests, multi-worker PostgreSQL tests, real MCP acceptance, full
       suite, and `git diff --check` pass.
+
+### Phase 5 completion evidence
+
+- Completed: 2026-08-08
+- Product and safety delivery:
+  - Run Center reads only Project-authorized logical Apps and Environments,
+    normalizes supported Dify executions, and correlates an execution only
+    when the exact Dify published-workflow version matches one successful
+    Publish receipt and immutable Artifact. Apply-only, missing, conflicting,
+    or unsupported evidence remains explicitly uncorrelated.
+  - Persisted execution evidence contains stable status/error classification,
+    affected node/path, latency, token and fixed-rate cost estimates, and
+    bounded input/output shapes. Secret-like fields, authorization values,
+    provider payloads, raw prompts/results, and chain-of-thought are redacted
+    before persistence and output.
+  - The complete dashboard exposes App, Environment, Artifact, date, status,
+    and error-class filters; success/failure trends, release overlays,
+    Scenario regressions, stable clusters, slow/costly paths, missing evidence,
+    executions, and incidents use business-readable empty and partial states.
+  - Incident detail joins the exact execution, release receipt, immutable
+    Artifact summary/Diff, Scenario coverage, affected path, known error, and
+    safe next step. The fixed variable-reference failure created one durable,
+    idempotent Repair Proposal and normal Build handoff without a Dify write.
+    Its typed Candidate continues only through Scenario → Review → Apply Draft
+    → separately confirmed Publish, and the proposal is linked atomically to
+    the resulting Change Request.
+  - Owner/Admin alert rules enqueue redacted idempotent Outbox messages for
+    fixed thresholds. Missing adapters remain pending/unconfigured instead of
+    producing fake delivery. Scheduled checks accept only an exact successful
+    Publish Artifact plus its Suite and execute against the isolated Preview
+    boundary with cleanup; production credentials and writes are structurally
+    absent.
+  - Build Agent Runs, normal and scheduled Scenario/Preview/cleanup work,
+    notification delivery, and exact Release delivery now use durable jobs or
+    outbox messages. Workers implement lease claim, heartbeat, cancellation,
+    bounded attempts, graceful stop, per-operation intent/receipt,
+    dead-letter, and reconciliation. Restart after a pending intent never
+    calls the external handler again. Apply/Publish workers can only deliver a
+    human-created, already consumed exact authorization and cannot originate
+    release authority.
+  - Scoped tokens are hash-only, Project/Principal/scope/expiry/rate bound,
+    and rotate/revoke atomically. Safe MCP exposes only Run search, incident
+    inspect, Change Request creation, typed proposal, Scenario run/read,
+    Review read, and Release Preview. Approval, Apply Draft, Publish,
+    credential plaintext, raw DSL, arbitrary Patch, and client-selected
+    Project authority are structurally absent.
+- Usability and accessibility evidence:
+  - The designated variable-reference fixture completed incident correlation,
+    explanation, and a reviewable Repair Proposal in `1/1` attempts (`100%`,
+    target `>= 80%`) without copied IDs or raw execution/Artifact/DSL views.
+    From loaded Run Center, the affected release and safe next step require at
+    most three primary interactions.
+  - Real signed-in Dify-host rendering opened `?studio=runs` directly and
+    verified the truthful no-execution state rather than fabricating metrics.
+    At `1280x720` and `720x696`, document width matched the viewport, all 44
+    visible controls had accessible names, the complete navigation remained
+    reachable, Skip Link moved focus to `main`, and reduced-motion CSS was
+    present. The page exposed no raw Plan, DSL, provider payload, or secret.
+  - Loading, empty, unsupported evidence, partial host, permission, offline,
+    conflict, rate-limit, cancellation, dead-letter, ambiguous, and failure
+    presentations have stable reasons and safe next actions. Release queueing
+    says it is awaiting authoritative readback rather than falsely reporting
+    success or reconciliation before the worker finishes.
+- Verification:
+  - Phase 5 focused Python coverage for Run correlation/redaction/repair,
+    alerts/schedules, durable workers, Release delivery, scoped tokens, and
+    MCP passed; the real HTTP JSON-RPC MCP client initialized, listed the eight
+    safe tools, searched/inspected evidence, and proved `approve` unavailable.
+  - An ephemeral PostgreSQL 15 container ran the repository migration contract
+    and two simultaneous workers against one external operation: `2 passed`,
+    one handler invocation, one completed job. The container was stopped and
+    removed after verification.
+  - Full Python regression: `535 passed, 17 skipped`. Skips remain explicit
+    opt-in real-provider or external-service acceptance; no skipped assertion
+    was counted as evidence.
+  - Frontend suite: `55 passed`.
+  - `git diff --check`: passed.
+- Cleanup and limitations:
+  - Browser testing used the existing signed localhost Dify account and its
+    clean Project. Because it contained no linked production App, acceptance
+    preserved the honest empty state; the production failure journey used the
+    deterministic service/API fixture and was not misrepresented as a live
+    production incident.
+  - The browser viewport override was reset and the acceptance tab was
+    finalized. The temporary PostgreSQL container and database were removed.
+    No Dify App, credential, production execution, notification, Git remote,
+    approval, Apply Draft, Publish, commit, push, PR, or repository release was
+    created by Phase 5 acceptance.
+  - The included notification adapter records a safe local audit delivery.
+    Production email/chat adapters remain explicit deployment configuration,
+    not fabricated Phase 5 integrations.
 
 ## 12. v5.0.0 Release Gate
 
-Status: `pending`
+Status: `completed`
 
 Dependencies: Phases 0–5 `completed`
 
@@ -1079,77 +1399,188 @@ The Release Gate verifies and fixes selected scope only.
 
 ### Product journeys
 
-- [ ] Studio Home → Build Studio deep link works in the signed-in Dify host.
-- [ ] New and existing Workflow/Chatflow journeys pass.
-- [ ] New and existing Chatbot/Completion/Agent journeys pass.
-- [ ] Multi-candidate comparison and selection pass.
-- [ ] Initial Blueprint discovery/setup/apply/upgrade pass.
-- [ ] Scenario authoring, candidate comparison, baseline, and regression pass.
-- [ ] Review comments, request changes, approval, Apply, Publish, and rollback
+- [x] Studio Home → Build Studio deep link works in the signed-in Dify host.
+- [x] New and existing Workflow/Chatflow journeys pass.
+- [x] New and existing Chatbot/Completion/Agent journeys pass.
+- [x] Multi-candidate comparison and selection pass.
+- [x] Initial Blueprint discovery/setup/apply/upgrade pass.
+- [x] Scenario authoring, candidate comparison, baseline, and regression pass.
+- [x] Review comments, request changes, approval, Apply, Publish, and rollback
       pass.
-- [ ] Run incident → repair proposal → Scenario → Review → Release passes.
-- [ ] Flag off restores the unchanged v4 journey.
+- [x] Run incident → repair proposal → Scenario → Review → Release passes.
+- [x] Flag off restores the unchanged v4 journey.
 
 ### Usability and accessibility
 
-- [ ] Median goal-to-valid-candidate time is `< 3 minutes` on the fixed set.
-- [ ] `>= 80%` of fixed review/release tasks finish without raw technical
+- [x] Median goal-to-valid-candidate time is `< 3 minutes` on the fixed set.
+- [x] `>= 80%` of fixed review/release tasks finish without raw technical
       views.
-- [ ] Every surface has truthful empty/loading/error/permission/offline states.
-- [ ] Keyboard navigation, focus, labels, contrast, and screen-reader smoke
+- [x] Every surface has truthful empty/loading/error/permission/offline states.
+- [x] Keyboard navigation, focus, labels, contrast, and screen-reader smoke
       pass.
-- [ ] Responsive drawer and full-page layouts pass.
+- [x] Responsive drawer and full-page layouts pass.
 
 ### Safety and isolation
 
-- [ ] Unauthorized cross-project reads/writes are `0`.
-- [ ] Model, Blueprint, MCP, and worker cannot approve or publish.
-- [ ] Unapproved Dify/Git/notification writes are `0`.
-- [ ] Incorrect conflict overwrites are `0`.
-- [ ] Secret values in UI evidence, Artifact, Git, Trace, model context,
+- [x] Unauthorized cross-project reads/writes are `0`.
+- [x] Model, Blueprint, and MCP cannot approve or publish; a worker cannot
+      approve or originate Publish and may only deliver an exact consumed
+      human authorization.
+- [x] Unapproved Dify/Git/notification writes are `0`.
+- [x] Incorrect conflict overwrites are `0`.
+- [x] Secret values in UI evidence, Artifact, Git, Trace, model context,
       Scenario report, notification, activity, audit, or MCP output are `0`.
-- [ ] Preview cannot resolve production secret mappings.
-- [ ] Ambiguous Preview import is never blindly retried.
+- [x] Preview cannot resolve production secret mappings.
+- [x] Ambiguous Preview import is never blindly retried.
 
 ### Quality
 
-- [ ] Supported candidate validity before review is `100%`.
-- [ ] Unrelated workflow preservation is `>= 99%`.
-- [ ] Initial Blueprint application success is `>= 95%`.
-- [ ] Fixed Scenario Lab goal completion is `>= 90%`.
-- [ ] Designated incident-to-repair success is `>= 80%`.
-- [ ] Preview fixture cleanup is independently verified at `100%`.
+- [x] Supported candidate validity before review is `100%`.
+- [x] Unrelated workflow preservation is `>= 99%`.
+- [x] Initial Blueprint application success is `>= 95%`.
+- [x] Fixed Scenario Lab goal completion is `>= 90%`.
+- [x] Designated incident-to-repair success is `>= 80%`.
+- [x] Preview fixture cleanup is independently verified at `100%`.
 
 ### Persistence, compatibility, and operations
 
-- [ ] Populated v4 SQLite → v5 migration passes without data loss.
-- [ ] PostgreSQL migration, concurrency, outbox, lease, and recovery pass.
-- [ ] At-least-once jobs do not duplicate external writes.
-- [ ] Every failed external job has a receipt state and operator next step.
-- [ ] Full v3/v4 suites pass.
-- [ ] Real acceptance passes for every claimed Dify/DSL pair.
-- [ ] Real Preview, Git, MCP, and Dify-hosted Studio journeys pass.
-- [ ] Version metadata and docs consistently report `5.0.0`.
-- [ ] Rollout/rollback and `git diff --check` pass.
+- [x] Populated v4 SQLite → v5 migration passes without data loss.
+- [x] PostgreSQL migration, concurrency, outbox, lease, and recovery pass.
+- [x] At-least-once jobs do not duplicate external writes.
+- [x] Every failed external job has a receipt state and operator next step.
+- [x] Full v3/v4 suites pass.
+- [x] Real acceptance passes for every claimed Dify/DSL pair.
+- [x] Real Preview, Git, MCP, and Dify-hosted Studio journeys pass.
+- [x] Version metadata and docs consistently report `5.0.0`.
+- [x] Rollout/rollback and `git diff --check` pass.
 
 ### Release completion record
 
-- Started:
-- Completed:
+- Started: 2026-08-08
+- Completed: 2026-08-08
 - Product usability:
+  - The fixed signed-in journey opened Chat2Dify from the real localhost Dify
+    create card, rendered Studio Home, and reached Build Studio in `4.259s`.
+    Workflow, Chatflow, Chatbot, Completion, Agent, multi-Candidate,
+    Blueprint, Scenario, Review/Release, and incident-repair paths passed in
+    the deterministic product/API fixtures without copying record IDs or
+    opening raw Plan, Patch, Artifact JSON, DSL, or provider payloads.
+  - Existing Phase 1 measurements remain the fixed candidate set: both
+    rendered trials reached a valid Candidate in under five seconds, so the
+    median remains below five seconds and the `< 3 minutes` gate. All fixed
+    Review/Release tasks use the business view (`100%`, target `>= 80%`).
 - Accessibility:
+  - Fresh signed-in rendering covered the Dify drawer at `1280x720` and
+    `720x696` plus full-page Studio at `1280x720`. Outer and Studio document
+    widths matched their viewports, both narrow-screen `Runs` and
+    `Studio Home` navigation links remained visible, and screenshots showed
+    only local card/navigation scrolling rather than page overflow.
+  - Run Center exposed 44 visible controls. Every control had direct text,
+    ARIA text, placeholder text, or a programmatically associated `label`;
+    console warning/error count was zero. Skip Link click moved focus to
+    `main[tabindex=-1]`, all primary controls remained in the accessibility
+    tree with stable names, and the shipped CSS includes a
+    `prefers-reduced-motion` rule. Deterministic frontend keyboard/focus,
+    state, status-without-color, and route coverage also passed.
 - Targeted tests:
+  - v5 deterministic service/API/frontend set: `119 passed, 2 skipped` and
+    `55 passed`; the warning is the known Starlette TestClient/httpx
+    deprecation only.
+  - Git and real HTTP MCP protocol: `2 passed`.
+  - populated SQLite migration and v5-off rollback: `2 passed`.
+  - Fixed v4 evaluation report contains 10 cases and all required gates:
+    validity `100%`, goal completion `90%`, unrelated preservation `100%`,
+    auto-repair `100%`, readable failure Trace `100%`, unapproved writes `0`,
+    and incorrect conflict overwrites `0`.
 - Full suite:
+  - Python: `535 passed, 18 skipped` in `145.80s`. Skips are explicit opt-in
+    external-service/real-provider tests and are not counted as passed.
+  - Frontend: `55 passed`, `0 failed`.
 - SQLite migration:
+  - A populated v4 SQLite fixture upgraded additively to schema version 7
+    without losing v4 Session, Run, Approval, Trace, or Workspace data. Turning
+    v5 off did not initialize Studio services and preserved the same database
+    for rollback.
 - PostgreSQL:
+  - An ephemeral PostgreSQL 15 database passed repository migration,
+    simultaneous two-worker single-claim, and fresh restart reconciliation of
+    both Job and Outbox pending receipts: `3 passed`. The restarted worker
+    made zero handler calls and both unfinished external operations became
+    `ambiguous` for operator reconciliation. The container/database were
+    stopped and removed.
 - Real Dify:
+  - Read-only deployment evidence reports Dify `1.14.2`, DSL `0.6.0`, and
+    Chat2Dify `5.0.0`; the signed-in Dify host issued a verified Project-scoped
+    Studio view. A fresh localhost-only identity test logged in, issued a
+    signed Studio Principal, and revalidated account, Workspace, Project,
+    membership, and accessible-App context: `1 passed`.
+  - A fresh independent read-only query returned zero Apps for all nine
+    temporary acceptance prefix families: `chat2dify-p1a-live-`,
+    `chat2dify-p2-live-`, `chat2dify-release-create-`,
+    `chat2dify-release-config-`, `chat2dify-release-import-retry-`,
+    `chat2dify-release-candidate-run-`, `chat2dify-release-provider-`,
+    `c2-preview-live-`, and `chat2dify-studio-release-`.
+  - After explicit user authorization, the localhost Dify suite passed
+    `13` tests against Dify `1.14.2` / DSL `0.6.0`. It covered Workflow and
+    Chatflow creation, observe/Patch/validation/review/approval/Commit,
+    conflict protection, reviewed Undo, Chatbot/Completion/Agent typed Config
+    writes, upstream import non-idempotency, Candidate Draft Run isolation,
+    signed Studio identity, governed Apply Draft, separate explicit Publish,
+    authoritative readback, duplicate suppression, and per-test cleanup.
+  - The suite initially reported two explicit skips: isolated Preview required
+    its own opt-in target and real Provider execution required a separate
+    external-cost authorization. Preview was then configured explicitly as
+    `local-isolated-release-gate` against the non-production localhost Dify
+    and passed independently. The external Provider test remains intentionally
+    unclaimed; it is not a Dify/DSL compatibility pair and no external model
+    success is used as Release Gate evidence.
 - Preview and cleanup:
+  - Deterministic Scenario coverage again passed comparison, Baseline,
+    Regression Gate, receipt, cleanup, absence-readback, ambiguity, and
+    no-blind-retry paths. Fresh real Preview acceptance imported one TTL-
+    labelled Workflow into the explicit non-production localhost target,
+    verified presence, executed its Draft successfully, deleted the fixture,
+    and independently verified absence: `1 passed`.
+  - A final independent Dify App-list query returned `0` for every one of the
+    nine temporary prefix families listed above. No Release Gate App remained.
 - Git:
+  - A fresh temporary local repository initialized, committed the canonical
+    secrets-free Artifact bundle, regenerated it byte-for-byte, and finished
+    with a clean `git diff`. No remote, push, merge, or repository publish was
+    used.
 - MCP:
+  - A real HTTP JSON-RPC client initialized, listed only the eight scoped safe
+    tools, searched/inspected sanitized evidence, and proved approval,
+    Apply Draft, Publish, raw DSL, arbitrary Patch, credential plaintext, and
+    cross-Project authority unavailable.
 - Signed-in Studio:
+  - The real Dify create card opened the v5 drawer with verified account and
+    Workspace context. Studio Home, Build, Run, and Release routes rendered
+    truthful current data; the current Workspace has no Apps or production
+    evidence, so no metrics or records were fabricated. The temporary browser
+    viewports were reset and all acceptance tabs finalized.
 - Quality metrics:
+  - Candidate validity `100%`; unrelated preservation `100%` (target `>=99%`);
+    Blueprint application `9/9 = 100%` (target `>=95%`); Scenario fixed journey
+    `6/6 = 100%` (target `>=90%`); incident-to-repair `1/1 = 100%` (target
+    `>=80%`); independently verified Preview cleanup `4/4 = 100%`.
 - Known limitations:
+  - The optional real external Provider terminal-success test remains skipped
+    because the localhost Dify environment does not prove stable external
+    model quota. The Release Gate neither claims that path nor relies on it;
+    deterministic provider adapters cover runtime behavior, while every
+    claimed Dify/DSL and Preview protocol path passed against the real local
+    deployment. No skipped test is represented as success.
+  - The Release Gate was temporarily blocked pending explicit authorization
+    for multiple local Dify mutations. The user later authorized that exact
+    localhost acceptance scope; all temporary Apps were then cleaned and
+    independently verified absent.
 - Rollback:
+  - A fresh local image built successfully and returned healthy version data.
+    It also started with `v5=false/v4=true` (unchanged v4 path) and with both
+    product flags off (v3 fallback). Both temporary containers auto-removed;
+    the non-pushed temporary image was then deleted. The populated SQLite
+    rollback test independently preserved schema/data while v5 was disabled.
 
 ## 13. Explicitly deferred
 

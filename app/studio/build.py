@@ -51,10 +51,12 @@ class StudioBuildService:
         store: StudioStore,
         agent_store: AgentStore,
         agent_service: AgentApplicationService,
+        durable_jobs: bool = False,
     ) -> None:
         self.store = store
         self.agent_store = agent_store
         self.agent_service = agent_service
+        self.durable_jobs = durable_jobs
 
     def create(
         self,
@@ -456,13 +458,21 @@ class StudioBuildService:
                 "read_only": read_only,
             }
         )
-        run = self.agent_service.submit_goal(
-            session.id,
-            message=goal,
-            constraints=effective,
-        )
+        if self.durable_jobs:
+            run = self.agent_service.submit_goal(
+                session.id,
+                message=goal,
+                constraints=effective,
+                dispatch=False,
+            )
+        else:
+            run = self.agent_service.submit_goal(
+                session.id,
+                message=goal,
+                constraints=effective,
+            )
         try:
-            return self.store.add_candidate(
+            candidate = self.store.add_candidate(
                 build_id=build.id,
                 project_id=build.project_id,
                 principal_key=authenticated.principal.key,
@@ -471,6 +481,22 @@ class StudioBuildService:
                 intent=intent,
                 source_candidate_ids=source_candidate_ids,
             )
+            if self.durable_jobs:
+                self.store.enqueue_job(
+                    project_id=build.project_id,
+                    principal_key=authenticated.principal.key,
+                    kind="build.agent_run",
+                    payload={
+                        "run_id": run.id,
+                        "candidate_id": candidate.id,
+                        "authorized_by": authenticated.principal.key,
+                        "workspace_only": True,
+                        "production_write": False,
+                    },
+                    idempotency_key=f"build-agent-run:{run.id}",
+                    max_attempts=3,
+                )
+            return candidate
         except Exception:
             try:
                 self.agent_service.cancel(run.id)

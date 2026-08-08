@@ -9,6 +9,8 @@
     <link rel="stylesheet" href="static/studio/build/styles.css?v=studio-v5.0.0">
     <link rel="stylesheet" href="static/studio/blueprints/styles.css?v=studio-v5.0.0">
     <link rel="stylesheet" href="static/studio/scenarios/styles.css?v=studio-v5.0.0">
+    <link rel="stylesheet" href="static/studio/releases/styles.css?v=studio-v5.0.0">
+    <link rel="stylesheet" href="static/studio/runs/styles.css?v=studio-v5.0.0">
   </head>
   <body>
     <a class="studio-skip-link" href="#studio-main">跳到主要内容</a>
@@ -52,16 +54,14 @@
               <span aria-hidden="true">◫</span>
               <span>Scenarios</span>
             </a>
-            <span class="studio-nav-item studio-nav-disabled" aria-disabled="true">
+            <a id="studio-releases-nav" class="studio-nav-item" href="?studio=releases">
               <span aria-hidden="true">✓</span>
               <span>Reviews & Releases</span>
-              <small>即将推出</small>
-            </span>
-            <span class="studio-nav-item studio-nav-disabled" aria-disabled="true">
+            </a>
+            <a id="studio-runs-nav" class="studio-nav-item" href="?studio=runs">
               <span aria-hidden="true">↗</span>
               <span>Runs</span>
-              <small>即将推出</small>
-            </span>
+            </a>
           </nav>
           <div class="studio-sidebar-note">
             <span class="studio-note-dot" aria-hidden="true"></span>
@@ -175,7 +175,7 @@
                   <span aria-hidden="true">!</span>
                   <h3>运行事件</h3>
                   <strong>0</strong>
-                  <p>Run Center 启用前不展示虚构告警。</p>
+                  <p>当前没有开放的运行事件。</p>
                 </article>
               </div>
             </section>
@@ -546,6 +546,7 @@
                 <label>Baseline Candidate<select id="studio-scenario-baseline-candidate" aria-label="选择 Baseline Candidate"><option value="">运行后选择</option></select></label>
                 <button id="studio-scenario-save-baseline" type="button" class="studio-secondary-action" disabled>保存精确 Baseline</button>
                 <button id="studio-scenario-approve-source" type="button" class="studio-secondary-action" disabled>批准为脱敏数据源</button>
+                <a id="studio-scenario-review" class="studio-primary-action" href="?studio=releases" aria-disabled="true">送往 Review Center</a>
                 <label>最低通过率<input id="studio-scenario-gate-pass" type="number" min="0" max="1" step="0.01" value="1"></label>
                 <label>最低质量分<input id="studio-scenario-gate-quality" type="number" min="0" max="100" value="80"></label>
                 <label>时延回归上限（%）<input id="studio-scenario-gate-latency" type="number" min="0" max="1000" value="20"></label>
@@ -553,6 +554,267 @@
                 <button id="studio-scenario-save-gate" type="button" class="studio-secondary-action" disabled>保存 Regression Gate</button>
               </div>
               <div id="studio-scenario-cleanup" class="studio-scenario-cleanup" aria-live="polite"></div>
+            </section>
+          </div>
+
+          <div id="studio-release-content" class="studio-releases" hidden>
+            <section class="studio-release-hero" aria-labelledby="studio-release-title">
+              <div>
+                <p class="studio-eyebrow">REVIEW & RELEASE CENTER · GOVERNED DELIVERY</p>
+                <h1 id="studio-release-title">从精确评审到受控 Dify 发布</h1>
+                <p>评论、证据、Artifact、环境、Hash、Apply Draft 与 Publish 保持在一条可审计路径中；任何模型或后台任务都不能替你批准或发布。</p>
+              </div>
+              <div class="studio-release-hero-actions">
+                <span id="studio-release-context" class="studio-project-badge">正在核对项目</span>
+                <button id="studio-release-refresh" type="button" class="studio-secondary-action">刷新权威状态</button>
+              </div>
+            </section>
+
+            <p id="studio-release-notice" class="studio-build-notice" role="status" aria-live="polite" tabindex="-1"></p>
+
+            <div class="studio-release-layout">
+              <aside class="studio-release-queue" aria-labelledby="studio-release-queue-title">
+                <div class="studio-section-heading">
+                  <div><p class="studio-eyebrow">CHANGE REQUESTS</p><h2 id="studio-release-queue-title">评审队列</h2></div>
+                </div>
+                <div id="studio-release-requests" class="studio-release-request-list" role="list"></div>
+
+                <form id="studio-release-create-form" class="studio-release-form" hidden>
+                  <h3>提交测试结果评审</h3>
+                  <p id="studio-release-create-context" class="studio-scenario-boundary"></p>
+                  <label>标题<input id="studio-release-create-title" maxlength="256" required value="已测试 Candidate 发布评审"></label>
+                  <label>Release Note<textarea id="studio-release-create-note" rows="3" maxlength="8000" required>发布已完成隔离 Scenario 验证并清理完毕的候选方案。</textarea></label>
+                  <label>Reviewer（可选）<select id="studio-release-create-reviewer"><option value="">暂不分配 Reviewer</option></select></label>
+                  <label class="studio-release-check"><input id="studio-release-create-separation" type="checkbox" checked> Author 与 Approver 必须分离</label>
+                  <button type="submit" class="studio-primary-action">创建精确 Change Request</button>
+                </form>
+                <p id="studio-release-handoff-empty" class="studio-scenario-boundary">请从 cleanup-verified Scenario 结果进入，无需复制 Build、Candidate 或 Run ID。</p>
+              </aside>
+
+              <section class="studio-release-review" aria-labelledby="studio-release-review-title">
+                <div class="studio-section-heading">
+                  <div><p class="studio-eyebrow">HUMAN REVIEW</p><h2 id="studio-release-review-title">评论与决定</h2></div>
+                  <span id="studio-release-review-status" class="studio-project-badge">选择一项评审</span>
+                </div>
+                <div id="studio-release-detail" class="studio-release-detail" aria-live="polite"></div>
+                <ol id="studio-release-events" class="studio-release-events"></ol>
+                <form id="studio-release-comment-form" class="studio-release-comment" hidden>
+                  <label>评审评论<textarea id="studio-release-comment" rows="2" maxlength="8000" required></textarea></label>
+                  <button type="submit" class="studio-secondary-action">添加评论</button>
+                </form>
+                <div id="studio-release-decisions" class="studio-inline-actions" hidden>
+                  <button type="button" data-review-decision="request_changes" class="studio-secondary-action">Request Changes</button>
+                  <button type="button" data-review-decision="reject" class="danger-button">Reject</button>
+                  <button type="button" data-review-decision="approve" class="studio-primary-action">Approve exact Artifact</button>
+                </div>
+              </section>
+            </div>
+
+            <section class="studio-release-step" aria-labelledby="studio-release-environment-title">
+              <div class="studio-section-heading">
+                <div><p class="studio-eyebrow">1 · LOGICAL APP & ENVIRONMENT</p><h2 id="studio-release-environment-title">配置发布目标</h2></div>
+                <span class="studio-project-badge">仅 Owner / Admin</span>
+              </div>
+              <div class="studio-release-config-grid">
+                <form id="studio-logical-app-form" class="studio-release-form">
+                  <h3>Logical App</h3>
+                  <label>名称<input id="studio-logical-app-name" maxlength="256" required></label>
+                  <label>应用类型<select id="studio-logical-app-mode"><option value="workflow">Workflow</option><option value="advanced-chat">Chatflow</option></select></label>
+                  <button type="submit" class="studio-secondary-action">保存 Logical App</button>
+                </form>
+                <form id="studio-environment-form" class="studio-release-form">
+                  <h3>Dify Environment</h3>
+                  <label>Logical App<select id="studio-environment-logical" required><option value="">先创建 Logical App</option></select></label>
+                  <label>环境<select id="studio-environment-class"><option value="development">Development</option><option value="staging" selected>Staging</option><option value="production">Production</option></select></label>
+                  <label>名称<input id="studio-environment-name" maxlength="256" required value="Staging"></label>
+                  <label>Dify App<select id="studio-environment-target" required><option value="">选择当前账号可访问的 App</option></select></label>
+                  <button type="submit" class="studio-secondary-action">绑定并读取当前 Draft Hash</button>
+                </form>
+              </div>
+            </section>
+
+            <section class="studio-release-step" aria-labelledby="studio-release-preview-title">
+              <div class="studio-section-heading">
+                <div><p class="studio-eyebrow">2 · EXACT RELEASE PREVIEW</p><h2 id="studio-release-preview-title">Deployed Base、Drift 与 Proposed Artifact</h2></div>
+                <label class="studio-release-environment-select">目标环境<select id="studio-release-environment-select"><option value="">尚无环境</option></select></label>
+              </div>
+              <div id="studio-release-mapping" class="studio-release-mapping"></div>
+              <div class="studio-inline-actions">
+                <button id="studio-release-save-mapping" type="button" class="studio-secondary-action" disabled>保存 Opaque Mapping</button>
+                <button id="studio-release-preview" type="button" class="studio-primary-action" disabled>生成 Release Preview</button>
+              </div>
+              <div id="studio-release-preview-result" class="studio-release-preview-result" aria-live="polite"></div>
+              <div id="studio-release-actions" class="studio-release-actions" hidden>
+                <button id="studio-release-apply" type="button" class="studio-primary-action">Authorize & Apply Draft</button>
+                <button id="studio-release-publish" type="button" class="danger-button">独立授权 Publish</button>
+                <button id="studio-release-git-export" type="button" class="studio-secondary-action">导出 deterministic Git files</button>
+              </div>
+            </section>
+
+            <section class="studio-release-step" aria-labelledby="studio-release-history-title">
+              <div class="studio-section-heading">
+                <div><p class="studio-eyebrow">3 · RECEIPTS & ROLLBACK</p><h2 id="studio-release-history-title">Release History</h2></div>
+              </div>
+              <div id="studio-release-history" class="studio-release-history"></div>
+            </section>
+
+            <dialog id="studio-release-confirm" class="studio-release-dialog" aria-labelledby="studio-release-confirm-title">
+              <form method="dialog">
+                <h2 id="studio-release-confirm-title">确认高风险动作</h2>
+                <p id="studio-release-confirm-body"></p>
+                <p class="studio-scenario-boundary">授权只绑定当前 Artifact、Environment、Mapping、Policy、Evidence 与 Dify Hash；状态变化后必须重新预览。</p>
+                <div class="studio-inline-actions">
+                  <button value="cancel" class="studio-secondary-action">取消</button>
+                  <button id="studio-release-confirm-action" value="confirm" class="danger-button">确认</button>
+                </div>
+              </form>
+            </dialog>
+          </div>
+
+          <div id="studio-run-content" class="studio-runs" hidden>
+            <section class="studio-run-hero" aria-labelledby="studio-run-title">
+              <div>
+                <p class="studio-eyebrow">RUN CENTER · RELEASE-AWARE OPERATIONS</p>
+                <h1 id="studio-run-title">从真实执行定位问题，再走受控修复流程</h1>
+                <p>生产执行只在 Dify 版本与唯一 Publish Receipt 精确匹配时关联 Artifact；错误、输入与输出仅保存脱敏摘要。</p>
+              </div>
+              <div class="studio-run-hero-actions">
+                <span id="studio-run-context" class="studio-project-badge">正在核对项目</span>
+                <button id="studio-run-refresh-evidence" type="button" class="studio-primary-action">刷新 Dify 运行证据</button>
+              </div>
+            </section>
+
+            <p id="studio-run-notice" class="studio-build-notice" role="status" aria-live="polite" tabindex="-1"></p>
+
+            <section class="studio-run-filter-card" aria-labelledby="studio-run-filter-title">
+              <div class="studio-section-heading">
+                <div><p class="studio-eyebrow">FILTERS</p><h2 id="studio-run-filter-title">执行范围</h2></div>
+                <button id="studio-run-clear-filters" type="button" class="studio-secondary-action">清除筛选</button>
+              </div>
+              <form id="studio-run-filter-form" class="studio-run-filters">
+                <label>Logical App<select id="studio-run-logical-app"><option value="">全部应用</option></select></label>
+                <label>Environment<select id="studio-run-environment"><option value="">全部环境</option></select></label>
+                <label>Artifact<select id="studio-run-artifact"><option value="">全部发布版本</option></select></label>
+                <label>运行状态<select id="studio-run-status"><option value="">全部状态</option><option value="failed">失败</option><option value="partial_succeeded">部分成功</option><option value="succeeded">成功</option><option value="running">运行中</option><option value="stopped">已停止</option><option value="unknown">证据不足</option></select></label>
+                <label>错误分类<select id="studio-run-error"><option value="">全部分类</option></select></label>
+                <label>开始时间<input id="studio-run-started-from" type="datetime-local"></label>
+                <label>结束时间<input id="studio-run-started-to" type="datetime-local"></label>
+                <button type="submit" class="studio-secondary-action">应用筛选</button>
+              </form>
+            </section>
+
+            <section class="studio-run-overview" aria-labelledby="studio-run-overview-title">
+              <div class="studio-section-heading">
+                <div><p class="studio-eyebrow">RELEASE-AWARE OVERVIEW</p><h2 id="studio-run-overview-title">质量、时延与成本</h2></div>
+                <span id="studio-run-generated-at" class="studio-project-badge">等待证据</span>
+              </div>
+              <div id="studio-run-metrics" class="studio-run-metrics"></div>
+              <div class="studio-run-analysis-grid">
+                <div><h3>运行趋势</h3><div id="studio-run-trend" class="studio-run-trend" aria-label="按日运行趋势"></div></div>
+                <div><h3>发布与回归</h3><div id="studio-run-releases" class="studio-run-evidence-list"></div></div>
+                <div><h3>最慢路径</h3><div id="studio-run-slow-paths" class="studio-run-evidence-list"></div></div>
+                <div><h3>最高成本路径</h3><div id="studio-run-costly-paths" class="studio-run-evidence-list"></div></div>
+              </div>
+              <div id="studio-run-missing" class="studio-run-missing" aria-live="polite"></div>
+            </section>
+
+            <div class="studio-run-layout">
+              <section class="studio-run-executions" aria-labelledby="studio-run-executions-title">
+                <div class="studio-section-heading">
+                  <div><p class="studio-eyebrow">SANITIZED EXECUTIONS</p><h2 id="studio-run-executions-title">生产执行</h2></div>
+                </div>
+                <div id="studio-run-execution-list" class="studio-run-execution-list"></div>
+              </section>
+
+              <aside class="studio-run-incidents" aria-labelledby="studio-run-incidents-title">
+                <div class="studio-section-heading">
+                  <div><p class="studio-eyebrow">INCIDENTS</p><h2 id="studio-run-incidents-title">待处理事件</h2></div>
+                </div>
+                <div id="studio-run-incident-list" class="studio-run-incident-list" role="list"></div>
+              </aside>
+            </div>
+
+            <section id="studio-run-incident-detail-card" class="studio-run-incident-detail" aria-labelledby="studio-run-incident-detail-title" hidden>
+              <div class="studio-section-heading">
+                <div><p class="studio-eyebrow">INCIDENT TO REPAIR</p><h2 id="studio-run-incident-detail-title">事件详情</h2></div>
+                <span id="studio-run-incident-severity" class="studio-project-badge"></span>
+              </div>
+              <div id="studio-run-incident-detail"></div>
+              <div class="studio-run-repair-actions">
+                <button id="studio-run-create-repair" type="button" class="studio-primary-action">创建受控修复方案</button>
+                <a id="studio-run-open-repair" class="studio-secondary-action" href="?studio=build&intent=modify" hidden>进入 Build Studio</a>
+              </div>
+              <p class="studio-scenario-boundary">修复只创建新的 Build；不会自动修改生产，也不能跳过 Scenario、Review、Apply Draft 或显式 Publish。</p>
+            </section>
+
+            <section class="studio-run-automation" aria-labelledby="studio-run-automation-title">
+              <div class="studio-section-heading">
+                <div><p class="studio-eyebrow">SAFE AUTOMATION</p><h2 id="studio-run-automation-title">告警与定时回归</h2></div>
+                <button id="studio-run-tick-automation" type="button" class="studio-secondary-action">检查阈值与到期计划</button>
+              </div>
+              <p id="studio-run-automation-state" class="studio-scenario-boundary" role="status" aria-live="polite"></p>
+              <div class="studio-run-automation-grid">
+                <form id="studio-run-alert-form" class="studio-run-automation-form">
+                  <h3>错误／质量阈值</h3>
+                  <label>规则名称<input id="studio-run-alert-name" maxlength="256" value="生产错误阈值" required></label>
+                  <label>环境<select id="studio-run-alert-environment"><option value="">全部已授权环境</option></select></label>
+                  <label>错误分类<select id="studio-run-alert-error"><option value="">全部失败</option></select></label>
+                  <label>窗口内错误数<input id="studio-run-alert-count" type="number" min="1" max="10000" value="1" required></label>
+                  <label>最低失败率（可选）<input id="studio-run-alert-rate" type="number" min="0" max="1" step="0.01" placeholder="例如 0.5"></label>
+                  <label>窗口<select id="studio-run-alert-window"><option value="3600">1 小时</option><option value="21600">6 小时</option><option value="86400" selected>24 小时</option><option value="604800">7 天</option></select></label>
+                  <label>通知 Adapter<select id="studio-run-alert-adapter"><option value="audit:local">本地审计通知</option><option value="missing:adapter">未配置 Adapter（保留 Outbox）</option></select></label>
+                  <label class="studio-release-check"><input id="studio-run-alert-enabled" type="checkbox" checked> 启用规则</label>
+                  <button type="submit" class="studio-primary-action">保存显式告警规则</button>
+                  <div id="studio-run-alert-list" class="studio-run-evidence-list"></div>
+                </form>
+
+                <form id="studio-run-schedule-form" class="studio-run-automation-form">
+                  <h3>已发布 Artifact 回归计划</h3>
+                  <label>Artifact 与 Scenario Suite<select id="studio-run-schedule-target" required><option value="">没有可调度的已发布 Artifact</option></select></label>
+                  <label>运行间隔<select id="studio-run-schedule-interval"><option value="3600">每小时</option><option value="21600">每 6 小时</option><option value="86400" selected>每天</option><option value="604800">每周</option></select></label>
+                  <label class="studio-release-check"><input id="studio-run-schedule-enabled" type="checkbox" checked> 启用计划</label>
+                  <button type="submit" class="studio-primary-action">保存隔离回归计划</button>
+                  <p class="studio-scenario-boundary">计划只进入隔离 Preview 工作队列；不使用生产凭据，也不会自动 Apply 或 Publish。</p>
+                  <div id="studio-run-schedule-list" class="studio-run-evidence-list"></div>
+                </form>
+              </div>
+              <div class="studio-run-work-ledger">
+                <h3>Durable Work 与对账</h3>
+                <div id="studio-run-work-list" class="studio-run-evidence-list"></div>
+              </div>
+              <div class="studio-run-token-ledger">
+                <div class="studio-section-heading">
+                  <div><p class="studio-eyebrow">SCOPED API / MCP</p><h3>外部客户端最小权限</h3></div>
+                </div>
+                <div class="studio-run-token-grid">
+                  <form id="studio-run-token-form" class="studio-run-automation-form">
+                    <label>Token 名称<input id="studio-run-token-name" maxlength="256" value="CI Run evidence reader" required></label>
+                    <fieldset class="studio-run-scope-list">
+                      <legend>允许的安全能力</legend>
+                      <label><input type="checkbox" data-mcp-scope value="search:read" checked> 搜索脱敏 Run</label>
+                      <label><input type="checkbox" data-mcp-scope value="inspect:read" checked> 查看事件证据</label>
+                      <label><input type="checkbox" data-mcp-scope value="change_request:write"> 创建 Change Request</label>
+                      <label><input type="checkbox" data-mcp-scope value="proposal:write"> 创建 Typed Proposal</label>
+                      <label><input type="checkbox" data-mcp-scope value="scenario:run"> 运行隔离 Scenario</label>
+                      <label><input type="checkbox" data-mcp-scope value="scenario:read"> 读取 Scenario</label>
+                      <label><input type="checkbox" data-mcp-scope value="review:read"> 读取 Review</label>
+                      <label><input type="checkbox" data-mcp-scope value="release:preview"> 读取 Release Preview</label>
+                    </fieldset>
+                    <label>有效期<select id="studio-run-token-expiry"><option value="86400">1 天</option><option value="604800">7 天</option><option value="2592000" selected>30 天</option><option value="7776000">90 天</option></select></label>
+                    <label>每分钟请求上限<input id="studio-run-token-rate" type="number" min="1" max="1000" value="60"></label>
+                    <button type="submit" class="studio-primary-action">创建 Scoped Token</button>
+                    <p class="studio-scenario-boundary">Token 永远不提供审批、Apply Draft、Publish、凭据明文、Raw DSL 或任意 Patch。</p>
+                  </form>
+                  <div>
+                    <div id="studio-run-token-secret" class="studio-run-token-secret" role="alert" tabindex="-1" hidden>
+                      <strong>仅显示一次，请现在保存</strong>
+                      <code id="studio-run-token-value"></code>
+                      <button id="studio-run-token-copy" type="button" class="studio-secondary-action">复制 Token</button>
+                    </div>
+                    <div id="studio-run-token-list" class="studio-run-evidence-list"></div>
+                  </div>
+                </div>
+              </div>
             </section>
           </div>
         </main>
@@ -720,5 +982,7 @@
     <script type="module" src="static/studio/build/index.js?v=studio-v5.0.0"></script>
     <script type="module" src="static/studio/blueprints/index.js?v=studio-v5.0.0"></script>
     <script type="module" src="static/studio/scenarios/index.js?v=studio-v5.0.0"></script>
+    <script type="module" src="static/studio/releases/index.js?v=studio-v5.0.0"></script>
+    <script type="module" src="static/studio/runs/index.js?v=studio-v5.0.0"></script>
   </body>
 </html>

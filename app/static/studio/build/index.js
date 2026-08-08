@@ -327,6 +327,10 @@ function updateScenarioLink() {
   const params = new URLSearchParams({ studio: "scenarios" });
   if (state.buildId) params.set("build_id", state.buildId);
   if (candidateIds.length) params.set("candidate_ids", candidateIds.join(","));
+  if (identity.repairProposalId) {
+    params.set("repair_proposal_id", identity.repairProposalId);
+    params.set("repair_proposal_version", String(identity.repairProposalVersion || 1));
+  }
   link.href = `${basePath || ""}/?${params.toString()}`;
   const available = Boolean(state.buildId && candidateIds.length);
   link.setAttribute("aria-disabled", String(!available));

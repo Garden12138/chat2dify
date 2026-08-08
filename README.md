@@ -1,28 +1,46 @@
 # chat2dify
 
-chat2dify 是一个独立的 FastAPI sidecar，用自然语言创建、修改、测试和审阅 Dify 应用。v5.0.0 正在把已经发布的 v4 Builder Agent 安全内核升级成完整的 AI Workflow Studio；现有 v3 与 v4 入口继续保留。
+chat2dify 是一个独立的 FastAPI sidecar，用自然语言创建、修改、测试、
+审阅、发布和运营 Dify 应用。v5.0.0 在已发布的 v4 Builder Agent 安全内核
+之上交付完整的 **AI Workflow Studio**；现有 v3 与 v4 入口继续保留。
 
 chat2dify 可以作为 Dify Console 的内嵌面板随 Dify docker compose 启动，也可以独立运行。Dify web 只承载抽屉入口、iframe 和安全画布上下文握手；Snapshot、Workspace、审批、Commit 和执行状态都由 sidecar 管理。
 
-> 第一次使用 v4？从 [v4.0.0 使用手册与实战教程](docs/v4-user-guide.md) 开始。
+> 了解 v5 产品路径请先看
+> [AI Workflow Studio 架构](docs/architecture/v5-ai-workflow-studio.md)；使用
+> v4 Builder 安全内核可从
+> [v4.0.0 使用手册与实战教程](docs/v4-user-guide.md) 开始。
 
-## 当前开发版本
+## 当前版本
 
-`v5.0.0` 当前以默认关闭的
-`CHAT2DIFY_AI_STUDIO_V5_ENABLED` 交付产品切片。第一阶段包含：
+`v5.0.0` 提供一条完整、受控且默认关闭的产品路径：
 
-- Dify 内嵌 Studio Shell 与 Studio Home；
-- 服务端验证的 Dify Principal、短期签名会话、Origin/Nonce/Replay 防护；
-- 个人 Project 与 Membership，所有 v5 读取先做项目授权；
-- 最近 Dify 应用、搜索、类型筛选、v4 工作迁移与继续构建；
-- SQLite 单用户与 PostgreSQL 团队存储、增量迁移、Activity、Job、Outbox 和 Receipt 地基；
-- 关闭 v5 后回到未替换的 v4 产品路径，保留 v5 数据而不做 schema 降级。
+- Studio Home：可信 Dify 身份、Project 范围、应用与工作的统一入口；
+- Build Studio：Typed Workspace、2–3 个隔离 Candidate、业务对比与布局预览；
+- Blueprint Gallery：九个初始模式、引导式 Setup、事务性应用和显式升级；
+- Scenario Lab：版本化场景、隔离 Preview、Candidate 对比、Baseline、Regression
+  Gate、Receipt 与独立清理确认；
+- Review & Release Center：评论、请求修改、精确审批、Artifact、环境映射、
+  Apply Draft、独立显式 Publish、History、Rollback 和可选 Git 序列化；
+- Run Center：发布版本关联、脱敏运行证据、Incident、Repair Proposal、告警、
+  定时回归、耐久 Job/Outbox 和最小权限 MCP；
+- SQLite 单用户与 PostgreSQL 团队部署、增量迁移、租约、恢复、防重放和
+  v5 关闭后保持原 v4 路径的回滚能力。
+
+通过 `CHAT2DIFY_AI_STUDIO_V5_ENABLED=true` 显式启用 v5。默认关闭时不替换
+v4 产品路径，已保存的 v5 数据保持可恢复，不进行破坏性 schema 降级。
 
 完整产品方向见
 [v5 AI Workflow Studio 架构](docs/architecture/v5-ai-workflow-studio.md)，执行状态见
 [v5 任务清单](docs/tasks.md)。
 
-`v4.0.0` 是当前稳定基线，主要能力包括：
+v5.0.0 Release Gate 已完成：完整 Python 回归为 `535 passed, 18 skipped`，
+前端为 `55 passed`，PostgreSQL 15 迁移/并发/重启恢复为 `3 passed`；本机
+Dify 1.14.2 / DSL 0.6.0 真实验收共 `14 passed`，所有临时 App 均经独立
+查询确认不存在。外部模型 Provider 的终态成功用例未被声明为通过，也不作为
+Dify/DSL 兼容证据。
+
+`v4.0.0` 是继续兼容的安全内核与回滚基线，主要能力包括：
 
 - 单 Builder Agent：通过 Typed Tools、服务端预算和确定性校验完成 Observe → Patch → Validate → Review。
 - 版本化 Workspace 与显式 Patch IR：模型不能直接写 Dify DSL、生成最终节点 ID 或调用 Dify 写 API。

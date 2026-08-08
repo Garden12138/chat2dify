@@ -16,8 +16,12 @@ from app.studio.models import (
     BlueprintDefinition,
     BlueprintVersionRecord,
     CandidateStatus,
+    ChangeRequest,
     DurableJob,
+    EnvironmentMappingSet,
+    ExecutionObservationRecord,
     ExternalReceipt,
+    LogicalApp,
     Membership,
     OutboxMessage,
     PreviewEnvironment,
@@ -25,6 +29,16 @@ from app.studio.models import (
     Principal,
     Project,
     RegressionGate,
+    ReleaseAuthorization,
+    ReleaseEnvironment,
+    ReleaseRecord,
+    RepairProposal,
+    ReviewEvent,
+    ReviewPolicy,
+    RunAlertRule,
+    RunIncident,
+    ScopedTokenRecord,
+    ScheduledRegression,
     ScenarioBaseline,
     ScenarioEvidenceBinding,
     ScenarioFileFixture,
@@ -35,6 +49,7 @@ from app.studio.models import (
     StudioCandidate,
     StudioRole,
     StudioSession,
+    WorkflowArtifact,
     new_id,
     utc_now,
 )
@@ -56,6 +71,10 @@ class StudioConflict(StudioStoreError):
     code = "STUDIO_VERSION_CONFLICT"
 
 
+class StudioRateLimited(StudioStoreError):
+    code = "STUDIO_TOKEN_RATE_LIMITED"
+
+
 class StudioReplayDetected(StudioStoreError):
     code = "STUDIO_IDENTITY_REPLAY"
 
@@ -64,7 +83,7 @@ class StudioRecordNotFound(StudioStoreError):
     code = "STUDIO_RECORD_NOT_FOUND"
 
 
-_MIGRATION_VERSION = 4
+_MIGRATION_VERSION = 7
 _SCHEMA_STATEMENTS = [
     """
     CREATE TABLE IF NOT EXISTS studio_schema_migrations (
@@ -193,6 +212,49 @@ _SCHEMA_STATEMENTS = [
         updated_at REAL NOT NULL,
         UNIQUE(project_id, topic, idempotency_key),
         FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS studio_work_controls (
+        project_id TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        cancel_requested INTEGER NOT NULL,
+        requested_by TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        PRIMARY KEY(entity_type, entity_id),
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS studio_scoped_tokens (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        token_prefix TEXT NOT NULL,
+        scopes_json TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        rate_limit_per_minute INTEGER NOT NULL,
+        expires_at REAL NOT NULL,
+        revoked_at REAL,
+        rotated_from_id TEXT,
+        last_used_at REAL,
+        version INTEGER NOT NULL,
+        created_at REAL NOT NULL,
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE,
+        FOREIGN KEY(rotated_from_id) REFERENCES studio_scoped_tokens(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS studio_token_rate_limits (
+        token_id TEXT PRIMARY KEY,
+        window_started_at REAL NOT NULL,
+        request_count INTEGER NOT NULL,
+        updated_at REAL NOT NULL,
+        FOREIGN KEY(token_id) REFERENCES studio_scoped_tokens(id) ON DELETE CASCADE
     )
     """,
     """
@@ -444,6 +506,295 @@ _SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS studio_workflow_artifacts (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        candidate_id TEXT NOT NULL,
+        candidate_workspace_version_id TEXT NOT NULL,
+        source_base_hash TEXT,
+        content_hash TEXT NOT NULL,
+        canonical_json TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at REAL NOT NULL,
+        UNIQUE(project_id, content_hash),
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS studio_change_requests (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        build_id TEXT,
+        candidate_id TEXT,
+        scenario_run_id TEXT,
+        artifact_id TEXT NOT NULL,
+        artifact_hash TEXT NOT NULL,
+        title TEXT NOT NULL,
+        release_note TEXT NOT NULL,
+        author_key TEXT NOT NULL,
+        assignee_key TEXT,
+        status TEXT NOT NULL,
+        policy_json TEXT NOT NULL,
+        evidence_binding_hash TEXT NOT NULL,
+        binding_hash TEXT NOT NULL,
+        supersedes_id TEXT,
+        superseded_by_id TEXT,
+        expires_at REAL NOT NULL,
+        version INTEGER NOT NULL,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE,
+        FOREIGN KEY(artifact_id) REFERENCES studio_workflow_artifacts(id),
+        FOREIGN KEY(supersedes_id) REFERENCES studio_change_requests(id),
+        FOREIGN KEY(superseded_by_id) REFERENCES studio_change_requests(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS studio_review_events (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        change_request_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        actor_key TEXT NOT NULL,
+        body TEXT NOT NULL,
+        assignee_key TEXT,
+        binding_hash TEXT,
+        created_at REAL NOT NULL,
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE,
+        FOREIGN KEY(change_request_id) REFERENCES studio_change_requests(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS studio_logical_apps (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        app_mode TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        UNIQUE(project_id, name),
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS studio_release_environments (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        logical_app_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        classification TEXT NOT NULL,
+        target_app_ref TEXT NOT NULL,
+        tracked_draft_hash TEXT,
+        enabled INTEGER NOT NULL,
+        version INTEGER NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        UNIQUE(project_id, logical_app_id, name),
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE,
+        FOREIGN KEY(logical_app_id) REFERENCES studio_logical_apps(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS studio_environment_mappings (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        environment_id TEXT NOT NULL,
+        mappings_json TEXT NOT NULL,
+        mapping_hash TEXT NOT NULL,
+        configured_by TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        UNIQUE(project_id, environment_id),
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE,
+        FOREIGN KEY(environment_id) REFERENCES studio_release_environments(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS studio_release_authorizations (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        change_request_id TEXT NOT NULL,
+        artifact_id TEXT NOT NULL,
+        environment_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        artifact_hash TEXT NOT NULL,
+        mapping_hash TEXT NOT NULL,
+        policy_hash TEXT NOT NULL,
+        target_hash TEXT NOT NULL,
+        preview_hash TEXT NOT NULL,
+        authorized_by TEXT NOT NULL,
+        status TEXT NOT NULL,
+        expires_at REAL NOT NULL,
+        created_at REAL NOT NULL,
+        consumed_at REAL,
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE,
+        FOREIGN KEY(change_request_id) REFERENCES studio_change_requests(id),
+        FOREIGN KEY(artifact_id) REFERENCES studio_workflow_artifacts(id),
+        FOREIGN KEY(environment_id) REFERENCES studio_release_environments(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS studio_release_records (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        change_request_id TEXT NOT NULL,
+        artifact_id TEXT NOT NULL,
+        environment_id TEXT NOT NULL,
+        authorization_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        actor_key TEXT NOT NULL,
+        before_hash TEXT NOT NULL,
+        after_hash TEXT,
+        receipt_id TEXT,
+        external_ref TEXT,
+        release_note TEXT NOT NULL,
+        details_json TEXT NOT NULL,
+        created_at REAL NOT NULL,
+        completed_at REAL,
+        UNIQUE(project_id, action, idempotency_key),
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE,
+        FOREIGN KEY(change_request_id) REFERENCES studio_change_requests(id),
+        FOREIGN KEY(artifact_id) REFERENCES studio_workflow_artifacts(id),
+        FOREIGN KEY(environment_id) REFERENCES studio_release_environments(id),
+        FOREIGN KEY(authorization_id) REFERENCES studio_release_authorizations(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS studio_execution_observations (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        logical_app_id TEXT NOT NULL,
+        environment_id TEXT NOT NULL,
+        artifact_id TEXT,
+        release_record_id TEXT,
+        dify_app_id TEXT NOT NULL,
+        dify_execution_id TEXT NOT NULL,
+        dify_workflow_version TEXT NOT NULL,
+        status TEXT NOT NULL,
+        correlation_state TEXT NOT NULL,
+        correlation_reason TEXT NOT NULL,
+        failed_node_id TEXT,
+        failed_node_type TEXT,
+        stable_error_code TEXT,
+        safe_message TEXT,
+        latency_ms INTEGER,
+        total_tokens INTEGER,
+        estimated_cost_microusd INTEGER,
+        total_steps INTEGER,
+        input_shape_json TEXT NOT NULL,
+        output_shape_json TEXT NOT NULL,
+        node_path_json TEXT NOT NULL,
+        evidence_hash TEXT NOT NULL,
+        started_at REAL,
+        finished_at REAL,
+        observed_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        UNIQUE(project_id, environment_id, dify_execution_id),
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE,
+        FOREIGN KEY(logical_app_id) REFERENCES studio_logical_apps(id),
+        FOREIGN KEY(environment_id) REFERENCES studio_release_environments(id),
+        FOREIGN KEY(artifact_id) REFERENCES studio_workflow_artifacts(id),
+        FOREIGN KEY(release_record_id) REFERENCES studio_release_records(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS studio_run_incidents (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        execution_id TEXT NOT NULL,
+        cluster_key TEXT NOT NULL,
+        title TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        status TEXT NOT NULL,
+        stable_error_code TEXT NOT NULL,
+        affected_node_id TEXT,
+        affected_node_title TEXT,
+        business_cause TEXT NOT NULL,
+        next_step TEXT NOT NULL,
+        first_seen_at REAL NOT NULL,
+        last_seen_at REAL NOT NULL,
+        version INTEGER NOT NULL,
+        UNIQUE(project_id, execution_id),
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE,
+        FOREIGN KEY(execution_id) REFERENCES studio_execution_observations(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS studio_repair_proposals (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        incident_id TEXT NOT NULL,
+        execution_id TEXT NOT NULL,
+        source_artifact_id TEXT,
+        source_release_record_id TEXT,
+        build_id TEXT NOT NULL,
+        change_request_id TEXT,
+        title TEXT NOT NULL,
+        business_summary TEXT NOT NULL,
+        evidence_json TEXT NOT NULL,
+        evidence_hash TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        UNIQUE(project_id, incident_id),
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE,
+        FOREIGN KEY(incident_id) REFERENCES studio_run_incidents(id),
+        FOREIGN KEY(execution_id) REFERENCES studio_execution_observations(id),
+        FOREIGN KEY(source_artifact_id) REFERENCES studio_workflow_artifacts(id),
+        FOREIGN KEY(source_release_record_id) REFERENCES studio_release_records(id),
+        FOREIGN KEY(build_id) REFERENCES studio_builds(id),
+        FOREIGN KEY(change_request_id) REFERENCES studio_change_requests(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS studio_run_alert_rules (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        environment_id TEXT,
+        stable_error_code TEXT,
+        error_count_threshold INTEGER NOT NULL,
+        failure_rate_threshold REAL,
+        window_seconds INTEGER NOT NULL,
+        adapter_ref TEXT NOT NULL,
+        enabled INTEGER NOT NULL,
+        created_by TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE,
+        FOREIGN KEY(environment_id) REFERENCES studio_release_environments(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS studio_scheduled_regressions (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        artifact_id TEXT NOT NULL,
+        suite_id TEXT NOT NULL,
+        interval_seconds INTEGER NOT NULL,
+        next_run_at REAL NOT NULL,
+        enabled INTEGER NOT NULL,
+        created_by TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        UNIQUE(project_id, artifact_id, suite_id),
+        FOREIGN KEY(project_id) REFERENCES studio_projects(id) ON DELETE CASCADE,
+        FOREIGN KEY(artifact_id) REFERENCES studio_workflow_artifacts(id),
+        FOREIGN KEY(suite_id) REFERENCES studio_scenario_suites(id)
+    )
+    """,
+    """
     CREATE INDEX IF NOT EXISTS idx_studio_memberships_principal
         ON studio_memberships(principal_key, updated_at DESC)
     """,
@@ -490,6 +841,50 @@ _SCHEMA_STATEMENTS = [
     """
     CREATE INDEX IF NOT EXISTS idx_studio_preview_fixtures_cleanup
         ON studio_preview_fixtures(status, expires_at, updated_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_studio_change_requests_project
+        ON studio_change_requests(project_id, updated_at DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_studio_review_events_request
+        ON studio_review_events(change_request_id, created_at ASC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_studio_release_environments_app
+        ON studio_release_environments(logical_app_id, classification, updated_at DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_studio_release_records_environment
+        ON studio_release_records(environment_id, created_at DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_studio_execution_observations_project
+        ON studio_execution_observations(project_id, observed_at DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_studio_execution_observations_correlation
+        ON studio_execution_observations(environment_id, dify_workflow_version, status)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_studio_run_incidents_project
+        ON studio_run_incidents(project_id, status, last_seen_at DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_studio_repair_proposals_project
+        ON studio_repair_proposals(project_id, updated_at DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_studio_alert_rules_project
+        ON studio_run_alert_rules(project_id, enabled, updated_at DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_studio_scheduled_regressions_due
+        ON studio_scheduled_regressions(enabled, next_run_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_studio_scoped_tokens_project
+        ON studio_scoped_tokens(project_id, revoked_at, expires_at)
     """,
 ]
 
@@ -783,6 +1178,46 @@ class StudioStore:
         if project_row is None:
             raise StudioRecordNotFound(project_id)
         return _project_from_row(project_row), _membership_from_row(membership_row)
+
+    def get_membership(
+        self,
+        *,
+        project_id: str,
+        actor_key: str,
+        principal_key: str,
+    ) -> Membership:
+        self.get_project_for_principal(project_id, actor_key)
+        with self._reader() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_memberships
+                WHERE project_id = ? AND principal_key = ?
+                """,
+                (project_id, principal_key),
+            ).fetchone()
+        if row is None:
+            raise StudioRecordNotFound("The requested project member does not exist.")
+        return _membership_from_row(row)
+
+    def list_memberships(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> list[Membership]:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_memberships
+                WHERE project_id = ?
+                ORDER BY created_at ASC, id ASC
+                """,
+                (project_id,),
+            ).fetchall()
+        return [_membership_from_row(row) for row in rows]
 
     def list_projects(self, principal_key: str) -> list[tuple[Project, Membership]]:
         with self._reader() as connection:
@@ -2618,6 +3053,2092 @@ class StudioStore:
             return None
         return RegressionGate.model_validate(_json_load(_row_value(row, "payload_json")))
 
+    def create_workflow_artifact(
+        self,
+        *,
+        artifact: WorkflowArtifact,
+        principal_key: str,
+    ) -> WorkflowArtifact:
+        self.get_project_for_principal(artifact.project_id, principal_key)
+        try:
+            with self._transaction(immediate=True) as connection:
+                self._execute(
+                    connection,
+                    """
+                    INSERT INTO studio_workflow_artifacts(
+                        id, project_id, candidate_id,
+                        candidate_workspace_version_id, source_base_hash,
+                        content_hash, canonical_json, payload_json,
+                        created_by, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        artifact.id,
+                        artifact.project_id,
+                        artifact.candidate_id,
+                        artifact.candidate_workspace_version_id,
+                        artifact.source_base_hash,
+                        artifact.content_hash,
+                        artifact.canonical_json,
+                        _json_dump(artifact.payload.model_dump(mode="json")),
+                        artifact.created_by,
+                        _timestamp(artifact.created_at),
+                    ),
+                )
+        except Exception as exc:
+            if not _is_unique_violation(exc):
+                raise
+            with self._reader() as connection:
+                row = self._execute(
+                    connection,
+                    """
+                    SELECT * FROM studio_workflow_artifacts
+                    WHERE project_id = ? AND content_hash = ?
+                    """,
+                    (artifact.project_id, artifact.content_hash),
+                ).fetchone()
+            if row is None:
+                raise
+            existing = _workflow_artifact_from_row(row)
+            if existing.canonical_json != artifact.canonical_json:
+                raise StudioConflict("Artifact Hash collision detected.") from exc
+            return existing
+        return self.get_workflow_artifact(
+            artifact.id,
+            project_id=artifact.project_id,
+            principal_key=principal_key,
+        )
+
+    def get_workflow_artifact(
+        self,
+        artifact_id: str,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> WorkflowArtifact:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_workflow_artifacts
+                WHERE id = ? AND project_id = ?
+                """,
+                (artifact_id, project_id),
+            ).fetchone()
+        if row is None:
+            raise StudioRecordNotFound("The Workflow Artifact does not exist.")
+        return _workflow_artifact_from_row(row)
+
+    def create_change_request(
+        self,
+        *,
+        change_request: ChangeRequest,
+        initial_event: ReviewEvent,
+        principal_key: str,
+        repair_proposal_id: str | None = None,
+        repair_proposal_version: int | None = None,
+    ) -> ChangeRequest:
+        self.get_project_for_principal(change_request.project_id, principal_key)
+        if initial_event.change_request_id != change_request.id:
+            raise ValueError("Initial review event must belong to the Change Request.")
+        with self._transaction(immediate=True) as connection:
+            if repair_proposal_id is not None:
+                proposal = self._execute(
+                    connection,
+                    """
+                    SELECT * FROM studio_repair_proposals
+                    WHERE id = ? AND project_id = ?
+                    """,
+                    (repair_proposal_id, change_request.project_id),
+                ).fetchone()
+                if proposal is None:
+                    raise StudioRecordNotFound(
+                        "The Repair Proposal does not exist."
+                    )
+                if repair_proposal_version is None:
+                    raise StudioConflict(
+                        "Repair Proposal linkage requires its current version."
+                    )
+                if str(proposal["build_id"]) != str(change_request.build_id):
+                    raise StudioConflict(
+                        "The Change Request must use the Repair Proposal Build."
+                    )
+                if proposal["change_request_id"] is not None:
+                    raise StudioConflict(
+                        "The Repair Proposal is already linked to review."
+                    )
+                if int(proposal["version"]) != repair_proposal_version:
+                    raise StudioConflict(
+                        "The Repair Proposal changed; reload before review."
+                    )
+            self._insert_change_request(connection, change_request)
+            self._insert_review_event(connection, initial_event)
+            if repair_proposal_id is not None:
+                cursor = self._execute(
+                    connection,
+                    """
+                    UPDATE studio_repair_proposals
+                    SET change_request_id = ?, status = 'in_review',
+                        version = version + 1, updated_at = ?
+                    WHERE id = ? AND project_id = ? AND version = ?
+                      AND change_request_id IS NULL
+                    """,
+                    (
+                        change_request.id,
+                        _timestamp(change_request.created_at),
+                        repair_proposal_id,
+                        change_request.project_id,
+                        repair_proposal_version,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise StudioConflict(
+                        "The Repair Proposal changed before review was created."
+                    )
+            _insert_activity(
+                self,
+                connection,
+                project_id=change_request.project_id,
+                principal_key=principal_key,
+                kind="review.change_request.created",
+                entity_type="change_request",
+                entity_id=change_request.id,
+                summary={
+                    "artifact_hash": change_request.artifact_hash,
+                    "status": change_request.status,
+                },
+                now=change_request.created_at,
+            )
+        return self.get_change_request(
+            change_request.id,
+            project_id=change_request.project_id,
+            principal_key=principal_key,
+        )
+
+    def _insert_change_request(self, connection: Any, item: ChangeRequest) -> None:
+        self._execute(
+            connection,
+            """
+            INSERT INTO studio_change_requests(
+                id, project_id, build_id, candidate_id, scenario_run_id,
+                artifact_id, artifact_hash, title, release_note, author_key,
+                assignee_key, status, policy_json, evidence_binding_hash,
+                binding_hash, supersedes_id, superseded_by_id, expires_at,
+                version, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item.id,
+                item.project_id,
+                item.build_id,
+                item.candidate_id,
+                item.scenario_run_id,
+                item.artifact_id,
+                item.artifact_hash,
+                item.title,
+                item.release_note,
+                item.author_key,
+                item.assignee_key,
+                item.status,
+                _json_dump(item.policy.model_dump(mode="json")),
+                item.evidence_binding_hash,
+                item.binding_hash,
+                item.supersedes_id,
+                item.superseded_by_id,
+                _timestamp(item.expires_at),
+                item.version,
+                _timestamp(item.created_at),
+                _timestamp(item.updated_at),
+            ),
+        )
+
+    def get_change_request(
+        self,
+        change_request_id: str,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> ChangeRequest:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_change_requests
+                WHERE id = ? AND project_id = ?
+                """,
+                (change_request_id, project_id),
+            ).fetchone()
+        if row is None:
+            raise StudioRecordNotFound("The Change Request does not exist.")
+        return _change_request_from_row(row)
+
+    def list_change_requests(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> list[ChangeRequest]:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_change_requests
+                WHERE project_id = ?
+                ORDER BY updated_at DESC, id DESC
+                """,
+                (project_id,),
+            ).fetchall()
+        return [_change_request_from_row(row) for row in rows]
+
+    def list_review_events(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+        change_request_id: str,
+    ) -> list[ReviewEvent]:
+        self.get_change_request(
+            change_request_id,
+            project_id=project_id,
+            principal_key=principal_key,
+        )
+        with self._reader() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_review_events
+                WHERE project_id = ? AND change_request_id = ?
+                ORDER BY created_at ASC, id ASC
+                """,
+                (project_id, change_request_id),
+            ).fetchall()
+        return [_review_event_from_row(row) for row in rows]
+
+    def append_review_event(
+        self,
+        *,
+        event: ReviewEvent,
+        principal_key: str,
+    ) -> ReviewEvent:
+        self.get_change_request(
+            event.change_request_id,
+            project_id=event.project_id,
+            principal_key=principal_key,
+        )
+        with self._transaction(immediate=True) as connection:
+            self._insert_review_event(connection, event)
+        return event
+
+    def _insert_review_event(self, connection: Any, item: ReviewEvent) -> None:
+        self._execute(
+            connection,
+            """
+            INSERT INTO studio_review_events(
+                id, project_id, change_request_id, kind, actor_key,
+                body, assignee_key, binding_hash, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item.id,
+                item.project_id,
+                item.change_request_id,
+                item.kind,
+                item.actor_key,
+                item.body,
+                item.assignee_key,
+                item.binding_hash,
+                _timestamp(item.created_at),
+            ),
+        )
+
+    def assign_change_request(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+        change_request_id: str,
+        assignee_key: str,
+        expected_version: int,
+        event: ReviewEvent,
+    ) -> ChangeRequest:
+        self.get_change_request(
+            change_request_id,
+            project_id=project_id,
+            principal_key=principal_key,
+        )
+        with self._transaction(immediate=True) as connection:
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE studio_change_requests
+                SET assignee_key = ?, version = version + 1, updated_at = ?
+                WHERE id = ? AND project_id = ? AND version = ?
+                  AND status IN ('in_review', 'changes_requested')
+                """,
+                (
+                    assignee_key,
+                    _timestamp(event.created_at),
+                    change_request_id,
+                    project_id,
+                    expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StudioConflict("The Change Request changed or is no longer assignable.")
+            self._insert_review_event(connection, event)
+        return self.get_change_request(
+            change_request_id,
+            project_id=project_id,
+            principal_key=principal_key,
+        )
+
+    def decide_change_request(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+        change_request_id: str,
+        expected_version: int,
+        expected_binding_hash: str,
+        status: str,
+        event: ReviewEvent,
+    ) -> ChangeRequest:
+        self.get_change_request(
+            change_request_id,
+            project_id=project_id,
+            principal_key=principal_key,
+        )
+        with self._transaction(immediate=True) as connection:
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE studio_change_requests
+                SET status = ?, version = version + 1, updated_at = ?
+                WHERE id = ? AND project_id = ? AND version = ?
+                  AND binding_hash = ? AND status IN ('in_review', 'changes_requested')
+                """,
+                (
+                    status,
+                    _timestamp(event.created_at),
+                    change_request_id,
+                    project_id,
+                    expected_version,
+                    expected_binding_hash,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StudioConflict(
+                    "The review binding or version changed; reload before deciding."
+                )
+            self._insert_review_event(connection, event)
+        return self.get_change_request(
+            change_request_id,
+            project_id=project_id,
+            principal_key=principal_key,
+        )
+
+    def supersede_change_request(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+        old_request_id: str,
+        new_request: ChangeRequest,
+        new_event: ReviewEvent,
+        old_event: ReviewEvent,
+        expected_old_version: int,
+    ) -> ChangeRequest:
+        self.get_change_request(
+            old_request_id,
+            project_id=project_id,
+            principal_key=principal_key,
+        )
+        with self._transaction(immediate=True) as connection:
+            self._insert_change_request(connection, new_request)
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE studio_change_requests
+                SET status = 'superseded', superseded_by_id = ?,
+                    version = version + 1, updated_at = ?
+                WHERE id = ? AND project_id = ? AND version = ?
+                  AND status IN ('in_review', 'changes_requested')
+                """,
+                (
+                    new_request.id,
+                    _timestamp(old_event.created_at),
+                    old_request_id,
+                    project_id,
+                    expected_old_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StudioConflict("The Change Request can no longer be superseded.")
+            self._insert_review_event(connection, old_event)
+            self._insert_review_event(connection, new_event)
+        return self.get_change_request(
+            new_request.id,
+            project_id=project_id,
+            principal_key=principal_key,
+        )
+
+    def expire_change_request(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+        change_request_id: str,
+        expected_version: int,
+        event: ReviewEvent,
+    ) -> ChangeRequest:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._transaction(immediate=True) as connection:
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE studio_change_requests
+                SET status = 'expired', version = version + 1, updated_at = ?
+                WHERE id = ? AND project_id = ? AND version = ?
+                  AND status IN ('in_review', 'changes_requested')
+                """,
+                (
+                    _timestamp(event.created_at),
+                    change_request_id,
+                    project_id,
+                    expected_version,
+                ),
+            )
+            if cursor.rowcount == 1:
+                self._insert_review_event(connection, event)
+        return self.get_change_request(
+            change_request_id,
+            project_id=project_id,
+            principal_key=principal_key,
+        )
+
+    def create_logical_app(
+        self,
+        *,
+        item: LogicalApp,
+        principal_key: str,
+    ) -> LogicalApp:
+        self.get_project_for_principal(item.project_id, principal_key)
+        with self._transaction(immediate=True) as connection:
+            self._execute(
+                connection,
+                """
+                INSERT INTO studio_logical_apps(
+                    id, project_id, name, app_mode, created_by, version,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    item.id,
+                    item.project_id,
+                    item.name,
+                    item.app_mode,
+                    item.created_by,
+                    item.version,
+                    _timestamp(item.created_at),
+                    _timestamp(item.updated_at),
+                ),
+            )
+        return item
+
+    def get_logical_app(
+        self,
+        logical_app_id: str,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> LogicalApp:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            row = self._execute(
+                connection,
+                "SELECT * FROM studio_logical_apps WHERE id = ? AND project_id = ?",
+                (logical_app_id, project_id),
+            ).fetchone()
+        if row is None:
+            raise StudioRecordNotFound("The logical app does not exist.")
+        return _logical_app_from_row(row)
+
+    def list_logical_apps(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> list[LogicalApp]:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_logical_apps
+                WHERE project_id = ? ORDER BY updated_at DESC, id DESC
+                """,
+                (project_id,),
+            ).fetchall()
+        return [_logical_app_from_row(row) for row in rows]
+
+    def create_release_environment(
+        self,
+        *,
+        item: ReleaseEnvironment,
+        principal_key: str,
+    ) -> ReleaseEnvironment:
+        self.get_logical_app(
+            item.logical_app_id,
+            project_id=item.project_id,
+            principal_key=principal_key,
+        )
+        with self._transaction(immediate=True) as connection:
+            self._execute(
+                connection,
+                """
+                INSERT INTO studio_release_environments(
+                    id, project_id, logical_app_id, name, classification,
+                    target_app_ref, tracked_draft_hash, enabled, version,
+                    created_by, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    item.id,
+                    item.project_id,
+                    item.logical_app_id,
+                    item.name,
+                    item.classification,
+                    item.target_app_ref,
+                    item.tracked_draft_hash,
+                    int(item.enabled),
+                    item.version,
+                    item.created_by,
+                    _timestamp(item.created_at),
+                    _timestamp(item.updated_at),
+                ),
+            )
+        return item
+
+    def get_release_environment(
+        self,
+        environment_id: str,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> ReleaseEnvironment:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_release_environments
+                WHERE id = ? AND project_id = ?
+                """,
+                (environment_id, project_id),
+            ).fetchone()
+        if row is None:
+            raise StudioRecordNotFound("The release environment does not exist.")
+        return _release_environment_from_row(row)
+
+    def list_release_environments(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> list[ReleaseEnvironment]:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_release_environments
+                WHERE project_id = ? ORDER BY updated_at DESC, id DESC
+                """,
+                (project_id,),
+            ).fetchall()
+        return [_release_environment_from_row(row) for row in rows]
+
+    def update_environment_tracked_hash(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+        environment_id: str,
+        tracked_hash: str,
+        expected_version: int,
+    ) -> ReleaseEnvironment:
+        self.get_release_environment(
+            environment_id,
+            project_id=project_id,
+            principal_key=principal_key,
+        )
+        with self._transaction(immediate=True) as connection:
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE studio_release_environments
+                SET tracked_draft_hash = ?, version = version + 1, updated_at = ?
+                WHERE id = ? AND project_id = ? AND version = ?
+                """,
+                (
+                    tracked_hash,
+                    _timestamp(utc_now()),
+                    environment_id,
+                    project_id,
+                    expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StudioConflict("The release environment changed; reload first.")
+        return self.get_release_environment(
+            environment_id,
+            project_id=project_id,
+            principal_key=principal_key,
+        )
+
+    def upsert_environment_mapping(
+        self,
+        *,
+        item: EnvironmentMappingSet,
+        principal_key: str,
+        expected_version: int | None,
+    ) -> EnvironmentMappingSet:
+        self.get_release_environment(
+            item.environment_id,
+            project_id=item.project_id,
+            principal_key=principal_key,
+        )
+        with self._transaction(immediate=True) as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_environment_mappings
+                WHERE project_id = ? AND environment_id = ?
+                """,
+                (item.project_id, item.environment_id),
+            ).fetchone()
+            if row is None:
+                if expected_version is not None:
+                    raise StudioConflict("The environment mapping does not exist yet.")
+                self._execute(
+                    connection,
+                    """
+                    INSERT INTO studio_environment_mappings(
+                        id, project_id, environment_id, mappings_json,
+                        mapping_hash, configured_by, version, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    """,
+                    (
+                        item.id,
+                        item.project_id,
+                        item.environment_id,
+                        _json_dump([value.model_dump(mode="json") for value in item.mappings]),
+                        item.mapping_hash,
+                        item.configured_by,
+                        _timestamp(item.created_at),
+                        _timestamp(item.updated_at),
+                    ),
+                )
+            else:
+                existing = _environment_mapping_from_row(row)
+                if expected_version != existing.version:
+                    raise StudioConflict("The environment mapping changed; reload first.")
+                self._execute(
+                    connection,
+                    """
+                    UPDATE studio_environment_mappings
+                    SET mappings_json = ?, mapping_hash = ?, configured_by = ?,
+                        version = version + 1, updated_at = ?
+                    WHERE id = ? AND version = ?
+                    """,
+                    (
+                        _json_dump([value.model_dump(mode="json") for value in item.mappings]),
+                        item.mapping_hash,
+                        item.configured_by,
+                        _timestamp(item.updated_at),
+                        existing.id,
+                        existing.version,
+                    ),
+                )
+        result = self.get_environment_mapping(
+            environment_id=item.environment_id,
+            project_id=item.project_id,
+            principal_key=principal_key,
+        )
+        assert result is not None
+        return result
+
+    def get_environment_mapping(
+        self,
+        *,
+        environment_id: str,
+        project_id: str,
+        principal_key: str,
+    ) -> EnvironmentMappingSet | None:
+        self.get_release_environment(
+            environment_id,
+            project_id=project_id,
+            principal_key=principal_key,
+        )
+        with self._reader() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_environment_mappings
+                WHERE project_id = ? AND environment_id = ?
+                """,
+                (project_id, environment_id),
+            ).fetchone()
+        return _environment_mapping_from_row(row) if row is not None else None
+
+    def list_environment_mappings(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> list[EnvironmentMappingSet]:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_environment_mappings
+                WHERE project_id = ? ORDER BY updated_at DESC, id DESC
+                """,
+                (project_id,),
+            ).fetchall()
+        return [_environment_mapping_from_row(row) for row in rows]
+
+    def create_release_authorization(
+        self,
+        *,
+        authorization: ReleaseAuthorization,
+        principal_key: str,
+    ) -> ReleaseAuthorization:
+        self.get_change_request(
+            authorization.change_request_id,
+            project_id=authorization.project_id,
+            principal_key=principal_key,
+        )
+        with self._transaction(immediate=True) as connection:
+            self._execute(
+                connection,
+                """
+                INSERT INTO studio_release_authorizations(
+                    id, project_id, change_request_id, artifact_id,
+                    environment_id, action, artifact_hash, mapping_hash,
+                    policy_hash, target_hash, preview_hash, authorized_by,
+                    status, expires_at, created_at, consumed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    authorization.id,
+                    authorization.project_id,
+                    authorization.change_request_id,
+                    authorization.artifact_id,
+                    authorization.environment_id,
+                    authorization.action,
+                    authorization.artifact_hash,
+                    authorization.mapping_hash,
+                    authorization.policy_hash,
+                    authorization.target_hash,
+                    authorization.preview_hash,
+                    authorization.authorized_by,
+                    authorization.status,
+                    _timestamp(authorization.expires_at),
+                    _timestamp(authorization.created_at),
+                    None,
+                ),
+            )
+        return authorization
+
+    def get_release_authorization(
+        self,
+        authorization_id: str,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> ReleaseAuthorization:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_release_authorizations
+                WHERE id = ? AND project_id = ?
+                """,
+                (authorization_id, project_id),
+            ).fetchone()
+        if row is None:
+            raise StudioRecordNotFound("The release authorization does not exist.")
+        return _release_authorization_from_row(row)
+
+    def consume_release_authorization(
+        self,
+        *,
+        authorization_id: str,
+        project_id: str,
+        principal_key: str,
+    ) -> ReleaseAuthorization:
+        authorization = self.get_release_authorization(
+            authorization_id,
+            project_id=project_id,
+            principal_key=principal_key,
+        )
+        now = utc_now()
+        with self._transaction(immediate=True) as connection:
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE studio_release_authorizations
+                SET status = 'consumed', consumed_at = ?
+                WHERE id = ? AND project_id = ? AND status = 'pending'
+                """,
+                (_timestamp(now), authorization_id, project_id),
+            )
+            if cursor.rowcount != 1:
+                raise StudioConflict(
+                    "The release authorization was already claimed or is no longer pending."
+                )
+        return self.get_release_authorization(
+            authorization_id,
+            project_id=project_id,
+            principal_key=principal_key,
+        )
+
+    def create_release_intent(
+        self,
+        *,
+        record: ReleaseRecord,
+        principal_key: str,
+    ) -> tuple[ReleaseRecord, bool]:
+        self.get_change_request(
+            record.change_request_id,
+            project_id=record.project_id,
+            principal_key=principal_key,
+        )
+        try:
+            with self._transaction(immediate=True) as connection:
+                self._execute(
+                    connection,
+                    """
+                    INSERT INTO studio_release_records(
+                        id, project_id, change_request_id, artifact_id,
+                        environment_id, authorization_id, action,
+                        idempotency_key, outcome, actor_key, before_hash,
+                        after_hash, receipt_id, external_ref, release_note,
+                        details_json, created_at, completed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    _release_record_values(record),
+                )
+        except Exception as exc:
+            if not _is_unique_violation(exc):
+                raise
+            with self._reader() as connection:
+                row = self._execute(
+                    connection,
+                    """
+                    SELECT * FROM studio_release_records
+                    WHERE project_id = ? AND action = ? AND idempotency_key = ?
+                    """,
+                    (record.project_id, record.action, record.idempotency_key),
+                ).fetchone()
+            if row is None:
+                raise
+            existing = _release_record_from_row(row)
+            if (
+                existing.authorization_id != record.authorization_id
+                or existing.artifact_id != record.artifact_id
+                or existing.environment_id != record.environment_id
+            ):
+                raise StudioConflict(
+                    "The idempotency key already belongs to another release binding."
+                ) from exc
+            return existing, False
+        return record, True
+
+    def finish_release_record(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+        record_id: str,
+        outcome: str,
+        after_hash: str | None,
+        receipt_id: str | None,
+        external_ref: str | None,
+        details: dict[str, Any],
+    ) -> ReleaseRecord:
+        self.get_project_for_principal(project_id, principal_key)
+        now = utc_now()
+        with self._transaction(immediate=True) as connection:
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE studio_release_records
+                SET outcome = ?, after_hash = ?, receipt_id = ?,
+                    external_ref = ?, details_json = ?, completed_at = ?
+                WHERE id = ? AND project_id = ? AND outcome = 'intent_recorded'
+                """,
+                (
+                    outcome,
+                    after_hash,
+                    receipt_id,
+                    external_ref,
+                    _json_dump(_safe_json(details)),
+                    _timestamp(now),
+                    record_id,
+                    project_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                row = self._execute(
+                    connection,
+                    "SELECT * FROM studio_release_records WHERE id = ? AND project_id = ?",
+                    (record_id, project_id),
+                ).fetchone()
+                if row is None:
+                    raise StudioRecordNotFound("The release record does not exist.")
+                existing = _release_record_from_row(row)
+                if existing.outcome != outcome:
+                    raise StudioConflict("The release outcome was already finalized.")
+                return existing
+            row = self._execute(
+                connection,
+                "SELECT * FROM studio_release_records WHERE id = ?",
+                (record_id,),
+            ).fetchone()
+        assert row is not None
+        return _release_record_from_row(row)
+
+    def list_release_records(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+        environment_id: str | None = None,
+    ) -> list[ReleaseRecord]:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            if environment_id is None:
+                rows = self._execute(
+                    connection,
+                    """
+                    SELECT * FROM studio_release_records
+                    WHERE project_id = ? ORDER BY created_at DESC, id DESC
+                    """,
+                    (project_id,),
+                ).fetchall()
+            else:
+                rows = self._execute(
+                    connection,
+                    """
+                    SELECT * FROM studio_release_records
+                    WHERE project_id = ? AND environment_id = ?
+                    ORDER BY created_at DESC, id DESC
+                    """,
+                    (project_id, environment_id),
+                ).fetchall()
+        return [_release_record_from_row(row) for row in rows]
+
+    def get_release_record(
+        self,
+        record_id: str,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> ReleaseRecord:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_release_records
+                WHERE id = ? AND project_id = ?
+                """,
+                (record_id, project_id),
+            ).fetchone()
+        if row is None:
+            raise StudioRecordNotFound("The release record does not exist.")
+        return _release_record_from_row(row)
+
+    def interrupt_active_release_records(self) -> int:
+        """A restart never replays a Dify Apply or Publish intent."""
+        now = utc_now()
+        details_value = {
+            "message": "Service restarted after the external intent was persisted.",
+            "automatic_retry": False,
+            "reconciliation_required": True,
+        }
+        details = _json_dump(details_value)
+        with self._transaction(immediate=True) as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_release_records
+                WHERE outcome = 'intent_recorded'
+                """,
+            ).fetchall()
+            for row in rows:
+                operation = f"release.{row['action']}"
+                receipt_row = self._execute(
+                    connection,
+                    """
+                    SELECT * FROM studio_receipts
+                    WHERE project_id = ? AND operation = ? AND idempotency_key = ?
+                    """,
+                    (row["project_id"], operation, row["idempotency_key"]),
+                ).fetchone()
+                if receipt_row is None:
+                    receipt_id = new_id()
+                    self._execute(
+                        connection,
+                        """
+                        INSERT INTO studio_receipts(
+                            id, project_id, operation, idempotency_key, outcome,
+                            external_ref, details_json, created_at
+                        ) VALUES (?, ?, ?, ?, 'ambiguous', NULL, ?, ?)
+                        """,
+                        (
+                            receipt_id,
+                            row["project_id"],
+                            operation,
+                            row["idempotency_key"],
+                            details,
+                            _timestamp(now),
+                        ),
+                    )
+                else:
+                    receipt_id = str(receipt_row["id"])
+                    if receipt_row["outcome"] == "pending":
+                        self._execute(
+                            connection,
+                            """
+                            UPDATE studio_receipts
+                            SET outcome = 'ambiguous', details_json = ?
+                            WHERE id = ?
+                            """,
+                            (details, receipt_id),
+                        )
+                self._execute(
+                    connection,
+                    """
+                    UPDATE studio_release_records
+                    SET outcome = 'ambiguous', receipt_id = ?, details_json = ?, completed_at = ?
+                    WHERE id = ? AND outcome = 'intent_recorded'
+                    """,
+                    (receipt_id, details, _timestamp(now), row["id"]),
+                )
+        return len(rows)
+
+    def upsert_execution_observation(
+        self,
+        *,
+        item: ExecutionObservationRecord,
+        principal_key: str,
+    ) -> tuple[ExecutionObservationRecord, bool]:
+        self.get_release_environment(
+            item.environment_id,
+            project_id=item.project_id,
+            principal_key=principal_key,
+        )
+        now = item.updated_at
+        with self._transaction(immediate=True) as connection:
+            existing = self._execute(
+                connection,
+                """
+                SELECT id FROM studio_execution_observations
+                WHERE project_id = ? AND environment_id = ?
+                  AND dify_execution_id = ?
+                """,
+                (item.project_id, item.environment_id, item.dify_execution_id),
+            ).fetchone()
+            self._execute(
+                connection,
+                """
+                INSERT INTO studio_execution_observations(
+                    id, project_id, logical_app_id, environment_id, artifact_id,
+                    release_record_id, dify_app_id, dify_execution_id,
+                    dify_workflow_version, status, correlation_state,
+                    correlation_reason, failed_node_id, failed_node_type,
+                    stable_error_code, safe_message, latency_ms, total_tokens,
+                    estimated_cost_microusd, total_steps, input_shape_json,
+                    output_shape_json, node_path_json, evidence_hash, started_at,
+                    finished_at, observed_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project_id, environment_id, dify_execution_id)
+                DO UPDATE SET
+                    logical_app_id = excluded.logical_app_id,
+                    artifact_id = excluded.artifact_id,
+                    release_record_id = excluded.release_record_id,
+                    dify_workflow_version = excluded.dify_workflow_version,
+                    status = excluded.status,
+                    correlation_state = excluded.correlation_state,
+                    correlation_reason = excluded.correlation_reason,
+                    failed_node_id = excluded.failed_node_id,
+                    failed_node_type = excluded.failed_node_type,
+                    stable_error_code = excluded.stable_error_code,
+                    safe_message = excluded.safe_message,
+                    latency_ms = excluded.latency_ms,
+                    total_tokens = excluded.total_tokens,
+                    estimated_cost_microusd = excluded.estimated_cost_microusd,
+                    total_steps = excluded.total_steps,
+                    input_shape_json = excluded.input_shape_json,
+                    output_shape_json = excluded.output_shape_json,
+                    node_path_json = excluded.node_path_json,
+                    evidence_hash = excluded.evidence_hash,
+                    started_at = excluded.started_at,
+                    finished_at = excluded.finished_at,
+                    observed_at = excluded.observed_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    item.id,
+                    item.project_id,
+                    item.logical_app_id,
+                    item.environment_id,
+                    item.artifact_id,
+                    item.release_record_id,
+                    item.dify_app_id,
+                    item.dify_execution_id,
+                    item.dify_workflow_version,
+                    item.status,
+                    item.correlation_state,
+                    item.correlation_reason,
+                    item.failed_node_id,
+                    item.failed_node_type,
+                    item.stable_error_code,
+                    item.safe_message,
+                    item.latency_ms,
+                    item.total_tokens,
+                    item.estimated_cost_microusd,
+                    item.total_steps,
+                    _json_dump(_safe_json(item.input_shape)),
+                    _json_dump(_safe_json(item.output_shape)),
+                    _json_dump(
+                        [value.model_dump(mode="json") for value in item.node_path]
+                    ),
+                    item.evidence_hash,
+                    _timestamp(item.started_at) if item.started_at else None,
+                    _timestamp(item.finished_at) if item.finished_at else None,
+                    _timestamp(item.observed_at),
+                    _timestamp(item.updated_at),
+                ),
+            )
+            if existing is None:
+                _insert_activity(
+                    self,
+                    connection,
+                    project_id=item.project_id,
+                    principal_key=principal_key,
+                    kind="run.execution.observed",
+                    entity_type="execution",
+                    entity_id=item.id,
+                    summary={
+                        "status": item.status,
+                        "correlation_state": item.correlation_state,
+                        "stable_error_code": item.stable_error_code,
+                    },
+                    now=now,
+                )
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_execution_observations
+                WHERE project_id = ? AND environment_id = ?
+                  AND dify_execution_id = ?
+                """,
+                (item.project_id, item.environment_id, item.dify_execution_id),
+            ).fetchone()
+        assert row is not None
+        return _execution_observation_from_row(row), existing is None
+
+    def get_execution_observation(
+        self,
+        execution_id: str,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> ExecutionObservationRecord:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_execution_observations
+                WHERE id = ? AND project_id = ?
+                """,
+                (execution_id, project_id),
+            ).fetchone()
+        if row is None:
+            raise StudioRecordNotFound("The execution observation does not exist.")
+        return _execution_observation_from_row(row)
+
+    def list_execution_observations(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+        logical_app_id: str | None = None,
+        environment_id: str | None = None,
+        artifact_id: str | None = None,
+        status: str | None = None,
+        error_code: str | None = None,
+        started_from: datetime | None = None,
+        started_to: datetime | None = None,
+        limit: int = 500,
+    ) -> list[ExecutionObservationRecord]:
+        self.get_project_for_principal(project_id, principal_key)
+        clauses = ["project_id = ?"]
+        params: list[Any] = [project_id]
+        for column, value in (
+            ("logical_app_id", logical_app_id),
+            ("environment_id", environment_id),
+            ("artifact_id", artifact_id),
+            ("status", status),
+            ("stable_error_code", error_code),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        if started_from is not None:
+            clauses.append("started_at >= ?")
+            params.append(_timestamp(started_from))
+        if started_to is not None:
+            clauses.append("started_at <= ?")
+            params.append(_timestamp(started_to))
+        params.append(max(1, min(limit, 1_000)))
+        with self._reader() as connection:
+            rows = self._execute(
+                connection,
+                f"""
+                SELECT * FROM studio_execution_observations
+                WHERE {' AND '.join(clauses)}
+                ORDER BY observed_at DESC, id DESC LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        return [_execution_observation_from_row(row) for row in rows]
+
+    def upsert_run_incident(
+        self,
+        *,
+        item: RunIncident,
+        principal_key: str,
+    ) -> tuple[RunIncident, bool]:
+        self.get_execution_observation(
+            item.execution_id,
+            project_id=item.project_id,
+            principal_key=principal_key,
+        )
+        with self._transaction(immediate=True) as connection:
+            existing = self._execute(
+                connection,
+                """
+                SELECT id FROM studio_run_incidents
+                WHERE project_id = ? AND execution_id = ?
+                """,
+                (item.project_id, item.execution_id),
+            ).fetchone()
+            self._execute(
+                connection,
+                """
+                INSERT INTO studio_run_incidents(
+                    id, project_id, execution_id, cluster_key, title, severity,
+                    status, stable_error_code, affected_node_id,
+                    affected_node_title, business_cause, next_step,
+                    first_seen_at, last_seen_at, version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project_id, execution_id) DO UPDATE SET
+                    cluster_key = excluded.cluster_key,
+                    title = excluded.title,
+                    severity = excluded.severity,
+                    stable_error_code = excluded.stable_error_code,
+                    affected_node_id = excluded.affected_node_id,
+                    affected_node_title = excluded.affected_node_title,
+                    business_cause = excluded.business_cause,
+                    next_step = excluded.next_step,
+                    last_seen_at = excluded.last_seen_at,
+                    version = studio_run_incidents.version + 1
+                """,
+                (
+                    item.id,
+                    item.project_id,
+                    item.execution_id,
+                    item.cluster_key,
+                    item.title,
+                    item.severity,
+                    item.status,
+                    item.stable_error_code,
+                    item.affected_node_id,
+                    item.affected_node_title,
+                    item.business_cause,
+                    item.next_step,
+                    _timestamp(item.first_seen_at),
+                    _timestamp(item.last_seen_at),
+                    item.version,
+                ),
+            )
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_run_incidents
+                WHERE project_id = ? AND execution_id = ?
+                """,
+                (item.project_id, item.execution_id),
+            ).fetchone()
+        assert row is not None
+        return _run_incident_from_row(row), existing is None
+
+    def get_run_incident(
+        self,
+        incident_id: str,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> RunIncident:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_run_incidents
+                WHERE id = ? AND project_id = ?
+                """,
+                (incident_id, project_id),
+            ).fetchone()
+        if row is None:
+            raise StudioRecordNotFound("The Run incident does not exist.")
+        return _run_incident_from_row(row)
+
+    def list_run_incidents(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+        status: str | None = None,
+    ) -> list[RunIncident]:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            if status is None:
+                rows = self._execute(
+                    connection,
+                    """
+                    SELECT * FROM studio_run_incidents
+                    WHERE project_id = ? ORDER BY last_seen_at DESC, id DESC
+                    """,
+                    (project_id,),
+                ).fetchall()
+            else:
+                rows = self._execute(
+                    connection,
+                    """
+                    SELECT * FROM studio_run_incidents
+                    WHERE project_id = ? AND status = ?
+                    ORDER BY last_seen_at DESC, id DESC
+                    """,
+                    (project_id, status),
+                ).fetchall()
+        return [_run_incident_from_row(row) for row in rows]
+
+    def create_repair_proposal(
+        self,
+        *,
+        item: RepairProposal,
+        principal_key: str,
+    ) -> tuple[RepairProposal, bool]:
+        self.get_run_incident(
+            item.incident_id,
+            project_id=item.project_id,
+            principal_key=principal_key,
+        )
+        self.get_build(
+            item.build_id,
+            project_id=item.project_id,
+            principal_key=principal_key,
+        )
+        try:
+            with self._transaction(immediate=True) as connection:
+                self._execute(
+                    connection,
+                    """
+                    INSERT INTO studio_repair_proposals(
+                        id, project_id, incident_id, execution_id,
+                        source_artifact_id, source_release_record_id, build_id,
+                        change_request_id, title, business_summary, evidence_json,
+                        evidence_hash, status, created_by, version, created_at,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        item.id,
+                        item.project_id,
+                        item.incident_id,
+                        item.execution_id,
+                        item.source_artifact_id,
+                        item.source_release_record_id,
+                        item.build_id,
+                        item.change_request_id,
+                        item.title,
+                        item.business_summary,
+                        _json_dump(_safe_json(item.evidence)),
+                        item.evidence_hash,
+                        item.status,
+                        item.created_by,
+                        item.version,
+                        _timestamp(item.created_at),
+                        _timestamp(item.updated_at),
+                    ),
+                )
+                _insert_activity(
+                    self,
+                    connection,
+                    project_id=item.project_id,
+                    principal_key=principal_key,
+                    kind="run.repair.proposed",
+                    entity_type="repair_proposal",
+                    entity_id=item.id,
+                    summary={
+                        "incident_id": item.incident_id,
+                        "build_id": item.build_id,
+                        "external_write": False,
+                    },
+                    now=item.created_at,
+                )
+            return item, True
+        except Exception as exc:
+            if not _is_unique_violation(exc):
+                raise
+            with self._reader() as connection:
+                row = self._execute(
+                    connection,
+                    """
+                    SELECT * FROM studio_repair_proposals
+                    WHERE project_id = ? AND incident_id = ?
+                    """,
+                    (item.project_id, item.incident_id),
+                ).fetchone()
+            if row is None:
+                raise
+            return _repair_proposal_from_row(row), False
+
+    def get_repair_proposal(
+        self,
+        proposal_id: str,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> RepairProposal:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_repair_proposals
+                WHERE id = ? AND project_id = ?
+                """,
+                (proposal_id, project_id),
+            ).fetchone()
+        if row is None:
+            raise StudioRecordNotFound("The Repair Proposal does not exist.")
+        return _repair_proposal_from_row(row)
+
+    def list_repair_proposals(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> list[RepairProposal]:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_repair_proposals
+                WHERE project_id = ? ORDER BY updated_at DESC, id DESC
+                """,
+                (project_id,),
+            ).fetchall()
+        return [_repair_proposal_from_row(row) for row in rows]
+
+    def link_repair_change_request(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+        proposal_id: str,
+        change_request_id: str,
+        expected_version: int,
+    ) -> RepairProposal:
+        self.get_change_request(
+            change_request_id,
+            project_id=project_id,
+            principal_key=principal_key,
+        )
+        with self._transaction(immediate=True) as connection:
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE studio_repair_proposals
+                SET change_request_id = ?, status = 'in_review',
+                    version = version + 1, updated_at = ?
+                WHERE id = ? AND project_id = ? AND version = ?
+                  AND change_request_id IS NULL
+                """,
+                (
+                    change_request_id,
+                    _timestamp(utc_now()),
+                    proposal_id,
+                    project_id,
+                    expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StudioConflict(
+                    "The Repair Proposal changed or is already linked to review."
+                )
+        return self.get_repair_proposal(
+            proposal_id,
+            project_id=project_id,
+            principal_key=principal_key,
+        )
+
+    def save_run_alert_rule(
+        self,
+        *,
+        item: RunAlertRule,
+        principal_key: str,
+        expected_version: int | None = None,
+    ) -> RunAlertRule:
+        _, membership = self.get_project_for_principal(
+            item.project_id,
+            principal_key,
+        )
+        if membership.role not in {"owner", "admin"}:
+            raise StudioAccessDenied("Only a project Admin can configure alerts.")
+        if item.environment_id is not None:
+            self.get_release_environment(
+                item.environment_id,
+                project_id=item.project_id,
+                principal_key=principal_key,
+            )
+        with self._transaction(immediate=True) as connection:
+            current = self._execute(
+                connection,
+                "SELECT * FROM studio_run_alert_rules WHERE id = ? AND project_id = ?",
+                (item.id, item.project_id),
+            ).fetchone()
+            if current is None:
+                if expected_version is not None:
+                    raise StudioConflict("The alert rule does not exist at that version.")
+                self._execute(
+                    connection,
+                    """
+                    INSERT INTO studio_run_alert_rules(
+                        id, project_id, name, environment_id, stable_error_code,
+                        error_count_threshold, failure_rate_threshold,
+                        window_seconds, adapter_ref, enabled, created_by,
+                        version, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    """,
+                    (
+                        item.id,
+                        item.project_id,
+                        item.name,
+                        item.environment_id,
+                        item.stable_error_code,
+                        item.error_count_threshold,
+                        item.failure_rate_threshold,
+                        item.window_seconds,
+                        item.adapter_ref,
+                        int(item.enabled),
+                        item.created_by,
+                        _timestamp(item.created_at),
+                        _timestamp(item.updated_at),
+                    ),
+                )
+            else:
+                if expected_version is None or int(current["version"]) != expected_version:
+                    raise StudioConflict("The alert rule changed; reload before saving.")
+                cursor = self._execute(
+                    connection,
+                    """
+                    UPDATE studio_run_alert_rules
+                    SET name = ?, environment_id = ?, stable_error_code = ?,
+                        error_count_threshold = ?, failure_rate_threshold = ?,
+                        window_seconds = ?, adapter_ref = ?, enabled = ?,
+                        version = version + 1, updated_at = ?
+                    WHERE id = ? AND project_id = ? AND version = ?
+                    """,
+                    (
+                        item.name,
+                        item.environment_id,
+                        item.stable_error_code,
+                        item.error_count_threshold,
+                        item.failure_rate_threshold,
+                        item.window_seconds,
+                        item.adapter_ref,
+                        int(item.enabled),
+                        _timestamp(item.updated_at),
+                        item.id,
+                        item.project_id,
+                        expected_version,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise StudioConflict("The alert rule changed before saving.")
+        return self.get_run_alert_rule(
+            item.id,
+            project_id=item.project_id,
+            principal_key=principal_key,
+        )
+
+    def get_run_alert_rule(
+        self,
+        rule_id: str,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> RunAlertRule:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            row = self._execute(
+                connection,
+                "SELECT * FROM studio_run_alert_rules WHERE id = ? AND project_id = ?",
+                (rule_id, project_id),
+            ).fetchone()
+        if row is None:
+            raise StudioRecordNotFound("The alert rule does not exist.")
+        return _run_alert_rule_from_row(row)
+
+    def list_run_alert_rules(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> list[RunAlertRule]:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_run_alert_rules
+                WHERE project_id = ? ORDER BY updated_at DESC, id DESC
+                """,
+                (project_id,),
+            ).fetchall()
+        return [_run_alert_rule_from_row(row) for row in rows]
+
+    def save_scheduled_regression(
+        self,
+        *,
+        item: ScheduledRegression,
+        principal_key: str,
+        expected_version: int | None = None,
+    ) -> ScheduledRegression:
+        _, membership = self.get_project_for_principal(
+            item.project_id,
+            principal_key,
+        )
+        if membership.role not in {"owner", "admin"}:
+            raise StudioAccessDenied(
+                "Only a project Admin can configure scheduled regressions."
+            )
+        artifact = self.get_workflow_artifact(
+            item.artifact_id,
+            project_id=item.project_id,
+            principal_key=principal_key,
+        )
+        suite = self.get_scenario_suite(
+            item.suite_id,
+            project_id=item.project_id,
+            principal_key=principal_key,
+        )
+        candidate = self.get_candidate_for_project(
+            artifact.candidate_id,
+            project_id=item.project_id,
+            principal_key=principal_key,
+        )
+        if suite.build_id != candidate.build_id:
+            raise StudioConflict(
+                "The scheduled Suite must belong to the released Artifact Build."
+            )
+        with self._transaction(immediate=True) as connection:
+            current = self._execute(
+                connection,
+                "SELECT * FROM studio_scheduled_regressions WHERE id = ? AND project_id = ?",
+                (item.id, item.project_id),
+            ).fetchone()
+            if current is None:
+                if expected_version is not None:
+                    raise StudioConflict("The schedule does not exist at that version.")
+                try:
+                    self._execute(
+                        connection,
+                        """
+                        INSERT INTO studio_scheduled_regressions(
+                            id, project_id, artifact_id, suite_id,
+                            interval_seconds, next_run_at, enabled, created_by,
+                            version, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                        """,
+                        (
+                            item.id,
+                            item.project_id,
+                            item.artifact_id,
+                            item.suite_id,
+                            item.interval_seconds,
+                            _timestamp(item.next_run_at),
+                            int(item.enabled),
+                            item.created_by,
+                            _timestamp(item.created_at),
+                            _timestamp(item.updated_at),
+                        ),
+                    )
+                except Exception as exc:
+                    if _is_unique_violation(exc):
+                        raise StudioConflict(
+                            "This Artifact and Suite already have a schedule."
+                        ) from exc
+                    raise
+            else:
+                if expected_version is None or int(current["version"]) != expected_version:
+                    raise StudioConflict("The schedule changed; reload before saving.")
+                cursor = self._execute(
+                    connection,
+                    """
+                    UPDATE studio_scheduled_regressions
+                    SET interval_seconds = ?, next_run_at = ?, enabled = ?,
+                        version = version + 1, updated_at = ?
+                    WHERE id = ? AND project_id = ? AND version = ?
+                    """,
+                    (
+                        item.interval_seconds,
+                        _timestamp(item.next_run_at),
+                        int(item.enabled),
+                        _timestamp(item.updated_at),
+                        item.id,
+                        item.project_id,
+                        expected_version,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise StudioConflict("The schedule changed before saving.")
+        return self.get_scheduled_regression(
+            item.id,
+            project_id=item.project_id,
+            principal_key=principal_key,
+        )
+
+    def get_scheduled_regression(
+        self,
+        schedule_id: str,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> ScheduledRegression:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            row = self._execute(
+                connection,
+                "SELECT * FROM studio_scheduled_regressions WHERE id = ? AND project_id = ?",
+                (schedule_id, project_id),
+            ).fetchone()
+        if row is None:
+            raise StudioRecordNotFound("The scheduled regression does not exist.")
+        return _scheduled_regression_from_row(row)
+
+    def list_scheduled_regressions(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> list[ScheduledRegression]:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_scheduled_regressions
+                WHERE project_id = ? ORDER BY next_run_at ASC, id ASC
+                """,
+                (project_id,),
+            ).fetchall()
+        return [_scheduled_regression_from_row(row) for row in rows]
+
+    def list_jobs(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> list[DurableJob]:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            rows = self._execute(
+                connection,
+                "SELECT * FROM studio_jobs WHERE project_id = ? ORDER BY created_at DESC",
+                (project_id,),
+            ).fetchall()
+        return [_job_from_row(row) for row in rows]
+
+    def list_outbox(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> list[OutboxMessage]:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            rows = self._execute(
+                connection,
+                "SELECT * FROM studio_outbox WHERE project_id = ? ORDER BY created_at DESC",
+                (project_id,),
+            ).fetchall()
+        return [_outbox_from_row(row) for row in rows]
+
+    def create_scoped_token(
+        self,
+        *,
+        item: ScopedTokenRecord,
+        token_hash: str,
+        principal_key: str,
+    ) -> ScopedTokenRecord:
+        _, membership = self.get_project_for_principal(
+            item.project_id,
+            principal_key,
+        )
+        if membership.role not in {"owner", "admin"}:
+            raise StudioAccessDenied("Only a project Admin can create scoped tokens.")
+        with self._transaction(immediate=True) as connection:
+            self._insert_scoped_token(connection, item, token_hash)
+        return self.get_scoped_token(
+            item.id,
+            project_id=item.project_id,
+            principal_key=principal_key,
+        )
+
+    def _insert_scoped_token(
+        self,
+        connection: Any,
+        item: ScopedTokenRecord,
+        token_hash: str,
+    ) -> None:
+        self._execute(
+            connection,
+            """
+            INSERT INTO studio_scoped_tokens(
+                id, project_id, name, token_hash, token_prefix, scopes_json,
+                created_by, rate_limit_per_minute, expires_at, revoked_at,
+                rotated_from_id, last_used_at, version, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item.id,
+                item.project_id,
+                item.name,
+                token_hash,
+                item.token_prefix,
+                _json_dump({"scopes": item.scopes}),
+                item.created_by,
+                item.rate_limit_per_minute,
+                _timestamp(item.expires_at),
+                _timestamp(item.revoked_at) if item.revoked_at else None,
+                item.rotated_from_id,
+                _timestamp(item.last_used_at) if item.last_used_at else None,
+                item.version,
+                _timestamp(item.created_at),
+            ),
+        )
+
+    def get_scoped_token(
+        self,
+        token_id: str,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> ScopedTokenRecord:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            row = self._execute(
+                connection,
+                "SELECT * FROM studio_scoped_tokens WHERE id = ? AND project_id = ?",
+                (token_id, project_id),
+            ).fetchone()
+        if row is None:
+            raise StudioRecordNotFound("The scoped token does not exist.")
+        return _scoped_token_from_row(row)
+
+    def list_scoped_tokens(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+    ) -> list[ScopedTokenRecord]:
+        self.get_project_for_principal(project_id, principal_key)
+        with self._reader() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_scoped_tokens
+                WHERE project_id = ? ORDER BY created_at DESC, id DESC
+                """,
+                (project_id,),
+            ).fetchall()
+        return [_scoped_token_from_row(row) for row in rows]
+
+    def authenticate_scoped_token(
+        self,
+        *,
+        token_hash: str,
+    ) -> ScopedTokenRecord:
+        now = utc_now()
+        with self._transaction(immediate=True) as connection:
+            row = self._execute(
+                connection,
+                "SELECT * FROM studio_scoped_tokens WHERE token_hash = ?",
+                (token_hash,),
+            ).fetchone()
+            if row is None:
+                raise StudioAccessDenied("The scoped token is invalid.")
+            token = _scoped_token_from_row(row)
+            if token.revoked_at is not None or token.expires_at <= now:
+                raise StudioAccessDenied("The scoped token is expired or revoked.")
+            limit_row = self._execute(
+                connection,
+                "SELECT * FROM studio_token_rate_limits WHERE token_id = ?",
+                (token.id,),
+            ).fetchone()
+            now_value = _timestamp(now)
+            if (
+                limit_row is None
+                or now_value - float(limit_row["window_started_at"]) >= 60
+            ):
+                self._execute(
+                    connection,
+                    """
+                    INSERT INTO studio_token_rate_limits(
+                        token_id, window_started_at, request_count, updated_at
+                    ) VALUES (?, ?, 1, ?)
+                    ON CONFLICT(token_id) DO UPDATE SET
+                        window_started_at = excluded.window_started_at,
+                        request_count = 1,
+                        updated_at = excluded.updated_at
+                    """,
+                    (token.id, now_value, now_value),
+                )
+            else:
+                if int(limit_row["request_count"]) >= token.rate_limit_per_minute:
+                    raise StudioRateLimited(
+                        "The scoped token rate limit was reached; retry next minute."
+                    )
+                self._execute(
+                    connection,
+                    """
+                    UPDATE studio_token_rate_limits
+                    SET request_count = request_count + 1, updated_at = ?
+                    WHERE token_id = ?
+                    """,
+                    (now_value, token.id),
+                )
+            self._execute(
+                connection,
+                """
+                UPDATE studio_scoped_tokens
+                SET last_used_at = ?, version = version + 1
+                WHERE id = ? AND version = ?
+                """,
+                (now_value, token.id, token.version),
+            )
+            updated = self._execute(
+                connection,
+                "SELECT * FROM studio_scoped_tokens WHERE id = ?",
+                (token.id,),
+            ).fetchone()
+        assert updated is not None
+        return _scoped_token_from_row(updated)
+
+    def revoke_scoped_token(
+        self,
+        *,
+        token_id: str,
+        project_id: str,
+        principal_key: str,
+        expected_version: int,
+    ) -> ScopedTokenRecord:
+        _, membership = self.get_project_for_principal(project_id, principal_key)
+        if membership.role not in {"owner", "admin"}:
+            raise StudioAccessDenied("Only a project Admin can revoke scoped tokens.")
+        now = utc_now()
+        with self._transaction(immediate=True) as connection:
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE studio_scoped_tokens
+                SET revoked_at = ?, version = version + 1
+                WHERE id = ? AND project_id = ? AND version = ?
+                  AND revoked_at IS NULL
+                """,
+                (
+                    _timestamp(now),
+                    token_id,
+                    project_id,
+                    expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StudioConflict("The scoped token changed or is already revoked.")
+        return self.get_scoped_token(
+            token_id,
+            project_id=project_id,
+            principal_key=principal_key,
+        )
+
+    def rotate_scoped_token(
+        self,
+        *,
+        old_token_id: str,
+        old_expected_version: int,
+        new_item: ScopedTokenRecord,
+        new_token_hash: str,
+        principal_key: str,
+    ) -> ScopedTokenRecord:
+        _, membership = self.get_project_for_principal(
+            new_item.project_id,
+            principal_key,
+        )
+        if membership.role not in {"owner", "admin"}:
+            raise StudioAccessDenied("Only a project Admin can rotate scoped tokens.")
+        now = utc_now()
+        with self._transaction(immediate=True) as connection:
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE studio_scoped_tokens
+                SET revoked_at = ?, version = version + 1
+                WHERE id = ? AND project_id = ? AND version = ?
+                  AND revoked_at IS NULL
+                """,
+                (
+                    _timestamp(now),
+                    old_token_id,
+                    new_item.project_id,
+                    old_expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StudioConflict("The scoped token changed before rotation.")
+            self._insert_scoped_token(connection, new_item, new_token_hash)
+        return self.get_scoped_token(
+            new_item.id,
+            project_id=new_item.project_id,
+            principal_key=principal_key,
+        )
+
     def enqueue_job(
         self,
         *,
@@ -2764,6 +5285,74 @@ class StudioStore:
         assert row is not None
         return _job_from_row(row)
 
+    def request_work_cancel(
+        self,
+        *,
+        project_id: str,
+        principal_key: str,
+        entity_type: str,
+        entity_id: str,
+        reason: str,
+    ) -> None:
+        if entity_type not in {"job", "outbox"}:
+            raise ValueError("Work cancellation supports job or outbox entities.")
+        _, membership = self.get_project_for_principal(project_id, principal_key)
+        if membership.role not in {"owner", "admin", "builder"}:
+            raise StudioAccessDenied("Your project role cannot cancel durable work.")
+        table = "studio_jobs" if entity_type == "job" else "studio_outbox"
+        with self._transaction(immediate=True) as connection:
+            row = self._execute(
+                connection,
+                f"SELECT status FROM {table} WHERE id = ? AND project_id = ?",
+                (entity_id, project_id),
+            ).fetchone()
+            if row is None:
+                raise StudioRecordNotFound("The durable work item does not exist.")
+            if str(row["status"]) in {"completed", "failed", "ambiguous", "cancelled", "dead_letter"}:
+                raise StudioConflict("The durable work item is already terminal.")
+            now = utc_now()
+            self._execute(
+                connection,
+                """
+                INSERT INTO studio_work_controls(
+                    project_id, entity_type, entity_id, cancel_requested,
+                    requested_by, reason, created_at, updated_at
+                ) VALUES (?, ?, ?, 1, ?, ?, ?, ?)
+                ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                    cancel_requested = 1,
+                    requested_by = excluded.requested_by,
+                    reason = excluded.reason,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    project_id,
+                    entity_type,
+                    entity_id,
+                    principal_key,
+                    str(redact_sensitive_data(reason))[:500],
+                    _timestamp(now),
+                    _timestamp(now),
+                ),
+            )
+
+    def work_cancel_requested(
+        self,
+        *,
+        project_id: str,
+        entity_type: str,
+        entity_id: str,
+    ) -> bool:
+        with self._reader() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT cancel_requested FROM studio_work_controls
+                WHERE project_id = ? AND entity_type = ? AND entity_id = ?
+                """,
+                (project_id, entity_type, entity_id),
+            ).fetchone()
+        return bool(row and row["cancel_requested"])
+
     def finish_job(
         self,
         *,
@@ -2772,8 +5361,14 @@ class StudioStore:
         expected_version: int,
         outcome: str,
     ) -> DurableJob:
-        if outcome not in {"completed", "failed", "ambiguous"}:
-            raise ValueError("A job outcome must be completed, failed, or ambiguous.")
+        if outcome not in {
+            "completed",
+            "failed",
+            "ambiguous",
+            "cancelled",
+            "dead_letter",
+        }:
+            raise ValueError("A job outcome must be a supported terminal state.")
         now = utc_now()
         with self._transaction(immediate=True) as connection:
             cursor = self._execute(
@@ -2795,6 +5390,49 @@ class StudioStore:
             )
             if cursor.rowcount != 1:
                 raise StudioConflict("The job lease changed or is no longer owned.")
+            row = self._execute(
+                connection,
+                "SELECT * FROM studio_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+        assert row is not None
+        return _job_from_row(row)
+
+    def retry_or_dead_letter_job(
+        self,
+        *,
+        job_id: str,
+        worker_id: str,
+        expected_version: int,
+    ) -> DurableJob:
+        now = utc_now()
+        with self._transaction(immediate=True) as connection:
+            current = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_jobs
+                WHERE id = ? AND status = 'leased' AND lease_owner = ?
+                  AND version = ?
+                """,
+                (job_id, worker_id, expected_version),
+            ).fetchone()
+            if current is None:
+                raise StudioConflict("The job lease changed or is no longer owned.")
+            next_status = (
+                "pending"
+                if int(current["attempts"]) < int(current["max_attempts"])
+                else "dead_letter"
+            )
+            self._execute(
+                connection,
+                """
+                UPDATE studio_jobs
+                SET status = ?, lease_owner = NULL, lease_expires_at = NULL,
+                    version = version + 1, updated_at = ?
+                WHERE id = ? AND version = ?
+                """,
+                (next_status, _timestamp(now), job_id, expected_version),
+            )
             row = self._execute(
                 connection,
                 "SELECT * FROM studio_jobs WHERE id = ?",
@@ -2909,6 +5547,48 @@ class StudioStore:
         assert claimed is not None
         return _outbox_from_row(claimed)
 
+    def heartbeat_outbox(
+        self,
+        *,
+        message_id: str,
+        worker_id: str,
+        expected_version: int,
+        lease_seconds: int,
+    ) -> OutboxMessage:
+        now = utc_now()
+        expires = datetime.fromtimestamp(
+            _timestamp(now) + lease_seconds,
+            tz=timezone.utc,
+        )
+        with self._transaction(immediate=True) as connection:
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE studio_outbox
+                SET lease_expires_at = ?, version = version + 1, updated_at = ?
+                WHERE id = ? AND status = 'leased' AND lease_owner = ?
+                  AND version = ?
+                """,
+                (
+                    _timestamp(expires),
+                    _timestamp(now),
+                    message_id,
+                    worker_id,
+                    expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StudioConflict(
+                    "The outbox lease changed or is no longer owned."
+                )
+            row = self._execute(
+                connection,
+                "SELECT * FROM studio_outbox WHERE id = ?",
+                (message_id,),
+            ).fetchone()
+        assert row is not None
+        return _outbox_from_row(row)
+
     def finish_outbox(
         self,
         *,
@@ -2917,10 +5597,14 @@ class StudioStore:
         expected_version: int,
         outcome: str,
     ) -> OutboxMessage:
-        if outcome not in {"completed", "failed", "ambiguous"}:
-            raise ValueError(
-                "An outbox outcome must be completed, failed, or ambiguous."
-            )
+        if outcome not in {
+            "completed",
+            "failed",
+            "ambiguous",
+            "cancelled",
+            "dead_letter",
+        }:
+            raise ValueError("An outbox outcome must be a supported terminal state.")
         now = utc_now()
         with self._transaction(immediate=True) as connection:
             cursor = self._execute(
@@ -2951,6 +5635,218 @@ class StudioStore:
             ).fetchone()
         assert row is not None
         return _outbox_from_row(row)
+
+    def retry_or_dead_letter_outbox(
+        self,
+        *,
+        message_id: str,
+        worker_id: str,
+        expected_version: int,
+    ) -> OutboxMessage:
+        now = utc_now()
+        with self._transaction(immediate=True) as connection:
+            current = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_outbox
+                WHERE id = ? AND status = 'leased' AND lease_owner = ?
+                  AND version = ?
+                """,
+                (message_id, worker_id, expected_version),
+            ).fetchone()
+            if current is None:
+                raise StudioConflict(
+                    "The outbox lease changed or is no longer owned."
+                )
+            next_status = (
+                "pending"
+                if int(current["attempts"]) < int(current["max_attempts"])
+                else "dead_letter"
+            )
+            self._execute(
+                connection,
+                """
+                UPDATE studio_outbox
+                SET status = ?, lease_owner = NULL, lease_expires_at = NULL,
+                    version = version + 1, updated_at = ?
+                WHERE id = ? AND version = ?
+                """,
+                (next_status, _timestamp(now), message_id, expected_version),
+            )
+            row = self._execute(
+                connection,
+                "SELECT * FROM studio_outbox WHERE id = ?",
+                (message_id,),
+            ).fetchone()
+        assert row is not None
+        return _outbox_from_row(row)
+
+    def begin_worker_receipt(
+        self,
+        *,
+        entity_type: str,
+        entity_id: str,
+        worker_id: str,
+        expected_version: int,
+    ) -> tuple[ExternalReceipt, bool]:
+        if entity_type == "job":
+            table, kind_column = "studio_jobs", "kind"
+        elif entity_type == "outbox":
+            table, kind_column = "studio_outbox", "topic"
+        else:
+            raise ValueError("Worker receipt entity must be job or outbox.")
+        now = utc_now()
+        with self._transaction(immediate=True) as connection:
+            item = self._execute(
+                connection,
+                f"""
+                SELECT * FROM {table}
+                WHERE id = ? AND status = 'leased' AND lease_owner = ?
+                  AND version = ?
+                """,
+                (entity_id, worker_id, expected_version),
+            ).fetchone()
+            if item is None:
+                raise StudioConflict("The work lease changed before receipt intent.")
+            operation = f"worker:{entity_type}:{item[kind_column]}"
+            prefix = f"{item['idempotency_key']}:attempt:"
+            latest_row = self._execute(
+                connection,
+                """
+                SELECT * FROM studio_receipts
+                WHERE project_id = ? AND operation = ?
+                  AND idempotency_key LIKE ?
+                ORDER BY created_at DESC, id DESC LIMIT 1
+                """,
+                (item["project_id"], operation, f"{prefix}%"),
+            ).fetchone()
+            if latest_row is not None:
+                latest = _receipt_from_row(latest_row)
+                if latest.outcome in {"pending", "ambiguous", "succeeded"}:
+                    return latest, False
+            receipt_id = new_id()
+            idempotency_key = f"{prefix}{int(item['attempts'])}"
+            self._execute(
+                connection,
+                """
+                INSERT INTO studio_receipts(
+                    id, project_id, operation, idempotency_key, outcome,
+                    external_ref, details_json, created_at
+                ) VALUES (?, ?, ?, ?, 'pending', NULL, ?, ?)
+                """,
+                (
+                    receipt_id,
+                    item["project_id"],
+                    operation,
+                    idempotency_key,
+                    _json_dump(
+                        {
+                            "entity_type": entity_type,
+                            "entity_id": entity_id,
+                            "attempt": int(item["attempts"]),
+                            "intent_recorded": True,
+                        }
+                    ),
+                    _timestamp(now),
+                ),
+            )
+            row = self._execute(
+                connection,
+                "SELECT * FROM studio_receipts WHERE id = ?",
+                (receipt_id,),
+            ).fetchone()
+        assert row is not None
+        return _receipt_from_row(row), True
+
+    def complete_worker_receipt(
+        self,
+        *,
+        receipt_id: str,
+        outcome: str,
+        external_ref: str | None,
+        details: dict[str, Any],
+    ) -> ExternalReceipt:
+        if outcome not in {"succeeded", "failed", "ambiguous"}:
+            raise ValueError("Worker receipt outcome is invalid.")
+        with self._transaction(immediate=True) as connection:
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE studio_receipts
+                SET outcome = ?, external_ref = ?, details_json = ?
+                WHERE id = ? AND outcome = 'pending'
+                """,
+                (
+                    outcome,
+                    external_ref,
+                    _json_dump(_safe_json(details)),
+                    receipt_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StudioConflict("The worker receipt is no longer pending.")
+            row = self._execute(
+                connection,
+                "SELECT * FROM studio_receipts WHERE id = ?",
+                (receipt_id,),
+            ).fetchone()
+        assert row is not None
+        return _receipt_from_row(row)
+
+    def reconcile_exhausted_work(self) -> dict[str, int]:
+        now = utc_now()
+        results = {"dead_letter": 0, "ambiguous": 0}
+        with self._transaction(immediate=True) as connection:
+            for table, entity_type, kind_column in (
+                ("studio_jobs", "job", "kind"),
+                ("studio_outbox", "outbox", "topic"),
+            ):
+                rows = self._execute(
+                    connection,
+                    f"""
+                    SELECT * FROM {table}
+                    WHERE status = 'leased' AND attempts >= max_attempts
+                      AND lease_expires_at IS NOT NULL AND lease_expires_at < ?
+                    """,
+                    (_timestamp(now),),
+                ).fetchall()
+                for item in rows:
+                    operation = f"worker:{entity_type}:{item[kind_column]}"
+                    prefix = f"{item['idempotency_key']}:attempt:%"
+                    receipt = self._execute(
+                        connection,
+                        """
+                        SELECT outcome FROM studio_receipts
+                        WHERE project_id = ? AND operation = ?
+                          AND idempotency_key LIKE ?
+                        ORDER BY created_at DESC, id DESC LIMIT 1
+                        """,
+                        (item["project_id"], operation, prefix),
+                    ).fetchone()
+                    outcome = (
+                        "ambiguous"
+                        if receipt is not None
+                        and str(receipt["outcome"]) in {"pending", "ambiguous"}
+                        else "dead_letter"
+                    )
+                    self._execute(
+                        connection,
+                        f"""
+                        UPDATE {table}
+                        SET status = ?, lease_owner = NULL,
+                            lease_expires_at = NULL, version = version + 1,
+                            updated_at = ?
+                        WHERE id = ? AND version = ?
+                        """,
+                        (
+                            outcome,
+                            _timestamp(now),
+                            item["id"],
+                            item["version"],
+                        ),
+                    )
+                    results[outcome] += 1
+        return results
 
     def record_receipt(
         self,
@@ -3414,6 +6310,373 @@ def _scenario_baseline_from_row(row: Any) -> ScenarioBaseline:
     )
 
 
+def _workflow_artifact_from_row(row: Any) -> WorkflowArtifact:
+    return WorkflowArtifact.model_validate(
+        {
+            "id": str(_row_value(row, "id")),
+            "project_id": str(_row_value(row, "project_id")),
+            "candidate_id": str(_row_value(row, "candidate_id")),
+            "candidate_workspace_version_id": str(
+                _row_value(row, "candidate_workspace_version_id")
+            ),
+            "source_base_hash": _optional_string(_row_value(row, "source_base_hash")),
+            "content_hash": str(_row_value(row, "content_hash")),
+            "canonical_json": str(_row_value(row, "canonical_json")),
+            "payload": _json_load(_row_value(row, "payload_json")),
+            "created_by": str(_row_value(row, "created_by")),
+            "created_at": _datetime(_row_value(row, "created_at")),
+        }
+    )
+
+
+def _change_request_from_row(row: Any) -> ChangeRequest:
+    return ChangeRequest.model_validate(
+        {
+            "id": str(_row_value(row, "id")),
+            "project_id": str(_row_value(row, "project_id")),
+            "build_id": _optional_string(_row_value(row, "build_id")),
+            "candidate_id": _optional_string(_row_value(row, "candidate_id")),
+            "scenario_run_id": _optional_string(_row_value(row, "scenario_run_id")),
+            "artifact_id": str(_row_value(row, "artifact_id")),
+            "artifact_hash": str(_row_value(row, "artifact_hash")),
+            "title": str(_row_value(row, "title")),
+            "release_note": str(_row_value(row, "release_note")),
+            "author_key": str(_row_value(row, "author_key")),
+            "assignee_key": _optional_string(_row_value(row, "assignee_key")),
+            "status": str(_row_value(row, "status")),
+            "policy": ReviewPolicy.model_validate(
+                _json_load(_row_value(row, "policy_json"))
+            ),
+            "evidence_binding_hash": str(
+                _row_value(row, "evidence_binding_hash")
+            ),
+            "binding_hash": str(_row_value(row, "binding_hash")),
+            "supersedes_id": _optional_string(_row_value(row, "supersedes_id")),
+            "superseded_by_id": _optional_string(
+                _row_value(row, "superseded_by_id")
+            ),
+            "expires_at": _datetime(_row_value(row, "expires_at")),
+            "version": int(_row_value(row, "version")),
+            "created_at": _datetime(_row_value(row, "created_at")),
+            "updated_at": _datetime(_row_value(row, "updated_at")),
+        }
+    )
+
+
+def _review_event_from_row(row: Any) -> ReviewEvent:
+    return ReviewEvent.model_validate(
+        {
+            "id": str(_row_value(row, "id")),
+            "project_id": str(_row_value(row, "project_id")),
+            "change_request_id": str(_row_value(row, "change_request_id")),
+            "kind": str(_row_value(row, "kind")),
+            "actor_key": str(_row_value(row, "actor_key")),
+            "body": str(_row_value(row, "body")),
+            "assignee_key": _optional_string(_row_value(row, "assignee_key")),
+            "binding_hash": _optional_string(_row_value(row, "binding_hash")),
+            "created_at": _datetime(_row_value(row, "created_at")),
+        }
+    )
+
+
+def _logical_app_from_row(row: Any) -> LogicalApp:
+    return LogicalApp.model_validate(
+        {
+            "id": str(_row_value(row, "id")),
+            "project_id": str(_row_value(row, "project_id")),
+            "name": str(_row_value(row, "name")),
+            "app_mode": str(_row_value(row, "app_mode")),
+            "created_by": str(_row_value(row, "created_by")),
+            "version": int(_row_value(row, "version")),
+            "created_at": _datetime(_row_value(row, "created_at")),
+            "updated_at": _datetime(_row_value(row, "updated_at")),
+        }
+    )
+
+
+def _release_environment_from_row(row: Any) -> ReleaseEnvironment:
+    return ReleaseEnvironment.model_validate(
+        {
+            "id": str(_row_value(row, "id")),
+            "project_id": str(_row_value(row, "project_id")),
+            "logical_app_id": str(_row_value(row, "logical_app_id")),
+            "name": str(_row_value(row, "name")),
+            "classification": str(_row_value(row, "classification")),
+            "target_app_ref": str(_row_value(row, "target_app_ref")),
+            "tracked_draft_hash": _optional_string(
+                _row_value(row, "tracked_draft_hash")
+            ),
+            "enabled": bool(_row_value(row, "enabled")),
+            "version": int(_row_value(row, "version")),
+            "created_by": str(_row_value(row, "created_by")),
+            "created_at": _datetime(_row_value(row, "created_at")),
+            "updated_at": _datetime(_row_value(row, "updated_at")),
+        }
+    )
+
+
+def _environment_mapping_from_row(row: Any) -> EnvironmentMappingSet:
+    return EnvironmentMappingSet.model_validate(
+        {
+            "id": str(_row_value(row, "id")),
+            "project_id": str(_row_value(row, "project_id")),
+            "environment_id": str(_row_value(row, "environment_id")),
+            "mappings": _json_value(_row_value(row, "mappings_json")),
+            "mapping_hash": str(_row_value(row, "mapping_hash")),
+            "configured_by": str(_row_value(row, "configured_by")),
+            "version": int(_row_value(row, "version")),
+            "created_at": _datetime(_row_value(row, "created_at")),
+            "updated_at": _datetime(_row_value(row, "updated_at")),
+        }
+    )
+
+
+def _release_authorization_from_row(row: Any) -> ReleaseAuthorization:
+    return ReleaseAuthorization.model_validate(
+        {
+            "id": str(_row_value(row, "id")),
+            "project_id": str(_row_value(row, "project_id")),
+            "change_request_id": str(_row_value(row, "change_request_id")),
+            "artifact_id": str(_row_value(row, "artifact_id")),
+            "environment_id": str(_row_value(row, "environment_id")),
+            "action": str(_row_value(row, "action")),
+            "artifact_hash": str(_row_value(row, "artifact_hash")),
+            "mapping_hash": str(_row_value(row, "mapping_hash")),
+            "policy_hash": str(_row_value(row, "policy_hash")),
+            "target_hash": str(_row_value(row, "target_hash")),
+            "preview_hash": str(_row_value(row, "preview_hash")),
+            "authorized_by": str(_row_value(row, "authorized_by")),
+            "status": str(_row_value(row, "status")),
+            "expires_at": _datetime(_row_value(row, "expires_at")),
+            "created_at": _datetime(_row_value(row, "created_at")),
+            "consumed_at": _optional_datetime(_row_value(row, "consumed_at")),
+        }
+    )
+
+
+def _release_record_values(record: ReleaseRecord) -> tuple[Any, ...]:
+    return (
+        record.id,
+        record.project_id,
+        record.change_request_id,
+        record.artifact_id,
+        record.environment_id,
+        record.authorization_id,
+        record.action,
+        record.idempotency_key,
+        record.outcome,
+        record.actor_key,
+        record.before_hash,
+        record.after_hash,
+        record.receipt_id,
+        record.external_ref,
+        record.release_note,
+        _json_dump(_safe_json(record.details)),
+        _timestamp(record.created_at),
+        _timestamp(record.completed_at) if record.completed_at else None,
+    )
+
+
+def _release_record_from_row(row: Any) -> ReleaseRecord:
+    return ReleaseRecord.model_validate(
+        {
+            "id": str(_row_value(row, "id")),
+            "project_id": str(_row_value(row, "project_id")),
+            "change_request_id": str(_row_value(row, "change_request_id")),
+            "artifact_id": str(_row_value(row, "artifact_id")),
+            "environment_id": str(_row_value(row, "environment_id")),
+            "authorization_id": str(_row_value(row, "authorization_id")),
+            "action": str(_row_value(row, "action")),
+            "idempotency_key": str(_row_value(row, "idempotency_key")),
+            "outcome": str(_row_value(row, "outcome")),
+            "actor_key": str(_row_value(row, "actor_key")),
+            "before_hash": str(_row_value(row, "before_hash")),
+            "after_hash": _optional_string(_row_value(row, "after_hash")),
+            "receipt_id": _optional_string(_row_value(row, "receipt_id")),
+            "external_ref": _optional_string(_row_value(row, "external_ref")),
+            "release_note": str(_row_value(row, "release_note")),
+            "details": _json_load(_row_value(row, "details_json")),
+            "created_at": _datetime(_row_value(row, "created_at")),
+            "completed_at": _optional_datetime(_row_value(row, "completed_at")),
+        }
+    )
+
+
+def _execution_observation_from_row(row: Any) -> ExecutionObservationRecord:
+    return ExecutionObservationRecord.model_validate(
+        {
+            "id": str(_row_value(row, "id")),
+            "project_id": str(_row_value(row, "project_id")),
+            "logical_app_id": str(_row_value(row, "logical_app_id")),
+            "environment_id": str(_row_value(row, "environment_id")),
+            "artifact_id": _optional_string(_row_value(row, "artifact_id")),
+            "release_record_id": _optional_string(
+                _row_value(row, "release_record_id")
+            ),
+            "dify_app_id": str(_row_value(row, "dify_app_id")),
+            "dify_execution_id": str(_row_value(row, "dify_execution_id")),
+            "dify_workflow_version": str(
+                _row_value(row, "dify_workflow_version")
+            ),
+            "status": str(_row_value(row, "status")),
+            "correlation_state": str(_row_value(row, "correlation_state")),
+            "correlation_reason": str(_row_value(row, "correlation_reason")),
+            "failed_node_id": _optional_string(_row_value(row, "failed_node_id")),
+            "failed_node_type": _optional_string(
+                _row_value(row, "failed_node_type")
+            ),
+            "stable_error_code": _optional_string(
+                _row_value(row, "stable_error_code")
+            ),
+            "safe_message": _optional_string(_row_value(row, "safe_message")),
+            "latency_ms": _optional_int(_row_value(row, "latency_ms")),
+            "total_tokens": _optional_int(_row_value(row, "total_tokens")),
+            "estimated_cost_microusd": _optional_int(
+                _row_value(row, "estimated_cost_microusd")
+            ),
+            "total_steps": _optional_int(_row_value(row, "total_steps")),
+            "input_shape": _json_load(_row_value(row, "input_shape_json")),
+            "output_shape": _json_load(_row_value(row, "output_shape_json")),
+            "node_path": _json_value(_row_value(row, "node_path_json")),
+            "evidence_hash": str(_row_value(row, "evidence_hash")),
+            "started_at": _optional_datetime(_row_value(row, "started_at")),
+            "finished_at": _optional_datetime(_row_value(row, "finished_at")),
+            "observed_at": _datetime(_row_value(row, "observed_at")),
+            "updated_at": _datetime(_row_value(row, "updated_at")),
+        }
+    )
+
+
+def _run_incident_from_row(row: Any) -> RunIncident:
+    return RunIncident.model_validate(
+        {
+            "id": str(_row_value(row, "id")),
+            "project_id": str(_row_value(row, "project_id")),
+            "execution_id": str(_row_value(row, "execution_id")),
+            "cluster_key": str(_row_value(row, "cluster_key")),
+            "title": str(_row_value(row, "title")),
+            "severity": str(_row_value(row, "severity")),
+            "status": str(_row_value(row, "status")),
+            "stable_error_code": str(_row_value(row, "stable_error_code")),
+            "affected_node_id": _optional_string(
+                _row_value(row, "affected_node_id")
+            ),
+            "affected_node_title": _optional_string(
+                _row_value(row, "affected_node_title")
+            ),
+            "business_cause": str(_row_value(row, "business_cause")),
+            "next_step": str(_row_value(row, "next_step")),
+            "first_seen_at": _datetime(_row_value(row, "first_seen_at")),
+            "last_seen_at": _datetime(_row_value(row, "last_seen_at")),
+            "version": int(_row_value(row, "version")),
+        }
+    )
+
+
+def _repair_proposal_from_row(row: Any) -> RepairProposal:
+    return RepairProposal.model_validate(
+        {
+            "id": str(_row_value(row, "id")),
+            "project_id": str(_row_value(row, "project_id")),
+            "incident_id": str(_row_value(row, "incident_id")),
+            "execution_id": str(_row_value(row, "execution_id")),
+            "source_artifact_id": _optional_string(
+                _row_value(row, "source_artifact_id")
+            ),
+            "source_release_record_id": _optional_string(
+                _row_value(row, "source_release_record_id")
+            ),
+            "build_id": str(_row_value(row, "build_id")),
+            "change_request_id": _optional_string(
+                _row_value(row, "change_request_id")
+            ),
+            "title": str(_row_value(row, "title")),
+            "business_summary": str(_row_value(row, "business_summary")),
+            "evidence": _json_load(_row_value(row, "evidence_json")),
+            "evidence_hash": str(_row_value(row, "evidence_hash")),
+            "status": str(_row_value(row, "status")),
+            "created_by": str(_row_value(row, "created_by")),
+            "version": int(_row_value(row, "version")),
+            "created_at": _datetime(_row_value(row, "created_at")),
+            "updated_at": _datetime(_row_value(row, "updated_at")),
+        }
+    )
+
+
+def _run_alert_rule_from_row(row: Any) -> RunAlertRule:
+    return RunAlertRule.model_validate(
+        {
+            "id": str(_row_value(row, "id")),
+            "project_id": str(_row_value(row, "project_id")),
+            "name": str(_row_value(row, "name")),
+            "environment_id": _optional_string(
+                _row_value(row, "environment_id")
+            ),
+            "stable_error_code": _optional_string(
+                _row_value(row, "stable_error_code")
+            ),
+            "error_count_threshold": int(
+                _row_value(row, "error_count_threshold")
+            ),
+            "failure_rate_threshold": (
+                None
+                if _row_value(row, "failure_rate_threshold") is None
+                else float(_row_value(row, "failure_rate_threshold"))
+            ),
+            "window_seconds": int(_row_value(row, "window_seconds")),
+            "adapter_ref": str(_row_value(row, "adapter_ref")),
+            "enabled": bool(_row_value(row, "enabled")),
+            "created_by": str(_row_value(row, "created_by")),
+            "version": int(_row_value(row, "version")),
+            "created_at": _datetime(_row_value(row, "created_at")),
+            "updated_at": _datetime(_row_value(row, "updated_at")),
+        }
+    )
+
+
+def _scheduled_regression_from_row(row: Any) -> ScheduledRegression:
+    return ScheduledRegression.model_validate(
+        {
+            "id": str(_row_value(row, "id")),
+            "project_id": str(_row_value(row, "project_id")),
+            "artifact_id": str(_row_value(row, "artifact_id")),
+            "suite_id": str(_row_value(row, "suite_id")),
+            "interval_seconds": int(_row_value(row, "interval_seconds")),
+            "next_run_at": _datetime(_row_value(row, "next_run_at")),
+            "enabled": bool(_row_value(row, "enabled")),
+            "created_by": str(_row_value(row, "created_by")),
+            "version": int(_row_value(row, "version")),
+            "created_at": _datetime(_row_value(row, "created_at")),
+            "updated_at": _datetime(_row_value(row, "updated_at")),
+        }
+    )
+
+
+def _scoped_token_from_row(row: Any) -> ScopedTokenRecord:
+    scopes = _json_load(_row_value(row, "scopes_json")).get("scopes") or []
+    return ScopedTokenRecord.model_validate(
+        {
+            "id": str(_row_value(row, "id")),
+            "project_id": str(_row_value(row, "project_id")),
+            "name": str(_row_value(row, "name")),
+            "token_prefix": str(_row_value(row, "token_prefix")),
+            "scopes": scopes,
+            "created_by": str(_row_value(row, "created_by")),
+            "rate_limit_per_minute": int(
+                _row_value(row, "rate_limit_per_minute")
+            ),
+            "expires_at": _datetime(_row_value(row, "expires_at")),
+            "revoked_at": _optional_datetime(_row_value(row, "revoked_at")),
+            "rotated_from_id": _optional_string(
+                _row_value(row, "rotated_from_id")
+            ),
+            "last_used_at": _optional_datetime(_row_value(row, "last_used_at")),
+            "version": int(_row_value(row, "version")),
+            "created_at": _datetime(_row_value(row, "created_at")),
+        }
+    )
+
+
 def _job_from_row(row: Any) -> DurableJob:
     return DurableJob(
         id=str(_row_value(row, "id")),
@@ -3481,6 +6744,10 @@ def _optional_datetime(value: Any) -> datetime | None:
 
 def _optional_string(value: Any) -> str | None:
     return None if value is None else str(value)
+
+
+def _optional_int(value: Any) -> int | None:
+    return None if value is None else int(value)
 
 
 def _hash_value(value: str) -> str:

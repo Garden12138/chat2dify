@@ -121,6 +121,52 @@ function renderHome(home) {
     `当前为 ${roleLabel(home.membership.role)} 视图；所有内容都限定在这个项目中。`;
   renderApps(home.apps || [], home.states?.apps);
   renderWork(home.work || [], home.states?.work, home.project.id);
+  renderHorizon(home);
+}
+
+function renderHorizon(home) {
+  const cards = document.querySelectorAll("#studio-horizon article");
+  document.querySelectorAll("[data-horizon-link]").forEach(item => item.remove());
+  const reviews = home.assigned_reviews || [];
+  const releases = home.releases || [];
+  const regressions = home.quality_regressions || [];
+  const incidents = home.incidents || [];
+  if (cards[0]) {
+    cards[0].querySelector("strong").textContent = String(reviews.length);
+    cards[0].querySelector("p").textContent = home.states?.assigned_reviews?.message || "当前没有待处理评审。";
+    const link = document.createElement("a");
+    link.dataset.horizonLink = "true";
+    link.href = reviews[0]?.review_url || "?studio=releases";
+    link.textContent = reviews.length ? "处理下一项评审 →" : "打开 Review Center →";
+    cards[0].append(link);
+  }
+  if (cards[2]) {
+    cards[2].querySelector("strong").textContent = String(releases.length);
+    cards[2].querySelector("p").textContent = home.states?.releases?.message || "当前没有发布回执。";
+    const link = document.createElement("a");
+    link.dataset.horizonLink = "true";
+    link.href = releases[0]?.release_url || "?studio=releases";
+    link.textContent = "查看 Release History →";
+    cards[2].append(link);
+  }
+  if (cards[1]) {
+    cards[1].querySelector("strong").textContent = String(regressions.length);
+    cards[1].querySelector("p").textContent = home.states?.quality_regressions?.message || "当前没有可验证的质量回归。";
+    const link = document.createElement("a");
+    link.dataset.horizonLink = "true";
+    link.href = regressions[0]?.run_center_url || "?studio=runs";
+    link.textContent = "在 Run Center 查看证据 →";
+    cards[1].append(link);
+  }
+  if (cards[3]) {
+    cards[3].querySelector("strong").textContent = String(incidents.length);
+    cards[3].querySelector("p").textContent = home.states?.incidents?.message || "当前没有开放事件。";
+    const link = document.createElement("a");
+    link.dataset.horizonLink = "true";
+    link.href = incidents[0]?.incident_url || "?studio=runs";
+    link.textContent = incidents.length ? "处理最新事件 →" : "打开 Run Center →";
+    cards[3].append(link);
+  }
 }
 
 function renderApps(apps, state) {

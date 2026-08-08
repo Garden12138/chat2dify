@@ -22,6 +22,8 @@ export function scenarioIdentity(search = "") {
       .map(value => value.trim())
       .filter(Boolean)
       .slice(0, 20),
+    repairProposalId: String(params.get("repair_proposal_id") || "").slice(0, 128),
+    repairProposalVersion: Math.max(0, Number.parseInt(params.get("repair_proposal_version") || "0", 10) || 0),
     embedded: ["1", "true", "yes"].includes(
       String(params.get("embed") || "").toLowerCase(),
     ),

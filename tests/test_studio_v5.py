@@ -28,6 +28,8 @@ from app.studio.models import (
     CandidatePresentation,
     DifyAppSummary,
     Principal,
+    ReleaseAuthorization,
+    ReleaseRecord,
     ScenarioRun,
     ScenarioRunPolicy,
     StudioBuild,
@@ -39,6 +41,7 @@ from app.studio.service import StudioApplicationService
 from app.studio.store import StudioStore
 from app.dify.version import DifyVersionInfo
 from app.main import app as main_app
+from tests.test_studio_releases import _stack as _release_stack
 
 
 ORIGIN = "https://dify.example"
@@ -242,6 +245,55 @@ class RecordingScenarioService:
         )
 
 
+class RecordingReleaseService:
+    def __init__(self) -> None:
+        self.authorize_kwargs = None
+        self.execute_kwargs = None
+
+    def authorize(self, authenticated, **kwargs):
+        self.authorize_kwargs = kwargs
+        now = datetime.now(timezone.utc)
+        return ReleaseAuthorization(
+            id="authorization-1",
+            project_id=kwargs["project_id"],
+            change_request_id=kwargs["change_request_id"],
+            artifact_id="artifact-1",
+            environment_id=kwargs["environment_id"],
+            action=kwargs["action"],
+            artifact_hash="a" * 64,
+            mapping_hash="b" * 64,
+            policy_hash="c" * 64,
+            target_hash="draft-hash-1",
+            preview_hash="d" * 64,
+            authorized_by=authenticated.principal.key,
+            status="pending",
+            expires_at=now.replace(year=now.year + 1),
+            created_at=now,
+        )
+
+    def execute(self, authenticated, **kwargs):
+        self.execute_kwargs = kwargs
+        now = datetime.now(timezone.utc)
+        return ReleaseRecord(
+            id="release-1",
+            project_id=kwargs["project_id"],
+            change_request_id="review-1",
+            artifact_id="artifact-1",
+            environment_id="environment-1",
+            authorization_id=kwargs["authorization_id"],
+            action="apply_draft",
+            idempotency_key=kwargs["idempotency_key"],
+            outcome="succeeded",
+            actor_key=authenticated.principal.key,
+            before_hash="draft-hash-1",
+            after_hash="draft-hash-2",
+            receipt_id="receipt-1",
+            release_note="Approved release.",
+            created_at=now,
+            completed_at=now,
+        )
+
+
 def _settings(tmp_path: Path) -> Settings:
     return Settings.from_env(
         {
@@ -375,6 +427,279 @@ def test_scenario_run_api_accepts_only_typed_nonproduction_mapping(
         assert "plaintext" not in rejected.text
 
 
+def test_release_api_keeps_authorization_and_execution_separate_and_rejects_authority_claims(
+    tmp_path: Path,
+) -> None:
+    application, _, _ = _api_app(tmp_path)
+    releases = RecordingReleaseService()
+    application.state.studio_service.release_service = releases
+    with TestClient(application, base_url=ORIGIN) as client:
+        issued = _issue(client)
+        headers = _auth_headers(issued["token"])
+        project_id = issued["project"]["id"]
+        authorize_payload = {
+            "project_id": project_id,
+            "change_request_id": "review-1",
+            "environment_id": "environment-1",
+            "action": "apply_draft",
+            "confirmation": "APPLY_DRAFT",
+            "expires_in_seconds": 600,
+        }
+        forged = client.post(
+            "/api/v5/studio/release-authorizations",
+            headers=headers,
+            json=authorize_payload | {"role": "owner", "approved": True},
+        )
+        assert forged.status_code == 422
+        assert releases.authorize_kwargs is None
+
+        authorized = client.post(
+            "/api/v5/studio/release-authorizations",
+            headers=headers,
+            json=authorize_payload,
+        )
+        assert authorized.status_code == 201, authorized.text
+        assert authorized.json()["status"] == "pending"
+        assert releases.authorize_kwargs["confirmation"] == "APPLY_DRAFT"
+
+        execution_payload = {
+            "project_id": project_id,
+            "authorization_id": authorized.json()["id"],
+            "idempotency_key": "apply-draft-api-1",
+        }
+        forged_execution = client.post(
+            "/api/v5/studio/release-executions",
+            headers=headers,
+            json=execution_payload | {"publish": True, "user": "attacker"},
+        )
+        assert forged_execution.status_code == 422
+        assert releases.execute_kwargs is None
+
+        executed = client.post(
+            "/api/v5/studio/release-executions",
+            headers=headers,
+            json=execution_payload,
+        )
+        assert executed.status_code == 202, executed.text
+        assert executed.json()["outcome"] == "succeeded"
+        assert releases.execute_kwargs["authorization_id"] == "authorization-1"
+
+
+def test_release_api_runs_review_apply_and_publish_as_distinct_human_actions(
+    tmp_path: Path,
+) -> None:
+    stack = _release_stack(tmp_path)
+    settings = _settings(tmp_path)
+    verifier = FakeHostVerifier(
+        stack["owner"].principal,
+        [DifyAppSummary(id="target-app", name="Staging", mode="workflow")],
+    )
+    service = StudioApplicationService(
+        identity=StudioIdentityService(
+            settings=settings,
+            store=stack["studio"],
+            host_verifier=verifier,
+        ),
+        home=StudioHomeService(
+            store=stack["studio"],
+            v4_reader=V4ContinuityReader(settings.task_db_path),
+            public_base_path="/chat2dify",
+        ),
+        reviews=stack["reviews"],
+        releases=stack["releases"],
+    )
+    application = FastAPI()
+    application.include_router(router)
+
+    @application.exception_handler(RequestValidationError)
+    async def validation_error(_request, _exc):
+        return studio_error_response(
+            StudioRequestInvalid("The Studio request is invalid.")
+        )
+
+    application.state.ai_studio_v5_enabled = True
+    application.state.studio_service = service
+    application.state.agent_v4_enabled = True
+    application.state.agent_store = stack["agent"]
+    application.state.agent_service = None
+
+    with TestClient(application, base_url=ORIGIN) as client:
+        owner_session = _issue(client, "owner-release-nonce-1234567890")
+        project_id = owner_session["project"]["id"]
+        owner_headers = _auth_headers(owner_session["token"])
+        first, corrected = stack["candidates"]
+        created = client.post(
+            "/api/v5/studio/reviews",
+            headers=owner_headers,
+            json={
+                "project_id": project_id,
+                "build_id": stack["build"].id,
+                "candidate_id": first.id,
+                "scenario_run_id": "scenario-run-1",
+                "title": "API governed release",
+                "release_note": "Request one correction before release.",
+                "assignee_key": stack["reviewer"].principal.key,
+                "require_author_approver_separation": True,
+                "expires_in_seconds": 86_400,
+            },
+        )
+        assert created.status_code == 201, created.text
+        first_review = created.json()
+        self_approval = client.post(
+            f"/api/v5/studio/reviews/{first_review['change_request']['id']}/decision",
+            headers=owner_headers,
+            json={
+                "project_id": project_id,
+                "decision": "approve",
+                "body": "The Author must not approve this separated review.",
+                "expected_version": first_review["change_request"]["version"],
+                "expected_binding_hash": first_review["change_request"]["binding_hash"],
+            },
+        )
+        assert self_approval.status_code == 403
+        assert self_approval.json()["error"]["code"] == (
+            "STUDIO_REVIEW_SELF_APPROVAL_DENIED"
+        )
+
+        verifier.principal = stack["reviewer"].principal
+        reviewer_session = _issue(client, "reviewer-release-nonce-1234567")
+        reviewer_headers = _auth_headers(reviewer_session["token"])
+        changes = client.post(
+            f"/api/v5/studio/reviews/{first_review['change_request']['id']}/decision",
+            headers=reviewer_headers,
+            json={
+                "project_id": project_id,
+                "decision": "request_changes",
+                "body": "Use the explicit business fallback.",
+                "expected_version": first_review["change_request"]["version"],
+                "expected_binding_hash": first_review["change_request"]["binding_hash"],
+            },
+        )
+        assert changes.status_code == 200, changes.text
+
+        verifier.principal = stack["owner"].principal
+        owner_session = _issue(client, "owner-supersede-nonce-12345678")
+        owner_headers = _auth_headers(owner_session["token"])
+        replacement = client.post(
+            f"/api/v5/studio/reviews/{first_review['change_request']['id']}/supersede",
+            headers=owner_headers,
+            json={
+                "project_id": project_id,
+                "expected_version": changes.json()["change_request"]["version"],
+                "build_id": stack["build"].id,
+                "candidate_id": corrected.id,
+                "scenario_run_id": "scenario-run-1",
+                "title": "Corrected API governed release",
+                "release_note": "Release the corrected tested fallback.",
+                "expires_in_seconds": 86_400,
+            },
+        )
+        assert replacement.status_code == 201, replacement.text
+
+        verifier.principal = stack["reviewer"].principal
+        reviewer_session = _issue(client, "reviewer-approve-nonce-12345678")
+        reviewer_headers = _auth_headers(reviewer_session["token"])
+        approved = client.post(
+            f"/api/v5/studio/reviews/{replacement.json()['change_request']['id']}/decision",
+            headers=reviewer_headers,
+            json={
+                "project_id": project_id,
+                "decision": "approve",
+                "body": "Approve the exact corrected Artifact and evidence.",
+                "expected_version": replacement.json()["change_request"]["version"],
+                "expected_binding_hash": replacement.json()["change_request"]["binding_hash"],
+            },
+        )
+        assert approved.status_code == 200, approved.text
+        assert approved.json()["change_request"]["status"] == "approved"
+
+        verifier.principal = stack["owner"].principal
+        owner_session = _issue(client, "owner-apply-nonce-123456789012")
+        owner_headers = _auth_headers(owner_session["token"])
+        logical = client.post(
+            "/api/v5/studio/logical-apps",
+            headers=owner_headers,
+            json={
+                "project_id": project_id,
+                "name": "API Workflow",
+                "app_mode": "workflow",
+            },
+        )
+        assert logical.status_code == 201, logical.text
+        environment = client.post(
+            "/api/v5/studio/release-environments",
+            headers=owner_headers,
+            json={
+                "project_id": project_id,
+                "logical_app_id": logical.json()["id"],
+                "name": "Staging",
+                "classification": "staging",
+                "target_app_ref": "target-app",
+            },
+        )
+        assert environment.status_code == 201, environment.text
+        common = {
+            "project_id": project_id,
+            "change_request_id": approved.json()["change_request"]["id"],
+            "environment_id": environment.json()["id"],
+        }
+        preview = client.post(
+            "/api/v5/studio/release-preview",
+            headers=owner_headers,
+            json=common,
+        )
+        assert preview.status_code == 200, preview.text
+        assert preview.json()["blockers"] == []
+        apply_authorization = client.post(
+            "/api/v5/studio/release-authorizations",
+            headers=owner_headers,
+            json=common
+            | {
+                "action": "apply_draft",
+                "confirmation": "APPLY_DRAFT",
+                "expires_in_seconds": 600,
+            },
+        )
+        assert apply_authorization.status_code == 201, apply_authorization.text
+        applied = client.post(
+            "/api/v5/studio/release-executions",
+            headers=owner_headers,
+            json={
+                "project_id": project_id,
+                "authorization_id": apply_authorization.json()["id"],
+                "idempotency_key": "api-apply-draft-001",
+            },
+        )
+        assert applied.status_code == 202, applied.text
+        assert applied.json()["outcome"] == "succeeded"
+        assert stack["client"].publish_calls == 0
+
+        publish_authorization = client.post(
+            "/api/v5/studio/release-authorizations",
+            headers=owner_headers,
+            json=common
+            | {
+                "action": "publish",
+                "confirmation": "PUBLISH",
+                "expires_in_seconds": 600,
+            },
+        )
+        assert publish_authorization.status_code == 201, publish_authorization.text
+        published = client.post(
+            "/api/v5/studio/release-executions",
+            headers=owner_headers,
+            json={
+                "project_id": project_id,
+                "authorization_id": publish_authorization.json()["id"],
+                "idempotency_key": "api-publish-001",
+            },
+        )
+        assert published.status_code == 202, published.text
+        assert published.json()["outcome"] == "succeeded"
+        assert published.json()["authorization_id"] != applied.json()["authorization_id"]
+        assert stack["client"].publish_calls == 1
+
+
 def _issue(client: TestClient, nonce: str = "nonce-value-1234567890") -> dict:
     response = client.post(
         "/api/v5/studio/session",
@@ -428,7 +753,9 @@ def test_signed_dify_session_opens_personal_project_and_searches_home(
     assert "studio_entry=home" in data["apps"][0]["build_url"]
     assert data["assigned_reviews"] == []
     assert data["quality_regressions"] == []
+    assert data["incidents"] == []
     assert data["states"]["assigned_reviews"]["state"] == "empty"
+    assert data["states"]["incidents"]["state"] == "empty"
 
 
 def test_build_routes_bind_canvas_context_and_explicit_recovery_to_signed_identity(

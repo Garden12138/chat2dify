@@ -26,6 +26,8 @@ export function buildIdentity(search = "") {
     appMode,
     appName: String(params.get("app_name") || defaultAppName(appMode)),
     buildId: String(params.get("build_id") || ""),
+    repairProposalId: String(params.get("repair_proposal_id") || "").slice(0, 128),
+    repairProposalVersion: Math.max(0, Number.parseInt(params.get("repair_proposal_version") || "0", 10) || 0),
     embedded: ["1", "true", "yes"].includes(
       String(params.get("embed") || "").toLowerCase(),
     ),

@@ -9,7 +9,15 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validat
 
 StudioRole = Literal["owner", "admin", "builder", "reviewer", "viewer"]
 ProjectKind = Literal["personal", "team"]
-LeaseStatus = Literal["pending", "leased", "completed", "failed", "ambiguous"]
+LeaseStatus = Literal[
+    "pending",
+    "leased",
+    "completed",
+    "failed",
+    "ambiguous",
+    "cancelled",
+    "dead_letter",
+]
 BuildOperation = Literal["create", "modify"]
 BuildEntrySource = Literal["home", "canvas", "create"]
 BuildStatus = Literal["active", "cancelled"]
@@ -907,3 +915,505 @@ class ScenarioLabView(StrictModel):
     state: Literal["ready", "empty", "partial_error", "permission_denied", "offline"]
     message: str
     generated_at: datetime = Field(default_factory=utc_now)
+
+
+ReviewStatus = Literal[
+    "in_review",
+    "changes_requested",
+    "approved",
+    "rejected",
+    "superseded",
+    "expired",
+]
+ReviewEventKind = Literal[
+    "created",
+    "assigned",
+    "commented",
+    "changes_requested",
+    "approved",
+    "rejected",
+    "superseded",
+    "expired",
+    "rollback_proposed",
+    "git_pull_created",
+]
+ReleaseEnvironmentClass = Literal["development", "staging", "production"]
+ReleaseMappingKind = Literal[
+    "model",
+    "dataset",
+    "tool",
+    "strategy",
+    "trigger",
+    "credential_availability",
+]
+ReleaseAction = Literal["apply_draft", "publish"]
+ReleaseOutcome = Literal[
+    "intent_recorded",
+    "succeeded",
+    "failed",
+    "ambiguous",
+    "conflicted",
+]
+
+
+class ReviewPolicy(StrictModel):
+    require_author_approver_separation: bool = False
+    evidence_required: Literal[True] = True
+
+
+class ArtifactResourceRequirement(StrictModel):
+    kind: ReleaseMappingKind
+    logical_ref: str = Field(min_length=1, max_length=512)
+    label: str = Field(min_length=1, max_length=256)
+    required: bool = True
+    credential_value_present: Literal[False] = False
+
+
+class WorkflowArtifactPayload(StrictModel):
+    schema_version: Literal["chat2dify.workflow-artifact/v1"] = (
+        "chat2dify.workflow-artifact/v1"
+    )
+    app_mode: Literal["workflow", "advanced-chat"]
+    plan: dict[str, Any]
+    compatibility: dict[str, Any]
+    capability_requirements: list[str] = Field(default_factory=list, max_length=200)
+    resource_requirements: list[ArtifactResourceRequirement] = Field(
+        default_factory=list,
+        max_length=200,
+    )
+    scenario_evidence: dict[str, Any]
+    provenance: dict[str, Any]
+
+
+class WorkflowArtifact(StrictModel):
+    id: str
+    project_id: str
+    candidate_id: str
+    candidate_workspace_version_id: str
+    source_base_hash: str | None = Field(default=None, max_length=512)
+    content_hash: str = Field(min_length=64, max_length=64)
+    canonical_json: str = Field(min_length=2, exclude=True)
+    payload: WorkflowArtifactPayload
+    created_by: str
+    created_at: datetime
+
+
+class ChangeRequest(StrictModel):
+    id: str
+    project_id: str
+    build_id: str | None = None
+    candidate_id: str | None = None
+    scenario_run_id: str | None = None
+    artifact_id: str
+    artifact_hash: str = Field(min_length=64, max_length=64)
+    title: str = Field(min_length=1, max_length=256)
+    release_note: str = Field(min_length=1, max_length=8_000)
+    author_key: str
+    assignee_key: str | None = None
+    status: ReviewStatus
+    policy: ReviewPolicy
+    evidence_binding_hash: str = Field(min_length=64, max_length=64)
+    binding_hash: str = Field(min_length=64, max_length=64)
+    supersedes_id: str | None = None
+    superseded_by_id: str | None = None
+    expires_at: datetime
+    version: int = Field(ge=1)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ReviewEvent(StrictModel):
+    id: str
+    project_id: str
+    change_request_id: str
+    kind: ReviewEventKind
+    actor_key: str
+    body: str = Field(default="", max_length=8_000)
+    assignee_key: str | None = None
+    binding_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    created_at: datetime
+
+
+class ChangeRequestDetail(StrictModel):
+    change_request: ChangeRequest
+    artifact: WorkflowArtifact
+    events: list[ReviewEvent] = Field(default_factory=list)
+    can_comment: bool = False
+    can_decide: bool = False
+    can_release: bool = False
+    stale_reasons: list[str] = Field(default_factory=list)
+
+
+class LogicalApp(StrictModel):
+    id: str
+    project_id: str
+    name: str = Field(min_length=1, max_length=256)
+    app_mode: Literal["workflow", "advanced-chat"]
+    created_by: str
+    version: int = Field(ge=1)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ReleaseEnvironment(StrictModel):
+    id: str
+    project_id: str
+    logical_app_id: str
+    name: str = Field(min_length=1, max_length=256)
+    classification: ReleaseEnvironmentClass
+    target_app_ref: str = Field(min_length=1, max_length=512)
+    tracked_draft_hash: str | None = Field(default=None, max_length=512)
+    enabled: bool = True
+    version: int = Field(ge=1)
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ReleaseResourceMapping(StrictModel):
+    kind: ReleaseMappingKind
+    logical_ref: str = Field(min_length=1, max_length=512)
+    target_ref: str = Field(min_length=1, max_length=1_000)
+    available: bool = True
+    secret: Literal[False] = False
+
+
+class EnvironmentMappingSet(StrictModel):
+    id: str
+    project_id: str
+    environment_id: str
+    mappings: list[ReleaseResourceMapping] = Field(default_factory=list, max_length=200)
+    mapping_hash: str = Field(min_length=64, max_length=64)
+    configured_by: str
+    version: int = Field(ge=1)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ReleasePreview(StrictModel):
+    change_request_id: str
+    artifact_id: str
+    environment_id: str
+    mapping_hash: str = Field(min_length=64, max_length=64)
+    policy_hash: str = Field(min_length=64, max_length=64)
+    target_hash: str = Field(min_length=1, max_length=512)
+    tracked_hash: str | None = Field(default=None, max_length=512)
+    target_drift: bool
+    deployed_base: dict[str, Any]
+    proposed_artifact: dict[str, Any]
+    scenario_evidence: dict[str, Any]
+    risk: dict[str, Any]
+    release_note: str
+    compatibility: dict[str, Any]
+    blockers: list[dict[str, str]] = Field(default_factory=list)
+    preview_hash: str = Field(min_length=64, max_length=64)
+    generated_at: datetime = Field(default_factory=utc_now)
+
+
+class ReleaseAuthorization(StrictModel):
+    id: str
+    project_id: str
+    change_request_id: str
+    artifact_id: str
+    environment_id: str
+    action: ReleaseAction
+    artifact_hash: str = Field(min_length=64, max_length=64)
+    mapping_hash: str = Field(min_length=64, max_length=64)
+    policy_hash: str = Field(min_length=64, max_length=64)
+    target_hash: str = Field(min_length=1, max_length=512)
+    preview_hash: str = Field(min_length=64, max_length=64)
+    authorized_by: str
+    status: Literal["pending", "consumed", "expired"]
+    expires_at: datetime
+    created_at: datetime
+    consumed_at: datetime | None = None
+
+
+class ReleaseRecord(StrictModel):
+    id: str
+    project_id: str
+    change_request_id: str
+    artifact_id: str
+    environment_id: str
+    authorization_id: str
+    action: ReleaseAction
+    idempotency_key: str = Field(min_length=1, max_length=256)
+    outcome: ReleaseOutcome
+    actor_key: str
+    before_hash: str
+    after_hash: str | None = None
+    receipt_id: str | None = None
+    external_ref: str | None = None
+    release_note: str
+    details: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    completed_at: datetime | None = None
+
+
+class GitArtifactBundle(StrictModel):
+    artifact_id: str
+    content_hash: str = Field(min_length=64, max_length=64)
+    files: dict[str, str]
+    secret_scan_passed: Literal[True] = True
+
+
+class ReleaseCenterView(StrictModel):
+    project: Project
+    membership: Membership
+    members: list[Membership] = Field(default_factory=list)
+    available_apps: list[DifyAppSummary] = Field(default_factory=list)
+    change_requests: list[ChangeRequest] = Field(default_factory=list)
+    logical_apps: list[LogicalApp] = Field(default_factory=list)
+    environments: list[ReleaseEnvironment] = Field(default_factory=list)
+    mappings: list[EnvironmentMappingSet] = Field(default_factory=list)
+    releases: list[ReleaseRecord] = Field(default_factory=list)
+    state: Literal["ready", "empty", "partial_error", "permission_denied", "offline"]
+    message: str
+    generated_at: datetime = Field(default_factory=utc_now)
+
+
+ObservedRunStatus = Literal[
+    "running",
+    "succeeded",
+    "failed",
+    "stopped",
+    "partial_succeeded",
+    "unknown",
+]
+ExecutionCorrelationState = Literal[
+    "exact",
+    "uncorrelated",
+    "ambiguous",
+    "unsupported",
+]
+IncidentStatus = Literal["open", "acknowledged", "resolved"]
+RepairProposalStatus = Literal[
+    "draft_build",
+    "candidate_ready",
+    "scenario_ready",
+    "in_review",
+    "released",
+    "closed",
+]
+
+
+class ExecutionNodeSummary(StrictModel):
+    node_id: str | None = Field(default=None, max_length=128)
+    predecessor_node_id: str | None = Field(default=None, max_length=128)
+    node_type: str | None = Field(default=None, max_length=128)
+    title: str | None = Field(default=None, max_length=256)
+    status: str = Field(min_length=1, max_length=64)
+    stable_error_code: str | None = Field(default=None, max_length=128)
+    elapsed_ms: int | None = Field(default=None, ge=0)
+
+
+class ExecutionObservationRecord(StrictModel):
+    id: str
+    project_id: str
+    logical_app_id: str
+    environment_id: str
+    artifact_id: str | None = None
+    release_record_id: str | None = None
+    dify_app_id: str = Field(min_length=1, max_length=512)
+    dify_execution_id: str = Field(min_length=1, max_length=256)
+    dify_workflow_version: str = Field(default="", max_length=256)
+    status: ObservedRunStatus
+    correlation_state: ExecutionCorrelationState
+    correlation_reason: str = Field(min_length=1, max_length=1_000)
+    failed_node_id: str | None = Field(default=None, max_length=128)
+    failed_node_type: str | None = Field(default=None, max_length=128)
+    stable_error_code: str | None = Field(default=None, max_length=128)
+    safe_message: str | None = Field(default=None, max_length=1_000)
+    latency_ms: int | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
+    estimated_cost_microusd: int | None = Field(default=None, ge=0)
+    total_steps: int | None = Field(default=None, ge=0)
+    input_shape: dict[str, str] = Field(default_factory=dict)
+    output_shape: dict[str, str] = Field(default_factory=dict)
+    node_path: list[ExecutionNodeSummary] = Field(default_factory=list, max_length=500)
+    evidence_hash: str = Field(min_length=64, max_length=64)
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    observed_at: datetime
+    updated_at: datetime
+
+
+class RunIncident(StrictModel):
+    id: str
+    project_id: str
+    execution_id: str
+    cluster_key: str = Field(min_length=1, max_length=256)
+    title: str = Field(min_length=1, max_length=256)
+    severity: Literal["info", "warning", "critical"]
+    status: IncidentStatus
+    stable_error_code: str = Field(min_length=1, max_length=128)
+    affected_node_id: str | None = Field(default=None, max_length=128)
+    affected_node_title: str | None = Field(default=None, max_length=256)
+    business_cause: str = Field(min_length=1, max_length=2_000)
+    next_step: str = Field(min_length=1, max_length=2_000)
+    first_seen_at: datetime
+    last_seen_at: datetime
+    version: int = Field(ge=1)
+
+
+class RepairProposal(StrictModel):
+    id: str
+    project_id: str
+    incident_id: str
+    execution_id: str
+    source_artifact_id: str | None = None
+    source_release_record_id: str | None = None
+    build_id: str
+    change_request_id: str | None = None
+    title: str = Field(min_length=1, max_length=256)
+    business_summary: str = Field(min_length=1, max_length=4_000)
+    evidence: dict[str, Any]
+    evidence_hash: str = Field(min_length=64, max_length=64)
+    status: RepairProposalStatus
+    created_by: str
+    version: int = Field(ge=1)
+    created_at: datetime
+    updated_at: datetime
+
+
+class RunCenterTrendPoint(StrictModel):
+    bucket: str = Field(min_length=1, max_length=64)
+    succeeded: int = Field(ge=0)
+    failed: int = Field(ge=0)
+    other: int = Field(ge=0)
+
+
+class RunCenterErrorCluster(StrictModel):
+    key: str = Field(min_length=1, max_length=256)
+    stable_error_code: str = Field(min_length=1, max_length=128)
+    failed_node_id: str | None = Field(default=None, max_length=128)
+    count: int = Field(ge=1)
+    latest_at: datetime
+
+
+class RunCenterPathMetric(StrictModel):
+    node_id: str | None = Field(default=None, max_length=128)
+    title: str = Field(min_length=1, max_length=256)
+    executions: int = Field(ge=1)
+    average_latency_ms: int | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
+    estimated_cost_microusd: int | None = Field(default=None, ge=0)
+
+
+class RunCenterView(StrictModel):
+    project: Project
+    membership: Membership
+    logical_apps: list[LogicalApp] = Field(default_factory=list)
+    environments: list[ReleaseEnvironment] = Field(default_factory=list)
+    executions: list[ExecutionObservationRecord] = Field(default_factory=list)
+    incidents: list[RunIncident] = Field(default_factory=list)
+    repairs: list[RepairProposal] = Field(default_factory=list)
+    trend: list[RunCenterTrendPoint] = Field(default_factory=list)
+    release_overlays: list[dict[str, Any]] = Field(default_factory=list)
+    regressions: list[dict[str, Any]] = Field(default_factory=list)
+    error_clusters: list[RunCenterErrorCluster] = Field(default_factory=list)
+    slow_paths: list[RunCenterPathMetric] = Field(default_factory=list)
+    costly_paths: list[RunCenterPathMetric] = Field(default_factory=list)
+    missing_evidence: list[str] = Field(default_factory=list)
+    can_refresh: bool = False
+    can_create_repair: bool = False
+    state: Literal["ready", "empty", "partial_error", "permission_denied", "offline"]
+    message: str
+    generated_at: datetime = Field(default_factory=utc_now)
+
+
+class RunIncidentDetail(StrictModel):
+    incident: RunIncident
+    execution: ExecutionObservationRecord
+    artifact_summary: dict[str, Any] | None = None
+    release_summary: dict[str, Any] | None = None
+    release_diff: list[dict[str, Any]] = Field(default_factory=list)
+    scenario_coverage: dict[str, Any] = Field(default_factory=dict)
+    affected_path: list[dict[str, Any]] = Field(default_factory=list)
+    known_error: dict[str, Any]
+    repair: RepairProposal | None = None
+    can_create_repair: bool = False
+
+
+class ExecutionRefreshResult(StrictModel):
+    environments_scanned: int = Field(ge=0)
+    executions_observed: int = Field(ge=0)
+    incidents_opened: int = Field(ge=0)
+    uncorrelated: int = Field(ge=0)
+    errors: list[dict[str, str]] = Field(default_factory=list)
+
+
+class RunAlertRule(StrictModel):
+    id: str
+    project_id: str
+    name: str = Field(min_length=1, max_length=256)
+    environment_id: str | None = Field(default=None, max_length=128)
+    stable_error_code: str | None = Field(default=None, max_length=128)
+    error_count_threshold: int = Field(ge=1, le=10_000)
+    failure_rate_threshold: float | None = Field(default=None, ge=0, le=1)
+    window_seconds: int = Field(ge=60, le=2_592_000)
+    adapter_ref: str = Field(min_length=1, max_length=256)
+    enabled: bool = True
+    created_by: str
+    version: int = Field(ge=1)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ScheduledRegression(StrictModel):
+    id: str
+    project_id: str
+    artifact_id: str
+    suite_id: str
+    interval_seconds: int = Field(ge=900, le=2_592_000)
+    next_run_at: datetime
+    enabled: bool = True
+    created_by: str
+    version: int = Field(ge=1)
+    created_at: datetime
+    updated_at: datetime
+
+
+class RunAutomationView(StrictModel):
+    alert_rules: list[RunAlertRule] = Field(default_factory=list)
+    scheduled_regressions: list[ScheduledRegression] = Field(default_factory=list)
+    schedule_targets: list[dict[str, Any]] = Field(default_factory=list)
+    durable_work: list[dict[str, Any]] = Field(default_factory=list)
+    pending_notifications: int = Field(ge=0)
+    dead_letters: int = Field(ge=0)
+    adapter_state: Literal["configured", "missing", "disabled"]
+    message: str
+    can_configure: bool = False
+
+
+ScopedTokenScope = Literal[
+    "search:read",
+    "inspect:read",
+    "change_request:write",
+    "proposal:write",
+    "scenario:run",
+    "scenario:read",
+    "review:read",
+    "release:preview",
+]
+
+
+class ScopedTokenRecord(StrictModel):
+    id: str
+    project_id: str
+    name: str = Field(min_length=1, max_length=256)
+    token_prefix: str = Field(min_length=8, max_length=32)
+    scopes: list[ScopedTokenScope] = Field(min_length=1, max_length=8)
+    created_by: str
+    rate_limit_per_minute: int = Field(ge=1, le=1_000)
+    expires_at: datetime
+    revoked_at: datetime | None = None
+    rotated_from_id: str | None = None
+    last_used_at: datetime | None = None
+    version: int = Field(ge=1)
+    created_at: datetime
+
+
+class ScopedTokenIssued(StrictModel):
+    token: str = Field(min_length=40, max_length=512)
+    record: ScopedTokenRecord

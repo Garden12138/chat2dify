@@ -6,6 +6,7 @@ from dataclasses import asdict, replace
 import json
 from pathlib import Path
 import re
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -120,6 +121,20 @@ from app.studio.build import StudioBuildService
 from app.studio.blueprints import StudioBlueprintService
 from app.studio.identity import DifyHostVerifier, StudioIdentityService
 from app.studio.preview import preview_adapter_from_settings
+from app.studio.releases import StudioReleaseService
+from app.studio.reviews import StudioReviewService
+from app.studio.runs import StudioRunService
+from app.studio.automation import StudioRunAutomationService
+from app.studio.jobs import (
+    StudioDurableWorker,
+    StudioWorkerLoop,
+    build_agent_run_handler,
+    local_audit_notification,
+    release_execute_handler,
+    scheduled_regression_handler,
+    scenario_run_handler,
+)
+from app.studio.mcp import StudioMcpService, StudioScopedTokenService
 from app.studio.scenarios import StudioScenarioService
 from app.studio.service import StudioApplicationService
 from app.studio.store import StudioStore
@@ -146,8 +161,14 @@ async def lifespan(application: FastAPI):
     application.state.agent_registry = None
     application.state.studio_store = None
     application.state.studio_service = None
+    application.state.studio_workers = []
     agent_service = None
     agent_store = None
+    commit_service = None
+    workflow_snapshot_service = None
+    compiler = None
+    catalog = None
+    client_factory = None
     if settings.agent_v4_enabled:
         agent_store = AgentStore(settings.task_db_path)
         agent_store.interrupt_active_runs()
@@ -293,14 +314,94 @@ async def lifespan(application: FastAPI):
     if settings.ai_studio_v5_enabled:
         studio_store = StudioStore(settings.studio_database_url)
         studio_store.interrupt_active_scenario_runs()
+        studio_store.interrupt_active_release_records()
         studio_build_service = (
             StudioBuildService(
                 store=studio_store,
                 agent_store=agent_store,
                 agent_service=agent_service,
+                durable_jobs=True,
             )
             if agent_store is not None and agent_service is not None
             else None
+        )
+        studio_scenario_service = (
+            StudioScenarioService(
+                store=studio_store,
+                build_service=studio_build_service,
+                agent_store=agent_store,
+                compiler=compiler,
+                catalog=catalog,
+                preview=preview_adapter_from_settings(settings),
+                background_workers=0,
+                durable_jobs=True,
+            )
+            if (
+                agent_store is not None
+                and studio_build_service is not None
+                and compiler is not None
+                and catalog is not None
+            )
+            else None
+        )
+        studio_review_service = (
+            StudioReviewService(
+                store=studio_store,
+                build_service=studio_build_service,
+                scenario_service=studio_scenario_service,
+                agent_store=agent_store,
+            )
+            if (
+                agent_store is not None
+                and studio_build_service is not None
+                and studio_scenario_service is not None
+            )
+            else None
+        )
+        studio_release_service = (
+            StudioReleaseService(
+                store=studio_store,
+                reviews=studio_review_service,
+                snapshot=workflow_snapshot_service,
+                safe_writer=commit_service.safe_writer,
+                client_factory=client_factory,
+                durable_jobs=True,
+            )
+            if (
+                studio_review_service is not None
+                and workflow_snapshot_service is not None
+                and commit_service is not None
+                and client_factory is not None
+            )
+            else None
+        )
+        studio_run_service = (
+            StudioRunService(
+                store=studio_store,
+                build_service=studio_build_service,
+                agent_store=agent_store,
+                client_factory=client_factory,
+            )
+            if (
+                studio_release_service is not None
+                and studio_build_service is not None
+                and agent_store is not None
+                and client_factory is not None
+            )
+            else None
+        )
+        studio_automation_service = StudioRunAutomationService(
+            store=studio_store,
+            available_adapter_refs={"audit:local"},
+        )
+        studio_token_service = StudioScopedTokenService(store=studio_store)
+        studio_mcp_service = StudioMcpService(
+            store=studio_store,
+            runs=studio_run_service,
+            builds=studio_build_service,
+            scenarios=studio_scenario_service,
+            reviews=studio_review_service,
+            releases=studio_release_service,
         )
         studio_service = StudioApplicationService(
             identity=StudioIdentityService(
@@ -332,28 +433,64 @@ async def lifespan(application: FastAPI):
                 )
                 else None
             ),
-            scenarios=(
-                StudioScenarioService(
-                    store=studio_store,
-                    build_service=studio_build_service,
-                    agent_store=agent_store,
-                    compiler=compiler,
-                    catalog=catalog,
-                    preview=preview_adapter_from_settings(settings),
-                    background_workers=settings.task_workers,
-                )
-                if (
-                    agent_store is not None
-                    and studio_build_service is not None
-                )
-                else None
-            ),
+            scenarios=studio_scenario_service,
+            reviews=studio_review_service,
+            releases=studio_release_service,
+            runs=studio_run_service,
+            automation=studio_automation_service,
+            tokens=studio_token_service,
+            mcp=studio_mcp_service,
         )
         application.state.studio_store = studio_store
         application.state.studio_service = studio_service
+        studio_worker_count = (
+            1 if studio_store.dialect == "sqlite" else settings.task_workers
+        )
+        studio_job_handlers = (
+            {
+                "build.agent_run": build_agent_run_handler(
+                    agent_service=agent_service,
+                ),
+                "release.execute": release_execute_handler(
+                    store=studio_store,
+                    release_service=studio_release_service,
+                ),
+                "scenario.run": scenario_run_handler(
+                    store=studio_store,
+                    scenario_service=studio_scenario_service,
+                ),
+                "scenario.scheduled_regression": scheduled_regression_handler(
+                    store=studio_store,
+                    scenario_service=studio_scenario_service,
+                )
+            }
+            if (
+                studio_scenario_service is not None
+                and studio_release_service is not None
+                and agent_service is not None
+            )
+            else {}
+        )
+        application.state.studio_workers = [
+            StudioWorkerLoop(
+                worker=StudioDurableWorker(
+                    store=studio_store,
+                    worker_id=f"app-{uuid4()}",
+                    job_handlers=studio_job_handlers,
+                    notification_adapters={
+                        "audit:local": local_audit_notification,
+                    },
+                )
+            )
+            for _ in range(max(1, studio_worker_count))
+        ]
+        for worker_loop in application.state.studio_workers:
+            worker_loop.start()
     try:
         yield
     finally:
+        for worker_loop in application.state.studio_workers:
+            worker_loop.close()
         if application.state.studio_service is not None:
             application.state.studio_service.close()
         if agent_service is not None:

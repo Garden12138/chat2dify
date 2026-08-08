@@ -137,6 +137,7 @@ class StudioScenarioService:
         catalog: NodeCapabilityCatalog,
         preview: PreviewExecutionAdapter,
         background_workers: int = 0,
+        durable_jobs: bool = False,
     ) -> None:
         self.store = store
         self.build_service = build_service
@@ -144,6 +145,7 @@ class StudioScenarioService:
         self.compiler = compiler
         self.catalog = catalog
         self.preview = preview
+        self.durable_jobs = durable_jobs
         self._executor = (
             ThreadPoolExecutor(
                 max_workers=max(1, background_workers),
@@ -584,10 +586,93 @@ class StudioScenarioService:
             environment,
             sorted(required_effects),
         )
+        if self.durable_jobs:
+            self.store.enqueue_job(
+                project_id=project_id,
+                principal_key=authenticated.principal.key,
+                kind="scenario.run",
+                payload={
+                    "scenario_run_id": run.id,
+                    "authorized_by": authenticated.principal.key,
+                    "candidate_versions": {
+                        candidate.id: head_id
+                        for candidate, head_id, _plan in candidate_plans
+                    },
+                    "production_write": False,
+                },
+                idempotency_key=f"scenario-run:{run.id}",
+                max_attempts=3,
+            )
+            return run
         if self._executor is not None:
             self._executor.submit(self._execute_created_run, *execution)
             return run
         return self._execute_created_run(*execution)
+
+    def execute_durable_run(
+        self,
+        authenticated: AuthenticatedStudioRequest,
+        *,
+        project_id: str,
+        run_id: str,
+        candidate_versions: dict[str, str],
+    ) -> ScenarioRun:
+        self._require_builder(authenticated, project_id)
+        run = self.store.get_scenario_run(
+            run_id,
+            project_id=project_id,
+            principal_key=authenticated.principal.key,
+        )
+        if run.status not in {"pending", "interrupted"}:
+            return run
+        suite = self.store.get_scenario_suite(
+            run.suite_id,
+            project_id=project_id,
+            principal_key=authenticated.principal.key,
+        )
+        environment = self.store.get_preview_environment(
+            run.environment_id,
+            project_id=project_id,
+            principal_key=authenticated.principal.key,
+        )
+        mappings = _validate_mappings(run.mappings)
+        candidate_plans: list[tuple[StudioCandidate, str, WorkflowPlan]] = []
+        effects: set[PreviewSideEffect] = set()
+        if set(candidate_versions) != set(run.candidate_ids):
+            raise ScenarioStaleEvidence(
+                "The durable Scenario job is not bound to every selected Candidate version."
+            )
+        for candidate_id in run.candidate_ids:
+            candidate = self.store.get_candidate(
+                candidate_id,
+                build_id=run.build_id,
+                project_id=project_id,
+                principal_key=authenticated.principal.key,
+            )
+            version_id = candidate_versions[candidate_id]
+            version = self.agent_store.get_workspace_version(version_id)
+            if version.run_id != candidate.run_id:
+                raise ScenarioStaleEvidence(
+                    "A durable Scenario Candidate version belongs to another Run."
+                )
+            plan = WorkflowPlan.model_validate(version.snapshot)
+            _assert_secret_free(plan.model_dump(mode="json"))
+            _require_and_apply_mapping(plan, mappings)
+            effects.update(_plan_side_effects(plan, self.catalog))
+            candidate_plans.append((candidate, version.id, plan))
+        missing = effects - run.policy.allowed_side_effects
+        if missing or (effects and not run.policy.external_side_effects_confirmed):
+            raise ScenarioPolicyDenied(
+                "The durable Scenario policy no longer authorizes its Preview side effects."
+            )
+        return self._execute_created_run(
+            authenticated,
+            run,
+            suite,
+            candidate_plans,
+            environment,
+            sorted(effects),
+        )
 
     def _execute_created_run(
         self,
@@ -744,6 +829,155 @@ class StudioScenarioService:
     ) -> ScenarioRun:
         return self.store.get_scenario_run(
             run_id,
+            project_id=project_id,
+            principal_key=authenticated.principal.key,
+        )
+
+    def run_released_artifact(
+        self,
+        authenticated: AuthenticatedStudioRequest,
+        *,
+        project_id: str,
+        artifact_id: str,
+        suite_id: str,
+    ) -> ScenarioRun:
+        """Run an immutable released version from an explicitly authorized schedule."""
+        self._require_builder(authenticated, project_id)
+        artifact = self.store.get_workflow_artifact(
+            artifact_id,
+            project_id=project_id,
+            principal_key=authenticated.principal.key,
+        )
+        published = self.store.list_release_records(
+            project_id=project_id,
+            principal_key=authenticated.principal.key,
+        )
+        if not any(
+            item.artifact_id == artifact.id
+            and item.action == "publish"
+            and item.outcome == "succeeded"
+            for item in published
+        ):
+            raise ScenarioPolicyDenied(
+                "Scheduled regression requires an explicitly published Artifact."
+            )
+        suite = self.store.get_scenario_suite(
+            suite_id,
+            project_id=project_id,
+            principal_key=authenticated.principal.key,
+        )
+        source_run_id = str(
+            artifact.payload.scenario_evidence.get("scenario_run_id") or ""
+        )
+        source_run = self.store.get_scenario_run(
+            source_run_id,
+            project_id=project_id,
+            principal_key=authenticated.principal.key,
+        )
+        if (
+            source_run.suite_id != suite.id
+            or artifact.candidate_id not in source_run.candidate_ids
+            or source_run.status != "completed"
+            or not source_run.cleanup_verified
+        ):
+            raise ScenarioStaleEvidence(
+                "The released Artifact no longer has reusable cleanup-verified Scenario policy evidence."
+            )
+        environment = self.store.get_preview_environment(
+            source_run.environment_id,
+            project_id=project_id,
+            principal_key=authenticated.principal.key,
+        )
+        if not environment.enabled:
+            raise ScenarioPolicyDenied(
+                "The bound isolated Preview Environment is disabled."
+            )
+        candidate = self.store.get_candidate_for_project(
+            artifact.candidate_id,
+            project_id=project_id,
+            principal_key=authenticated.principal.key,
+        )
+        if candidate.build_id != suite.build_id:
+            raise ScenarioStaleEvidence(
+                "The released Candidate and scheduled Suite no longer share one Build."
+            )
+        version = self.agent_store.get_workspace_version(
+            artifact.candidate_workspace_version_id
+        )
+        if version.run_id != candidate.run_id:
+            raise ScenarioStaleEvidence(
+                "The released Workspace version does not belong to the Candidate."
+            )
+        plan = WorkflowPlan.model_validate(version.snapshot)
+        _assert_secret_free(plan.model_dump(mode="json"))
+        mappings = _validate_mappings(source_run.mappings)
+        _require_and_apply_mapping(plan, mappings)
+        effects = sorted(_plan_side_effects(plan, self.catalog))
+        missing_approval = set(effects) - source_run.policy.allowed_side_effects
+        if missing_approval or (
+            effects and not source_run.policy.external_side_effects_confirmed
+        ):
+            raise ScenarioPolicyDenied(
+                "The released Scenario policy does not authorize the scheduled Preview side effects."
+            )
+        if len(suite.cases) > source_run.policy.max_cases:
+            raise ScenarioBudgetExceeded(
+                "The scheduled Suite now exceeds its released policy budget."
+            )
+        now = utc_now()
+        run = ScenarioRun(
+            id=new_id(),
+            project_id=project_id,
+            build_id=suite.build_id,
+            suite_id=suite.id,
+            environment_id=environment.id,
+            candidate_ids=[candidate.id],
+            mappings=list(source_run.mappings),
+            policy=source_run.policy,
+            authorized_by=authenticated.principal.key,
+            status="pending",
+            version=1,
+            created_at=now,
+            updated_at=now,
+        )
+        run = self.store.create_scenario_run(
+            run,
+            principal_key=authenticated.principal.key,
+        )
+        return self._execute_created_run(
+            authenticated,
+            run,
+            suite,
+            [(candidate, version.id, plan)],
+            environment,
+            effects,
+        )
+
+    def candidate_plan(
+        self,
+        authenticated: AuthenticatedStudioRequest,
+        *,
+        project_id: str,
+        build_id: str,
+        candidate_id: str,
+    ) -> tuple[StudioCandidate, str, WorkflowPlan]:
+        """Expose the already-bounded Candidate reconstruction to later Studio phases."""
+        return self._candidate_plan(
+            authenticated,
+            project_id=project_id,
+            build_id=build_id,
+            candidate_id=candidate_id,
+        )
+
+    def assert_evidence_current(
+        self,
+        authenticated: AuthenticatedStudioRequest,
+        *,
+        project_id: str,
+        binding: ScenarioEvidenceBinding,
+    ) -> None:
+        self._assert_binding_current(
+            binding,
             project_id=project_id,
             principal_key=authenticated.principal.key,
         )

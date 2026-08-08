@@ -229,6 +229,10 @@ The v4 safety core remains mandatory:
   idempotency keys, and operation-specific external receipts.
 - At-least-once job delivery must not become at-least-once Dify, Git,
   notification, Preview, cleanup, Apply, or Publish writes.
+- A durable worker may deliver a previously consumed, exact human Apply or
+  Publish authorization. It must not create, approve, broaden, transfer,
+  refresh, or reuse that authorization, and ambiguous delivery is terminal
+  reconciliation rather than retry.
 - Distinguish definite failure from ambiguous external outcome.
 - An ambiguous outcome stops for reconciliation unless a verified receipt
   proves what happened.

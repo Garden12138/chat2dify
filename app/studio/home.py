@@ -221,17 +221,131 @@ class StudioHomeService:
             v4_enabled=v4_enabled,
             base_path=self.public_base_path,
         )
+        review_items = self.store.list_change_requests(
+            project_id=project.id,
+            principal_key=authenticated.principal.key,
+        )
+        assigned_reviews = [
+            {
+                "id": item.id,
+                "title": item.title,
+                "status": item.status,
+                "updated_at": item.updated_at.isoformat(),
+                "review_url": (
+                    f"{self.public_base_path.rstrip('/')}/?"
+                    + urlencode(
+                        {
+                            "studio": "releases",
+                            "change_request_id": item.id,
+                        }
+                    )
+                ),
+            }
+            for item in review_items
+            if item.assignee_key == authenticated.principal.key
+            and item.status in {"in_review", "changes_requested"}
+        ][:10]
+        release_records = self.store.list_release_records(
+            project_id=project.id,
+            principal_key=authenticated.principal.key,
+        )
+        releases = [
+            {
+                "id": item.id,
+                "action": item.action,
+                "outcome": item.outcome,
+                "artifact_id": item.artifact_id,
+                "environment_id": item.environment_id,
+                "created_at": item.created_at.isoformat(),
+                "release_url": (
+                    f"{self.public_base_path.rstrip('/')}/?"
+                    + urlencode(
+                        {
+                            "studio": "releases",
+                            "change_request_id": item.change_request_id,
+                        }
+                    )
+                ),
+            }
+            for item in release_records[:10]
+        ]
+        incident_records = self.store.list_run_incidents(
+            project_id=project.id,
+            principal_key=authenticated.principal.key,
+        )
+        incidents = [
+            {
+                "id": item.id,
+                "title": item.title,
+                "severity": item.severity,
+                "status": item.status,
+                "stable_error_code": item.stable_error_code,
+                "last_seen_at": item.last_seen_at.isoformat(),
+                "incident_url": (
+                    f"{self.public_base_path.rstrip('/')}/?"
+                    + urlencode(
+                        {
+                            "studio": "runs",
+                            "incident_id": item.id,
+                        }
+                    )
+                ),
+            }
+            for item in incident_records
+            if item.status != "resolved"
+        ][:10]
+        execution_records = self.store.list_execution_observations(
+            project_id=project.id,
+            principal_key=authenticated.principal.key,
+        )
+        regression_counts: dict[str, dict[str, int]] = {}
+        for item in execution_records:
+            if not item.artifact_id or item.correlation_state != "exact":
+                continue
+            summary = regression_counts.setdefault(
+                item.artifact_id,
+                {"executions": 0, "failures": 0},
+            )
+            summary["executions"] += 1
+            summary["failures"] += int(
+                item.status in {"failed", "partial_succeeded"}
+            )
+        quality_regressions = [
+            {
+                "artifact_id": artifact_id,
+                "executions": summary["executions"],
+                "failures": summary["failures"],
+                "failure_rate": round(
+                    summary["failures"] / summary["executions"],
+                    4,
+                ),
+                "run_center_url": (
+                    f"{self.public_base_path.rstrip('/')}/?"
+                    + urlencode({"studio": "runs"})
+                ),
+            }
+            for artifact_id, summary in sorted(regression_counts.items())
+            if summary["failures"]
+        ][:10]
         states = _home_states(
             apps_available=authenticated.host.apps_available,
             app_count=len(apps),
             work_count=len(work),
             v4_available=self.v4_reader.available(),
+            review_count=len(assigned_reviews),
+            release_count=len(releases),
+            incident_count=len(incidents),
+            regression_count=len(quality_regressions),
         )
         return StudioHome(
             project=project,
             membership=membership,
             apps=apps,
             work=work,
+            assigned_reviews=assigned_reviews,
+            releases=releases,
+            quality_regressions=quality_regressions,
+            incidents=incidents,
             states=states,
         )
 
@@ -338,6 +452,10 @@ def _home_states(
     app_count: int,
     work_count: int,
     v4_available: bool,
+    review_count: int,
+    release_count: int,
+    incident_count: int,
+    regression_count: int,
 ) -> dict[str, HomeSectionState]:
     if apps_available:
         apps = HomeSectionState(
@@ -376,10 +494,38 @@ def _home_states(
         "apps": apps,
         "work": work,
         "drafts": not_started,
-        "assigned_reviews": not_started,
-        "releases": not_started,
-        "quality_regressions": not_started,
-        "incidents": not_started,
+        "assigned_reviews": HomeSectionState(
+            state="ready" if review_count else "empty",
+            message=(
+                f"有 {review_count} 项评审等待当前用户处理。"
+                if review_count
+                else "当前没有分配给你的待处理评审。"
+            ),
+        ),
+        "releases": HomeSectionState(
+            state="ready" if release_count else "empty",
+            message=(
+                f"已加载 {release_count} 条真实 Release 记录。"
+                if release_count
+                else "当前没有 Release 回执。"
+            ),
+        ),
+        "quality_regressions": HomeSectionState(
+            state="ready" if regression_count else "empty",
+            message=(
+                f"有 {regression_count} 个精确关联发布版本的生产质量回归。"
+                if regression_count
+                else "当前没有精确关联的生产质量回归。"
+            ),
+        ),
+        "incidents": HomeSectionState(
+            state="ready" if incident_count else "empty",
+            message=(
+                f"有 {incident_count} 个基于脱敏生产证据的开放事件。"
+                if incident_count
+                else "当前没有开放的运行事件。"
+            ),
+        ),
     }
 
 

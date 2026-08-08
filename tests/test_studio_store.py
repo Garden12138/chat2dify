@@ -26,7 +26,7 @@ def _principal(subject: str, tenant: str = "tenant-1") -> Principal:
     )
 
 
-def test_populated_v4_sqlite_migrates_additively_without_data_loss(
+def test_populated_v4_sqlite_migrates_additively_to_v5_without_data_loss(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "populated.sqlite3"
@@ -66,7 +66,7 @@ def test_populated_v4_sqlite_migrates_additively_without_data_loss(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }
-    assert studio.schema_version() == 4
+    assert studio.schema_version() == 7
     assert before_session == after_session
     assert before_run_count == after_run_count == 1
     assert before_tables <= after_tables
@@ -78,6 +78,13 @@ def test_populated_v4_sqlite_migrates_additively_without_data_loss(
     assert "studio_candidates" in after_tables
     assert "studio_scenario_runs" in after_tables
     assert "studio_preview_fixtures" in after_tables
+    assert "studio_workflow_artifacts" in after_tables
+    assert "studio_change_requests" in after_tables
+    assert "studio_review_events" in after_tables
+    assert "studio_release_environments" in after_tables
+    assert "studio_environment_mappings" in after_tables
+    assert "studio_release_authorizations" in after_tables
+    assert "studio_release_records" in after_tables
     assert v4.get_run(run.id).goal == "Keep me."
 
 
@@ -372,7 +379,7 @@ def test_postgresql_repository_contract() -> None:
     )
 
     assert store.dialect == "postgresql"
-    assert store.schema_version() == 1
+    assert store.schema_version() == 7
     assert membership.role == "owner"
     assert job.project_id == project.id
     assert completed.status == "completed"
